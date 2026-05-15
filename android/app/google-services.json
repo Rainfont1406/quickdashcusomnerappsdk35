@@ -1,0 +1,122 @@
+{
+  "project_info": {
+    "project_number": "60208840695",
+    "firebase_url": "https://quick-dash-84f6a-default-rtdb.firebaseio.com",
+    "project_id": "quick-dash-84f6a",
+    "storage_bucket": "quick-dash-84f6a.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:60208840695:android:2db53cca1ca749287f78f2",
+        "android_client_info": {
+          "package_name": "com.quickdash.customer"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "60208840695-cb7eehhqar5asm65o8bp267r9gt4r6jm.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAHvg-SFs3KbZVU8FZhwLZZzZNHeUK_PQo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "60208840695-cb7eehhqar5asm65o8bp267r9gt4r6jm.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:60208840695:android:2f720d01006023e97f78f2",
+        "android_client_info": {
+          "package_name": "com.quickdash.hadeveloper"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "60208840695-ccm4d8vkcahtg59vpn0bdqbf2vlnl8s7.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.quickdash.hadeveloper",
+            "certificate_hash": "847085a7c5586d40bdba8370dae0738cb193abd2"
+          }
+        },
+        {
+          "client_id": "60208840695-skaq8qcocemqbii5irr0u255ntebvbho.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.quickdash.hadeveloper",
+            "certificate_hash": "6dce698e60c3cf14972281cb56d63e1b8877b17b"
+          }
+        },
+        {
+          "client_id": "60208840695-cb7eehhqar5asm65o8bp267r9gt4r6jm.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAHvg-SFs3KbZVU8FZhwLZZzZNHeUK_PQo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "60208840695-cb7eehhqar5asm65o8bp267r9gt4r6jm.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:60208840695:android:18d4d1985cc800547f78f2",
+        "android_client_info": {
+          "package_name": "com.quickdashvendor.hadeveloper"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "60208840695-4dhlpl22qm1ia4n6kkl8b70l4hta976h.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.quickdashvendor.hadeveloper",
+            "certificate_hash": "847085a7c5586d40bdba8370dae0738cb193abd2"
+          }
+        },
+        {
+          "client_id": "60208840695-cb7eehhqar5asm65o8bp267r9gt4r6jm.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAHvg-SFs3KbZVU8FZhwLZZzZNHeUK_PQo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "60208840695-cb7eehhqar5asm65o8bp267r9gt4r6jm.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

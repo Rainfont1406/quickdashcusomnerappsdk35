@@ -1,0 +1,1233 @@
+================================================================================
+                    QUICKDASH CUSTOMER APP - TECHNICAL REPORT
+                         Comprehensive Implementation Guide
+================================================================================
+
+Project Name: QuickDash Customer App 
+Version: 1.0.2+2
+Platform: Flutter (iOS & Android)
+Date: Generated Report
+
+================================================================================
+1. PROJECT OVERVIEW
+================================================================================
+
+QuickDash Customer App is a comprehensive multi-service mobile application 
+built with Flutter that provides various on-demand services including:
+- Food Delivery (E-commerce)
+- Cab/Taxi Services
+- Parcel Delivery
+- Rental Services
+- On-Demand Services (Provider-based services)
+
+The app serves as a unified platform where customers can access multiple 
+service types from a single interface, with integrated payment gateways, 
+real-time tracking, and comprehensive order management.
+
+================================================================================
+2. TECHNOLOGY STACK & DEPENDENCIES
+================================================================================
+
+2.1 Core Framework:
+- Flutter SDK: >=3.4.3 <4.0.0
+- Dart Language
+- Material Design Components
+
+2.2 Backend Services:
+- Firebase Authentication (firebase_auth: ^4.19.0)
+- Cloud Firestore (cloud_firestore: ^5.4.3)
+- Firebase Realtime Database (firebase_database: ^11.1.4)
+- Firebase Storage (firebase_storage: ^12.3.2)
+- Firebase Cloud Messaging (firebase_messaging: ^15.1.3)
+- Firebase App Check (firebase_app_check: ^0.3.1+3)
+
+2.3 Location Services:
+- Geolocator Package (geolocator) - For GPS location fetching
+- Geocoding Package (geocoding: ^3.0.0) - For reverse geocoding (coordinates to address)
+- Location Package (location: ^6.0.2) - For location permission handling
+- Google Maps Flutter (google_maps_flutter: ^2.9.0) - For map display
+- Flutter Polyline Points (flutter_polyline_points: ^2.1.0) - For route calculation
+- OSM Nominatim (osm_nominatim: ^3.0.1) - Alternative geocoding service
+- Flutter OSM Plugin (flutter_osm_plugin: ^1.3.3+1) - OpenStreetMap integration
+
+2.4 Payment Gateways:
+- Stripe (flutter_stripe: ^11.1.0)
+- Razorpay (razorpay_flutter: ^1.3.7)
+- PayPal (flutter_paypal_native: ^2.1.0)
+- PayStack (custom implementation)
+- FlutterWave (custom implementation)
+- Paytm (custom implementation)
+- PayFast (custom implementation)
+- MercadoPago (custom implementation)
+- Midtrans (custom implementation)
+- Orange Money (custom implementation)
+- Xendit (custom implementation)
+- Wallet System (in-app wallet)
+
+2.5 State Management:
+- GetX (get: ^4.6.6) - State management and navigation
+- Provider (provider: ^6.1.2) - State management for cart
+
+2.6 Local Storage:
+- SharedPreferences (shared_preferences: ^2.3.2) - Key-value storage
+- Moor Flutter (moor_flutter: ^4.1.0) - Local SQLite database for cart
+
+2.7 UI/UX Libraries:
+- Easy Localization (easy_localization: ^3.0.7) - Multi-language support
+- Google Fonts (google_fonts: ^6.2.1)
+- Cached Network Image (cached_network_image: ^3.4.1)
+- Flutter SVG (flutter_svg: ^2.0.10+1)
+- Lottie (lottie: ^3.1.2) - Animations
+- Flutter Easy Loading (flutter_easyloading: ^3.0.5)
+
+2.8 Notifications:
+- Flutter Local Notifications (flutter_local_notifications: ^17.2.3)
+- Firebase Cloud Messaging
+
+2.9 Additional Features:
+- Image Picker (image_picker: ^1.1.2)
+- Video Player (video_player: ^2.9.1)
+- Video Compress (video_compress: ^3.1.3)
+- Mobile Scanner (mobile_scanner: ^5.2.3) - QR/Barcode scanning
+- Print Bluetooth Thermal (print_bluetooth_thermal: ^1.1.1) - Receipt printing
+- Share Plus (share_plus: ^10.0.2)
+- URL Launcher (url_launcher: ^6.3.0)
+- Sign in with Apple (sign_in_with_apple: ^6.1.2)
+- Google Sign In (google_sign_in: ^6.2.1)
+
+================================================================================
+3. APPLICATION ARCHITECTURE
+================================================================================
+
+3.1 Project Structure:
+lib/
+├── main.dart                    # Application entry point
+├── AppGlobal.dart              # Global app utilities
+├── constants.dart              # App-wide constants
+├── userPrefrence.dart          # User preferences handler
+├── firebase_options.dart        # Firebase configuration
+│
+├── model/                      # Data models (71 files)
+│   ├── User.dart
+│   ├── OrderModel.dart
+│   ├── VendorModel.dart
+│   ├── ProductModel.dart
+│   ├── AddressModel.dart
+│   └── [68 more model files]
+│
+├── services/                   # Core services (13 files)
+│   ├── FirebaseHelper.dart     # Firebase operations
+│   ├── helper.dart             # Utility functions
+│   ├── notification_service.dart
+│   ├── localDatabase.dart      # Local SQLite cart database
+│   └── [9 more service files]
+│
+├── ui/                         # User interface screens (77 files)
+│   ├── home/
+│   ├── auth_screen/
+│   ├── cartScreen/
+│   ├── payment/
+│   └── [73 more UI files]
+│
+├── cab_service/                 # Cab service module (11 files)
+├── ecommarce_service/          # E-commerce module (4 files)
+├── onDemand_service/           # On-demand services (18 files)
+├── parcel_delivery/            # Parcel delivery (10 files)
+├── rental_service/             # Rental services (9 files)
+├── payment/                     # Payment implementations (4 files)
+├── widget/                     # Reusable widgets (33 files)
+├── theme/                      # Theme configuration (5 files)
+├── utils/                      # Utility functions (5 files)
+└── controller/                 # Controllers (5 files)
+
+3.2 Architecture Pattern:
+- MVC (Model-View-Controller) pattern
+- Provider pattern for state management
+- Service-oriented architecture for business logic
+- Repository pattern for data access (FirebaseHelper)
+
+================================================================================
+4. CORE FEATURES & IMPLEMENTATION DETAILS
+================================================================================
+
+4.1 LOCATION SERVICES IMPLEMENTATION
+------------------------------------
+
+4.1.1 Location Fetching Algorithm:
+The app uses a multi-layered approach for location services:
+
+Primary Service: Geolocator Package
+- Location: lib/services/helper.dart
+- Function: getCurrentLocation()
+- Implementation:
+  * Checks if location services are enabled
+  * Requests location permissions (denied/deniedForever handling)
+  * Uses LocationAccuracy.high for precise coordinates
+  * Returns Position object with latitude/longitude
+
+Secondary Service: Location Package
+- Used for permission status checking
+- Provides location.hasPermission() and location.requestPermission()
+- Handles platform-specific permission dialogs
+
+4.1.2 Reverse Geocoding (Address from Coordinates):
+- Service: Geocoding Package
+- Function: placemarkFromCoordinates()
+- Implementation:
+  * Converts lat/long to human-readable address
+  * Extracts: name, subLocality, locality, administrativeArea, 
+    postalCode, country
+  * Used in: EcommerceHomeScreen, location_permission_screen, 
+    dine_in_screen, cab_service_screen
+
+4.1.3 Location Permission Handling:
+- Location: lib/constants.dart
+- Function: checkPermission()
+- Flow:
+  1. Checks current permission status
+  2. Requests permission if denied
+  3. Shows SnackBar for denied permissions
+  4. Shows PermissionDialog for permanently denied
+  5. Executes callback on successful permission
+
+4.1.4 Distance Calculation:
+- Service: Geolocator Package
+- Function: getKm() in constants.dart
+- Algorithm: Uses distanceBetween() method
+  * Calculates distance in meters
+  * Converts to kilometers
+  * Returns formatted string (2 decimal places)
+
+4.1.5 Map Integration:
+- Google Maps: Used for displaying maps, markers, and routes
+- OSM (OpenStreetMap): Alternative map provider
+- Map Type Selection: Configurable via Firebase settings
+  (selectedMapType from "DriverNearBy" document)
+
+4.1.6 Route Calculation:
+- Service: Google Maps Distance Matrix API
+- Location: lib/cab_service/cab_service_screen.dart
+- Function: getDurationDistance()
+- Implementation:
+  * Uses Google Maps API endpoint
+  * Calculates distance and duration between two points
+  * Returns JSON with distance (meters) and duration (seconds)
+
+- Alternative: OSRM (Open Source Routing Machine)
+- Function: getDurationOsmDistance()
+- Uses: http://router.project-osrm.org/route/v1/driving
+- Provides route geometry and navigation instructions
+
+4.1.7 Polyline Drawing:
+- Service: Flutter Polyline Points
+- Location: lib/ui/orderDetailsScreen/order_tracking_screen.dart
+- Function: getDirections()
+- Implementation:
+  * Gets route between origin and destination
+  * Converts polyline points to LatLng coordinates
+  * Draws route on Google Maps
+  * Updates markers for driver and destination
+
+4.1.8 Location Usage in App:
+- Home Screen: Fetches current location on init
+- Service Selection: Uses location for nearby vendor/service search
+- Order Tracking: Real-time driver location updates
+- Cab Booking: Pickup and destination location selection
+- Parcel Delivery: Sender and receiver location
+- Address Management: Saves user addresses with coordinates
+
+================================================================================
+
+4.2 PAYMENT GATEWAY IMPLEMENTATION
+-----------------------------------
+
+4.2.1 Payment Gateway Architecture:
+The app supports 11 payment gateways with a unified payment interface:
+
+4.2.2 Stripe Payment:
+- Package: flutter_stripe: ^11.1.0
+- Location: lib/ui/payment/PaymentScreen.dart, lib/ui/wallet/walletScreen.dart
+- Implementation Flow:
+  1. Creates Payment Intent via Stripe API
+  2. Uses Stripe Secret Key from Firebase settings
+  3. Calls: createStripeIntent() - creates payment intent
+  4. Calls: displayStripePaymentSheet() - shows payment UI
+  5. Handles success/failure callbacks
+  6. Updates order status on success
+
+4.2.3 Razorpay Payment:
+- Package: razorpay_flutter: ^1.3.7
+- Location: lib/services/rozorpayConroller.dart
+- Implementation Flow:
+  1. Creates Razorpay order via backend API
+  2. Opens Razorpay checkout with order details
+  3. Handles callbacks:
+     - _handlePaymentSuccess()
+     - _handlePaymentError()
+     - _handleExternalWaller()
+  4. Supports external wallets (Paytm, etc.)
+
+4.2.4 PayPal Payment:
+- Package: flutter_paypal_native: ^2.1.0
+- Location: lib/services/paypalclientToken.dart
+- Implementation:
+  * Gets PayPal client token from Firebase
+  * Initializes PayPal SDK
+  * Processes payment via PayPal native SDK
+  * Handles currency conversion
+
+4.2.5 PayStack Payment:
+- Location: lib/services/paystack_url_genrater.dart
+- Implementation:
+  * Generates PayStack payment URL
+  * Opens web view for payment
+  * Verifies payment callback
+  * Updates order status
+
+4.2.6 FlutterWave Payment:
+- Location: lib/ui/payment/PaymentScreen.dart
+- Implementation:
+  * Uses FlutterWave API
+  * Generates payment link
+  * Processes payment via web view
+  * Handles callback verification
+
+4.2.7 Paytm Payment:
+- Location: lib/ui/payment/PaymentScreen.dart
+- Implementation:
+  * Generates Paytm checksum
+  * Opens Paytm app or web view
+  * Verifies payment via callback URL
+  * Updates transaction status
+
+4.2.8 Other Payment Gateways:
+- PayFast: Custom implementation
+- MercadoPago: Custom implementation
+- Midtrans: Custom implementation
+- Orange Money: Custom implementation
+- Xendit: Custom implementation
+
+4.2.9 Wallet System:
+- Location: lib/ui/wallet/walletScreen.dart
+- Implementation:
+  * In-app wallet balance management
+  * Top-up functionality via all payment gateways
+  * Transaction history tracking
+  * Wallet payment for orders
+  * Automatic deduction on order placement
+
+4.2.10 Payment Flow:
+1. User selects payment method
+2. App validates payment gateway availability
+3. Creates payment intent/order
+4. Opens payment gateway UI
+5. Processes payment
+6. Verifies payment status
+7. Updates order with payment details
+8. Sends confirmation notification
+
+4.2.11 Payment Settings:
+- Stored in Firebase Firestore
+- Collections: stripeSettings, razorpaySettings, paypalSettings, etc.
+- Fetched on app initialization
+- Supports multiple currencies
+
+================================================================================
+
+4.3 PUSH NOTIFICATION SYSTEM
+-----------------------------
+
+4.3.1 Notification Architecture:
+- Primary: Firebase Cloud Messaging (FCM)
+- Local: Flutter Local Notifications
+
+4.3.2 Notification Service:
+- Location: lib/services/notification_service.dart
+- Class: NotificationService
+
+4.3.3 Implementation Details:
+
+4.3.3.1 Initialization:
+- Function: initInfo()
+- Steps:
+  1. Requests notification permissions
+  2. Initializes FlutterLocalNotificationsPlugin
+  3. Sets up Android and iOS notification channels
+  4. Configures foreground notification presentation
+  5. Sets up message handlers
+
+4.3.3.2 FCM Token Management:
+- Function: getToken()
+- Implementation:
+  * Gets FCM token from FirebaseMessaging.instance
+  * Stores token in user profile
+  * Updates token on app launch
+  * Used for targeted notifications
+
+4.3.3.3 Notification Types:
+The app handles multiple notification types:
+- vendor_order: E-commerce order updates
+- cab_order: Cab booking updates
+- parcel_order: Parcel delivery updates
+- rental_order: Rental service updates
+- provider_order: On-demand service updates
+- vendor_chat: Chat messages from vendors
+- cab_parcel_chat: Chat messages for cab/parcel
+- provider_chat: Chat messages from providers
+- dine_in: Table booking updates
+
+4.3.3.4 Notification Handling:
+- onMessage: Handles foreground notifications
+  * Displays local notification
+  * Shows notification banner
+  * Updates app badge
+
+- onMessageOpenedApp: Handles notification tap
+  * Extracts notification data
+  * Navigates to relevant screen based on type
+  * Opens order details, chat, or booking screen
+
+- Background Messages: Handled via firebaseMessageBackgroundHandle()
+
+4.3.3.5 Sending Notifications:
+- Location: lib/send_notification.dart
+- Function: sendFcmMessage()
+- Implementation:
+  1. Gets access token from Google OAuth
+  2. Fetches notification template from Firebase
+  3. Sends POST request to FCM API
+  4. Includes notification title, body, and data payload
+  5. Returns success/failure status
+
+4.3.3.6 Notification Templates:
+- Stored in Firebase: dynamic_notification collection
+- Contains: subject, message, type
+- Supports multiple languages
+- Customizable per notification type
+
+4.3.3.7 Notification Topics:
+- Subscribes to: "eMart_customer" topic
+- Enables broadcast notifications
+- Used for promotional messages
+
+================================================================================
+
+4.4 ORDER MANAGEMENT SYSTEM
+----------------------------
+
+4.4.1 Order Types:
+1. Vendor Orders (E-commerce/Food Delivery)
+2. Cab Orders (Taxi/Ride Booking)
+3. Parcel Orders (Package Delivery)
+4. Rental Orders (Vehicle Rental)
+5. Provider Orders (On-Demand Services)
+6. Table Bookings (Dine-In)
+
+4.4.2 Order Placement Flow:
+
+4.4.2.1 E-commerce Order:
+- Location: lib/ui/placeOrderScreen/PlaceOrderScreen.dart
+- Flow:
+  1. User adds products to cart (local SQLite)
+  2. Proceeds to checkout
+  3. Selects delivery address
+  4. Applies coupon (if any)
+  5. Selects payment method
+  6. Processes payment
+  7. Creates OrderModel
+  8. Saves to Firestore: vendor_orders collection
+  9. Clears local cart
+  10. Sends notification to vendor
+  11. Sends order confirmation email
+  12. Navigates to order details
+
+4.4.2.2 Cab Order:
+- Location: lib/services/FirebaseHelper.dart
+- Function: cabOrderPlace()
+- Flow:
+  1. User selects pickup and destination
+  2. Selects vehicle type
+  3. Calculates fare
+  4. Selects payment method
+  5. Creates CabOrderModel
+  6. Saves to Firestore: rides collection
+  7. Updates user's inProgressOrderID
+  8. Sends notification to nearby drivers
+  9. Real-time order status updates
+
+4.4.2.3 Parcel Order:
+- Location: lib/services/FirebaseHelper.dart
+- Function: parcelOrderPlace()
+- Flow:
+  1. User enters sender/receiver details
+  2. Selects parcel category and weight
+  3. Calculates delivery charges
+  4. Selects payment method
+  5. Creates ParcelOrderModel
+  6. Saves to Firestore: parcel_orders collection
+  7. If wallet payment: Deducts from wallet
+  8. Sends notification to drivers
+
+4.4.2.4 Rental Order:
+- Location: lib/services/FirebaseHelper.dart
+- Function: rentalOrderPlace()
+- Flow:
+  1. User selects vehicle type
+  2. Selects rental duration
+  3. Calculates total amount
+  4. Selects payment method
+  5. Creates RentalOrderModel
+  6. Saves to Firestore: rental_orders collection
+  7. If wallet payment: Deducts from wallet
+  8. Sends confirmation notification
+
+4.4.3 Order Status Management:
+Order statuses are tracked in real-time:
+- Order Placed
+- Order Accepted
+- Driver Pending
+- Driver Accepted
+- Driver Rejected
+- Order Shipped
+- In Transit
+- Reached Destination
+- Order Completed
+- Order Cancelled
+- Order Rejected
+
+4.4.4 Order Tracking:
+- Location: lib/ui/orderDetailsScreen/order_tracking_screen.dart
+- Features:
+  * Real-time driver location on map
+  * Route visualization with polyline
+  * Estimated arrival time
+  * Order status updates
+  * Driver contact information
+  * SOS button for emergencies
+
+4.4.5 Order History:
+- Location: lib/ui/ordersScreen/OrdersScreen.dart
+- Features:
+  * Lists all past orders
+  * Filters by order type
+  * Order details view
+  * Reorder functionality
+  * Rating and review
+
+================================================================================
+
+4.5 CART MANAGEMENT SYSTEM
+---------------------------
+
+4.5.1 Local Database:
+- Technology: Moor Flutter (SQLite)
+- Location: lib/services/localDatabase.dart
+- Table: CartProducts
+
+4.5.2 Cart Schema:
+- id: Product ID (Primary Key)
+- name: Product name
+- photo: Product image URL
+- price: Product price
+- discountPrice: Discounted price
+- vendorID: Vendor ID
+- quantity: Item quantity
+- extras_price: Add-ons price
+- extras: Add-ons details (JSON)
+- variant_info: Product variant (JSON)
+
+4.5.3 Cart Operations:
+- addProduct(): Adds product to cart
+  * Checks for existing product
+  * Validates vendor (single vendor per cart)
+  * Increments quantity if exists
+  * Adds add-ons and variants
+  * Calculates total price
+
+- updateProduct(): Updates cart item
+- deleteProduct(): Removes item from cart
+- deleteAllProducts(): Clears entire cart
+- getAllCartProducts(): Retrieves all items
+
+4.5.4 Cart Validation:
+- Single vendor restriction: Cannot add products from different vendors
+- Quantity validation: Minimum 1, maximum based on stock
+- Price calculation: Includes base price, add-ons, variants
+
+4.5.5 Cart State Management:
+- Uses Provider pattern
+- CartDatabase instance shared across app
+- Real-time cart count updates
+- Persists across app restarts
+
+================================================================================
+
+4.6 AUTHENTICATION SYSTEM
+-------------------------
+
+4.6.1 Authentication Methods:
+1. Phone Number Authentication (OTP)
+2. Email/Password Authentication
+3. Google Sign-In
+4. Apple Sign-In
+
+4.6.2 Phone Authentication:
+- Location: lib/ui/auth_screen/phone_number_screen.dart
+- Flow:
+  1. User enters phone number
+  2. Verifies phone format
+  3. Sends OTP via Firebase Auth
+  4. User enters OTP
+  5. Verifies OTP
+  6. Creates/updates user profile
+  7. Stores user data in Firestore
+
+4.6.3 Email/Password Authentication:
+- Location: lib/ui/auth_screen/login_screen.dart
+- Flow:
+  1. User enters email and password
+  2. Validates credentials
+  3. Signs in via Firebase Auth
+  4. Fetches user profile from Firestore
+  5. Updates FCM token
+  6. Navigates to home
+
+4.6.4 Social Authentication:
+- Google Sign-In: Uses google_sign_in package
+- Apple Sign-In: Uses sign_in_with_apple package
+- Flow:
+  1. User taps social login button
+  2. Opens native sign-in flow
+  3. Gets authentication token
+  4. Creates Firebase user
+  5. Stores user profile in Firestore
+
+4.6.5 User Profile Management:
+- Location: lib/model/User.dart
+- Fields:
+  * userID, email, firstName, lastName
+  * phoneNumber, profilePictureURL
+  * shippingAddress (list of addresses)
+  * fcmToken, role, active status
+  * walletAmount, referralCode
+  * inProgressOrderID
+
+4.6.6 Session Management:
+- Checks Firebase Auth current user
+- Validates user in Firestore
+- Handles inactive users
+- Manages logout flow
+
+================================================================================
+
+4.7 FIREBASE INTEGRATION
+-------------------------
+
+4.7.1 Firebase Services Used:
+1. Authentication
+2. Cloud Firestore (Database)
+3. Realtime Database
+4. Storage (File uploads)
+5. Cloud Messaging (Notifications)
+6. App Check (Security)
+
+4.7.2 Firestore Collections:
+- users: User profiles
+- vendor_orders: E-commerce orders
+- rides: Cab orders
+- parcel_orders: Parcel orders
+- rental_orders: Rental orders
+- provider_orders: On-demand orders
+- vendors: Vendor/restaurant data
+- vendor_products: Product catalog
+- vendor_categories: Categories
+- sections: App sections
+- settings: App configuration
+- coupons: Discount coupons
+- brands: Product brands
+- banners: Home page banners
+- story: Stories/feeds
+- referral: Referral system
+- wallet: Wallet transactions
+- complaints: User complaints
+- SOS: Emergency requests
+
+4.7.3 Firebase Helper:
+- Location: lib/services/FirebaseHelper.dart
+- Class: FireStoreUtils
+- Functions:
+  * User CRUD operations
+  * Order placement and retrieval
+  * Vendor/product queries
+  * Real-time listeners
+  * File uploads to Storage
+  * Payment gateway settings
+  * Notification content
+
+4.7.4 Real-time Updates:
+- Uses StreamBuilder for real-time data
+- Listens to order status changes
+- Updates driver location in real-time
+- Syncs cart across devices (if needed)
+
+4.7.5 File Storage:
+- Location: Firebase Storage
+- Used for:
+  * User profile pictures
+  * Product images
+  * Vendor images
+  * Chat media (images/videos)
+  * Document uploads
+
+================================================================================
+
+4.8 MULTI-LANGUAGE SUPPORT
+---------------------------
+
+4.8.1 Localization:
+- Package: easy_localization: ^3.0.7
+- Location: assets/translations/
+
+4.8.2 Supported Languages:
+- English (en.json) - Default
+- Arabic (ar.json)
+- French (fr.json)
+- Italian (it.json)
+- Dutch (nl.json)
+- Russian (rus.json)
+
+4.8.3 Implementation:
+- Language files stored as JSON
+- Uses .tr() extension for translations
+- Language selection screen
+- Persists language preference
+- Updates UI dynamically on language change
+
+4.8.4 Usage:
+- Text("Hello".tr()) - Translates text
+- context.setLocale(Locale('en')) - Changes language
+- Language stored in SharedPreferences
+
+================================================================================
+
+4.9 MAPS & NAVIGATION
+---------------------
+
+4.9.1 Google Maps Integration:
+- Package: google_maps_flutter: ^2.9.0
+- API Key: Fetched from Firebase settings
+- Features:
+  * Map display with markers
+  * Current location marker
+  * Vendor/restaurant markers
+  * Driver location (real-time)
+  * Route visualization
+  * Custom map styles
+
+4.9.2 Map Features:
+- Location: lib/ui/mapView/MapViewScreen.dart
+- Features:
+  * Shows all nearby vendors
+  * Filter by category
+  * Tap marker to view vendor details
+  * Navigate to vendor screen
+
+4.9.3 Place Picker:
+- Package: google_maps_place_picker_mb: ^3.1.2
+- Location: lib/widget/place_picker_osm.dart
+- Features:
+  * Search for places
+  * Select location on map
+  * Get address from coordinates
+  * Save as delivery address
+
+4.9.4 OSM Integration:
+- Package: flutter_osm_plugin: ^1.3.3+1
+- Alternative to Google Maps
+- Used when Google Maps unavailable
+- Provides similar functionality
+
+4.9.5 Route Calculation:
+- Google Distance Matrix API
+- Calculates distance and duration
+- Used for fare calculation
+- Shows estimated arrival time
+
+================================================================================
+
+4.10 CHAT SYSTEM
+----------------
+
+4.10.1 Chat Types:
+- Vendor Chat (Customer-Vendor)
+- Driver Chat (Customer-Driver)
+- Provider Chat (Customer-Provider)
+- Admin Chat (Customer-Admin)
+
+4.10.2 Chat Implementation:
+- Location: lib/ui/chat_screen/chat_screen.dart
+- Features:
+  * Real-time messaging via Firestore
+  * Text messages
+  * Image sharing
+  * Video sharing
+  * Audio messages
+  * Typing indicators
+  * Read receipts
+
+4.10.3 Chat Data Structure:
+- Collection: conversations
+- Document: {orderId}_{customerId}_{vendorId}
+- Sub-collection: messages
+- Fields: text, senderId, timestamp, type, mediaUrl
+
+4.10.4 Inbox System:
+- Location: lib/ui/chat_screen/inbox_screen.dart
+- Lists all conversations
+- Shows unread count
+- Last message preview
+- Timestamp display
+
+================================================================================
+
+4.11 REVIEW & RATING SYSTEM
+----------------------------
+
+4.11.1 Review Types:
+- Product Reviews
+- Vendor Reviews
+- Driver Reviews
+- Service Reviews
+
+4.11.2 Review Implementation:
+- Location: lib/ui/reviewScreen.dart/reviewScreen.dart
+- Features:
+  * Star rating (1-5)
+  * Text review
+  * Review attributes (customizable)
+  * Image uploads
+  * Review moderation
+
+4.11.3 Review Data:
+- Collection: items_review
+- Fields: rating, comment, images, attributes, userId, orderId
+
+4.11.4 Review Display:
+- Location: lib/ui/review_list_screen/review_list_screen.dart
+- Shows average rating
+- Lists all reviews
+- Filter by rating
+- Sort by date/rating
+
+================================================================================
+
+4.12 COUPON & DISCOUNT SYSTEM
+------------------------------
+
+4.12.1 Coupon Types:
+- Vendor Coupons
+- Cab Coupons
+- Parcel Coupons
+- Rental Coupons
+- Provider Coupons
+
+4.12.2 Coupon Implementation:
+- Location: lib/ui/cartScreen/Coupon.dart
+- Features:
+  * Coupon code entry
+  * Automatic discount calculation
+  * Minimum order value validation
+  * Expiry date checking
+  * Usage limit validation
+
+4.12.3 Coupon Data:
+- Collections: coupons, promos, parcel_coupons, etc.
+- Fields: code, discount, type (percentage/fixed), minOrder, expiry
+
+================================================================================
+
+4.13 WALLET SYSTEM
+------------------
+
+4.13.1 Wallet Features:
+- Balance display
+- Top-up via payment gateways
+- Transaction history
+- Wallet payment for orders
+- Refund to wallet
+
+4.13.2 Wallet Implementation:
+- Location: lib/ui/wallet/walletScreen.dart
+- Data: Firestore collection "wallet"
+- Fields: amount, order_id, date, payment_method, status
+
+4.13.3 Wallet Operations:
+- Top-up: Adds amount to wallet
+- Payment: Deducts from wallet
+- Refund: Adds to wallet
+- History: Lists all transactions
+
+================================================================================
+
+4.14 REFERRAL SYSTEM
+-------------------
+
+4.14.1 Referral Features:
+- Unique referral code generation
+- Referral code validation
+- Reward system
+- Referral history
+
+4.14.2 Implementation:
+- Location: lib/ui/referral_screen/referral_screen.dart
+- Function: getReferralCode() in constants.dart
+- Generates 6-digit random code
+- Stores in Firestore: referral collection
+
+================================================================================
+
+4.15 STORY FEATURE
+------------------
+
+4.15.1 Story Implementation:
+- Location: lib/ui/home/story_view.dart
+- Features:
+  * Image/video stories
+  * Story viewing
+  * Auto-advance
+  * Story expiration
+
+4.15.2 Story Data:
+- Collection: story
+- Fields: image, video, sectionID, expiry
+
+================================================================================
+
+4.16 DINE-IN / TABLE BOOKING
+------------------------------
+
+4.16.1 Features:
+- Restaurant table booking
+- Date/time selection
+- Guest count selection
+- Booking history
+- Booking cancellation
+
+4.16.2 Implementation:
+- Location: lib/ui/dineInScreen/
+- Data: booked_table collection
+- Flow:
+  1. Select restaurant
+  2. Select date/time
+  3. Enter guest count
+  4. Confirm booking
+  5. Receive confirmation
+
+================================================================================
+
+4.17 GIFT CARD SYSTEM
+---------------------
+
+4.17.1 Features:
+- Gift card purchase
+- Gift card redemption
+- Gift card history
+- Multiple payment methods
+
+4.17.2 Implementation:
+- Location: lib/ui/gift_card/
+- Data: gift_cards, gift_purchases collections
+
+================================================================================
+
+4.18 QR CODE SCANNER
+--------------------
+
+4.18.1 Implementation:
+- Package: mobile_scanner: ^5.2.3
+- Location: lib/ui/QrCodeScanner/QrCodeScanner.dart
+- Features:
+  * QR code scanning
+  * Barcode scanning
+  * Used for table booking, promotions
+
+================================================================================
+
+4.19 SEARCH FUNCTIONALITY
+--------------------------
+
+4.19.1 Search Features:
+- Product search
+- Vendor search
+- Category search
+- Recent searches
+- Search suggestions
+
+4.19.2 Implementation:
+- Location: lib/ui/searchScreen/SearchScreen.dart
+- Searches: Firestore queries
+- Filters: Category, price, rating
+
+================================================================================
+
+4.20 FAVORITES SYSTEM
+---------------------
+
+4.20.1 Favorite Types:
+- Favorite Stores (Vendors)
+- Favorite Items (Products)
+- Favorite Services (On-demand)
+
+4.20.2 Implementation:
+- Collections: favorite_vendor, favorite_item, favorite_service
+- Features: Add/remove favorites, favorite list view
+
+================================================================================
+
+5. SECURITY FEATURES
+================================================================================
+
+5.1 Authentication Security:
+- Firebase App Check for API protection
+- OAuth 2.0 for Google/Apple sign-in
+- Phone number verification via OTP
+- Email verification
+
+5.2 Data Security:
+- Firestore security rules
+- Encrypted data transmission (HTTPS)
+- Secure payment processing
+- Token-based authentication
+
+5.3 Payment Security:
+- PCI-DSS compliant payment gateways
+- No card data stored locally
+- Secure payment intent creation
+- Payment verification
+
+5.4 User Privacy:
+- Location permission handling
+- Camera permission for image picker
+- Storage permission for file access
+- Privacy policy screen
+
+================================================================================
+
+6. UI/UX IMPLEMENTATION
+================================================================================
+
+6.1 Theme System:
+- Location: lib/theme/
+- Features:
+  * Light/Dark theme support
+  * Custom color schemes
+  * Dynamic theme from Firebase
+  * Section-based colors
+
+6.2 Responsive Design:
+- Package: Responsive framework
+- Adapts to different screen sizes
+- Tablet and phone layouts
+
+6.3 Custom Widgets:
+- Location: lib/widget/
+- Reusable components:
+  * Buttons, TextFields, Cards
+  * Loading indicators
+  * Image widgets
+  * Map widgets
+
+6.4 Animations:
+- Lottie animations
+- Page transitions
+- Loading animations
+- Success/error animations
+
+================================================================================
+
+7. ERROR HANDLING & LOGGING
+================================================================================
+
+7.1 Error Handling:
+- Try-catch blocks for async operations
+- User-friendly error messages
+- Error logging to console
+- Graceful degradation
+
+7.2 Logging:
+- Dart log package
+- Debug prints for development
+- Error tracking
+
+7.3 Network Error Handling:
+- Connection status checking
+- Retry mechanisms
+- Offline mode handling
+
+================================================================================
+
+8. PERFORMANCE OPTIMIZATIONS
+================================================================================
+
+8.1 Image Optimization:
+- Cached network images
+- Image compression
+- Lazy loading
+- Placeholder images
+
+8.2 Database Optimization:
+- Indexed Firestore queries
+- Pagination for large lists
+- Local caching
+- Efficient data structures
+
+8.3 Code Optimization:
+- Lazy loading of screens
+- Efficient state management
+- Memory management
+- Background processing
+
+================================================================================
+
+9. TESTING & DEPLOYMENT
+================================================================================
+
+9.1 Build Configuration:
+- Android: build.gradle files
+- iOS: Podfile, Xcode configuration
+- Firebase configuration files
+- Google Services JSON
+
+9.2 App Signing:
+- Android: quickdashcustomer.jks
+- iOS: Provisioning profiles
+- Release builds
+
+9.3 Version Management:
+- Version: 1.0.2+2
+- Version stored in Firebase
+- Update checking mechanism
+
+================================================================================
+
+10. APP FLOW & NAVIGATION
+================================================================================
+
+10.1 Initial Flow:
+1. App Launch (main.dart)
+2. Firebase Initialization
+3. Check Onboarding Status
+4. Check Authentication
+5. Check Location Permission
+6. Navigate to Home/Login/Onboarding
+
+10.2 Main Navigation:
+- Bottom Navigation (if implemented)
+- Drawer Navigation
+- Stack Navigation
+- Tab Navigation (for services)
+
+10.3 Screen Hierarchy:
+- OnBoarding → Login → Location Permission → Home
+- Home → Service Selection → Service Details → Cart → Checkout → Payment → Order Details
+- Home → Profile → Settings → Various Settings Screens
+
+================================================================================
+
+11. INTEGRATION POINTS
+================================================================================
+
+11.1 External APIs:
+- Google Maps API
+- Google Distance Matrix API
+- OSRM Routing API
+- Payment Gateway APIs
+- Email Service (SMTP)
+
+11.2 Third-Party Services:
+- Firebase (Backend)
+- Google Services
+- Apple Services
+- Payment Processors
+- Email Providers
+
+================================================================================
+
+12. FUTURE ENHANCEMENTS & EXTENSIBILITY
+================================================================================
+
+12.1 Extensible Architecture:
+- Modular service structure
+- Easy addition of new payment gateways
+- Plugin-based architecture
+- Configurable features via Firebase
+
+12.2 Scalability:
+- Cloud-based backend
+- Horizontal scaling support
+- Efficient data structures
+- Caching strategies
+
+================================================================================
+
+13. DEVELOPER NOTES
+================================================================================
+
+13.1 Key Files to Understand:
+- main.dart: App entry point
+- FirebaseHelper.dart: All Firebase operations
+- constants.dart: App-wide constants
+- helper.dart: Utility functions
+- localDatabase.dart: Local cart database
+
+13.2 Important Constants:
+- Collections names in constants.dart
+- Order statuses
+- User roles
+- Payment methods
+
+13.3 Configuration:
+- Firebase settings in Firebase console
+- Payment gateway keys in Firestore
+- Google Maps API key
+- App version in Firestore
+
+13.4 Common Patterns:
+- Service-oriented architecture
+- Provider for state management
+- StreamBuilder for real-time data
+- FutureBuilder for async data
+
+================================================================================
+
+14. TROUBLESHOOTING GUIDE
+================================================================================
+
+14.1 Common Issues:
+- Location not working: Check permissions
+- Payment failing: Verify gateway keys
+- Notifications not received: Check FCM token
+- Map not loading: Verify API key
+- Cart not persisting: Check local database
+
+14.2 Debug Tips:
+- Check Firebase console for errors
+- Verify network connectivity
+- Check device permissions
+- Review console logs
+- Verify Firebase rules
+
+================================================================================
+
+END OF REPORT
+================================================================================
+
+This report provides a comprehensive overview of the QuickDash Customer App 
+implementation. For specific implementation details, refer to the source code 
+files mentioned in each section.
+
+For questions or clarifications, please refer to the codebase or contact the 
+development team.
+
+================================================================================
+

@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__ide__getDiagnostics",
+      "Bash(flutter analyze:*)",
+      "Bash(find:*)",
+      "Read(//Users/macbookpro/Documents/Clients_Work/ashok1545/SourceCode/**)",
+      "Read(//private/tmp/**)",
+      "Bash(flutter run:*)",
+      "Bash(nc:*)",
+      "Bash(mkdir:*)",
+      "PowerShell(fvm flutter *)",
+      "PowerShell(Get-Content *)",
+      "Bash(Get-ChildItem -Path . -Directory)",
+      "Bash(Select-Object Name)",
+      "Bash(fvm flutter *)",
+      "Bash(Select-String -Pattern \"\\(QrCodeScanner|error\\)\")",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\hp\\\\Downloads\\\\QuickDashCustomerApp\\\\QuickDashCustomerApp\" -Directory)",
+      "Bash(echo \"Total: $\\(find \"C:\\\\Users\\\\hp\\\\Downloads\\\\QuickDashCustomerApp\\\\QuickDashCustomerApp\\\\lib\\\\cab_service\" -name \"*.dart\")",
+      "Bash(echo \"Total: $\\(find \"C:\\\\Users\\\\hp\\\\Downloads\\\\QuickDashCustomerApp\\\\QuickDashCustomerApp\\\\lib\\\\parcel_delivery\" -name \"*.dart\")",
+      "Bash(echo \"Total: $\\(find \"C:\\\\Users\\\\hp\\\\Downloads\\\\QuickDashCustomerApp\\\\QuickDashCustomerApp\\\\lib\\\\rental_service\" -name \"*.dart\")",
+      "Bash(echo \"Total: $\\(find \"C:\\\\Users\\\\hp\\\\Downloads\\\\QuickDashCustomerApp\\\\QuickDashCustomerApp\\\\lib\\\\onDemand_service\" -name \"*.dart\")",
+      "Bash(echo \"Total: $\\(find \"C:\\\\Users\\\\hp\\\\Downloads\\\\QuickDashCustomerApp\\\\QuickDashCustomerApp\\\\lib\\\\ecommarce_service\" -name \"*.dart\")"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
