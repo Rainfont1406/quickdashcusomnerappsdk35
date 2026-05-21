@@ -1,6 +1,5 @@
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:easy_localization/easy_localization.dart';
-import 'package:emartconsumer/AppGlobal.dart';
 import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/model/VendorCategoryModel.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
@@ -9,7 +8,6 @@ import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/dineInScreen/dine_in_restaurant_details_screen.dart';
 import 'package:emartconsumer/ui/vendorProductsScreen/newVendorProductsScreen.dart';
-// import 'package:emartconsumer/ui/vendorProductsScreen/NewVendorProductsScreen.dart';
 import 'package:flutter/material.dart';
 
 class CategoryDetailsScreen extends StatefulWidget {
@@ -24,184 +22,328 @@ class CategoryDetailsScreen extends StatefulWidget {
   _CategoryDetailsScreenState createState() => _CategoryDetailsScreenState();
 }
 
-class _CategoryDetailsScreenState extends State<CategoryDetailsScreen> {
+class _CategoryDetailsScreenState extends State<CategoryDetailsScreen>
+    with SingleTickerProviderStateMixin {
   Stream<List<VendorModel>>? categoriesFuture;
   final FireStoreUtils fireStoreUtils = FireStoreUtils();
+  late AnimationController _shimmerController;
 
   @override
   void initState() {
     super.initState();
-    print(widget.category.id);
-    categoriesFuture = fireStoreUtils.getVendorsByCuisineID(
-        widget.category.id.toString(),
-        isDinein: widget.isDineIn);
+    _shimmerController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    )..repeat(reverse: true);
+
+    final nearbyIds = allstoreList.map((v) => v.id).toSet();
+    categoriesFuture = fireStoreUtils
+        .getVendorsByCuisineID(widget.category.id.toString(),
+            isDinein: widget.isDineIn)
+        .map((vendors) => nearbyIds.isEmpty
+            ? vendors
+            : vendors.where((v) => nearbyIds.contains(v.id)).toList());
+  }
+
+  @override
+  void dispose() {
+    _shimmerController.dispose();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: isDarkMode(context) ? AppThemeData.surfaceDark : AppThemeData.surface,
-      appBar: AppGlobal.buildSimpleAppBar(
-          context, widget.category.title.toString()),
-      body: StreamBuilder<List<VendorModel>>(
-        stream: categoriesFuture,
-        initialData: const [],
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return Center(
-              child: CircularProgressIndicator.adaptive(
-                valueColor: AlwaysStoppedAnimation(AppThemeData.primary500),
+      backgroundColor:
+          isDarkMode(context) ? AppThemeData.surfaceDark : AppThemeData.surface,
+      body: Column(
+        children: [
+          _buildGradientHeader(),
+          Expanded(
+            child: StreamBuilder<List<VendorModel>>(
+              stream: categoriesFuture,
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return _buildShimmerList();
+                }
+                if (!snapshot.hasData || snapshot.data!.isEmpty) {
+                  return _buildEmptyState();
+                }
+                return ListView.builder(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  physics: const BouncingScrollPhysics(),
+                  itemCount: snapshot.data!.length,
+                  itemBuilder: (context, index) =>
+                      _buildVendorCard(snapshot.data![index]),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildGradientHeader() {
+    return Container(
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          colors: [AppThemeData.primary500, AppThemeData.primary400],
+          begin: Alignment.centerLeft,
+          end: Alignment.centerRight,
+        ),
+        borderRadius: BorderRadius.only(
+          bottomLeft: Radius.circular(32),
+          bottomRight: Radius.circular(32),
+        ),
+      ),
+      child: SafeArea(
+        bottom: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+          child: Row(
+            children: [
+              GestureDetector(
+                onTap: () => Navigator.pop(context),
+                child: Container(
+                  width: 36,
+                  height: 36,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.2),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Icon(
+                    Icons.arrow_back_ios_new_rounded,
+                    color: Colors.white,
+                    size: 18,
+                  ),
+                ),
               ),
-            );
-          }
-          if (!snapshot.hasData || (snapshot.data?.isEmpty ?? true)) {
-            return Center(
-              child: showEmptyState('No Vendors'.tr(), context),
-            );
-          } else {
-            return ListView.builder(
-              itemCount: snapshot.data!.length,
-              itemBuilder: (context, index) =>
-                  buildVendorItem(snapshot.data![index]),
-            );
-          }
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  widget.category.title.toString(),
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 20,
+                    fontWeight: FontWeight.w600,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildShimmerList() {
+    return ListView.builder(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      physics: const NeverScrollableScrollPhysics(),
+      itemCount: 5,
+      itemBuilder: (_, __) => AnimatedBuilder(
+        animation: _shimmerController,
+        builder: (context, _) {
+          final color = Color.lerp(
+            isDarkMode(context) ? AppThemeData.grey900 : AppThemeData.grey100,
+            isDarkMode(context) ? AppThemeData.grey700 : AppThemeData.grey300,
+            _shimmerController.value,
+          )!;
+          return Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: Container(
+              height: 116,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(12),
+                color: color,
+              ),
+            ),
+          );
         },
       ),
     );
   }
 
-  buildVendorItem(VendorModel vendorModel) {
+  Widget _buildEmptyState() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            Icons.restaurant_outlined,
+            size: 72,
+            color: AppThemeData.primary500.withValues(alpha: 0.35),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            'No Restaurants Found',
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.w600,
+              color: AppThemeData.grey600,
+            ),
+          ).tr(),
+          const SizedBox(height: 6),
+          Text(
+            'No nearby restaurants in this category',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 13, color: AppThemeData.grey400),
+          ).tr(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildVendorCard(VendorModel vendorModel) {
+    final isDark = isDarkMode(context);
     return GestureDetector(
       onTap: () {
         if (widget.isDineIn) {
-          push(
-            context,
-            DineInRestaurantDetailsScreen(vendorModel: vendorModel),
-          );
+          push(context,
+              DineInRestaurantDetailsScreen(vendorModel: vendorModel));
         } else {
-          push(
-            context,
-            NewVendorProductsScreen(vendorModel: vendorModel),
-          );
+          push(context, NewVendorProductsScreen(vendorModel: vendorModel));
         }
       },
-      child: Card(
-        elevation: 0.5,
-        color: isDarkMode(context) ? Colors.grey.shade900 : Colors.white,
-        shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.all(
-            Radius.circular(20),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Container(
+          clipBehavior: Clip.antiAlias,
+          decoration: ShapeDecoration(
+            color: isDark ? AppThemeData.grey900 : AppThemeData.grey50,
+            shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12)),
+            shadows: const [
+              BoxShadow(
+                color: Color(0x0A000000),
+                blurRadius: 32,
+                offset: Offset(0, 0),
+                spreadRadius: 0,
+              ),
+            ],
           ),
-        ),
-        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        child: SizedBox(
-          height: (MediaQuery.of(context).size.width * 0.50).clamp(160.0, 240.0),
-
-          // padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          // margin: EdgeInsets.symmetric(horizontal: 16, vertical: 16),
-          child: Column(
-            // mainAxisSize: MainAxisSize.max,
-            // crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Expanded(
-                child: CachedNetworkImage(
-                  imageUrl: getImageVAlidUrl(vendorModel.photo),
-                  imageBuilder: (context, imageProvider) => Container(
-                    decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(20),
+          child: Padding(
+            padding: const EdgeInsets.all(8.0),
+            child: Row(
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(10),
+                  child: CachedNetworkImage(
+                    imageUrl: getImageVAlidUrl(vendorModel.photo),
+                    height: 100,
+                    width: 100,
+                    fit: BoxFit.cover,
+                    imageBuilder: (context, imageProvider) => Container(
+                      width: 100,
+                      height: 100,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(10),
                         image: DecorationImage(
-                            image: imageProvider, fit: BoxFit.cover)),
-                  ),
-                  placeholder: (context, url) => Center(
-                      child: CircularProgressIndicator.adaptive(
-                    valueColor: AlwaysStoppedAnimation(AppThemeData.primary500),
-                  )),
-                  errorWidget: (context, url, error) => ClipRRect(
-                      borderRadius: BorderRadius.circular(20),
+                            image: imageProvider, fit: BoxFit.cover),
+                      ),
+                    ),
+                    placeholder: (context, url) => AnimatedBuilder(
+                      animation: _shimmerController,
+                      builder: (_, __) => Container(
+                        width: 100,
+                        height: 100,
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(10),
+                          color: Color.lerp(
+                            AppThemeData.grey100,
+                            AppThemeData.grey300,
+                            _shimmerController.value,
+                          ),
+                        ),
+                      ),
+                    ),
+                    errorWidget: (context, url, error) => ClipRRect(
+                      borderRadius: BorderRadius.circular(10),
                       child: Image.network(
                         placeholderImage,
-                        fit: BoxFit.fitWidth,
-                        width: MediaQuery.of(context).size.width,
-                      )),
-                  fit: BoxFit.cover,
+                        fit: BoxFit.cover,
+                        width: 100,
+                        height: 100,
+                      ),
+                    ),
+                  ),
                 ),
-              ),
-              // SizedBox(height: 8),
-              ListTile(
-                title: Text(vendorModel.title,
-                    maxLines: 1,
-                    style: TextStyle(
-                      fontSize: 16,
-                    )),
-                subtitle: Text(vendorModel.location,
-                    maxLines: 1,
-
-                    // filters.keys
-                    //     .where(
-                    //         (element) => vendorModel.filters[element] == 'Yes')
-                    //     .take(2)
-                    //     .join(', '),
-
-                    style: const TextStyle()),
-                trailing: Padding(
-                  padding: const EdgeInsets.only(top: 8.0),
+                const SizedBox(width: 12),
+                Expanded(
                   child: Column(
-                    mainAxisAlignment: MainAxisAlignment.start,
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Wrap(
-                          spacing: 8,
-                          crossAxisAlignment: WrapCrossAlignment.center,
-                          children: <Widget>[
-                            Icon(
-                              Icons.star,
-                              size: 20,
-                              color: AppThemeData.primary500,
+                      Text(
+                        vendorModel.title,
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                          color: isDark ? Colors.white : Colors.black,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 4),
+                      Row(
+                        children: [
+                          Icon(Icons.location_pin,
+                              size: 16, color: AppThemeData.primary500),
+                          const SizedBox(width: 2),
+                          Expanded(
+                            child: Text(
+                              vendorModel.location,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: isDark
+                                    ? Colors.white70
+                                    : const Color(0xff9091A4),
+                              ),
                             ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Row(
+                        children: [
+                          Icon(Icons.star_rounded,
+                              size: 16, color: AppThemeData.primary500),
+                          const SizedBox(width: 2),
+                          Text(
+                            vendorModel.reviewsCount != 0
+                                ? (vendorModel.reviewsSum /
+                                        vendorModel.reviewsCount)
+                                    .toStringAsFixed(1)
+                                : '0',
+                            style: TextStyle(
+                              fontSize: 13,
+                              color: isDark ? Colors.white : Colors.black,
+                            ),
+                          ),
+                          if (vendorModel.reviewsCount > 0) ...[
+                            const SizedBox(width: 2),
                             Text(
-                              (vendorModel.reviewsCount != 0)
-                                  ? (vendorModel.reviewsSum /
-                                          vendorModel.reviewsCount)
-                                      .toStringAsFixed(1)
-                                  : "0",
-                              style: const TextStyle(),
+                              '(${vendorModel.reviewsCount.toStringAsFixed(0)})',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: isDark
+                                    ? Colors.white60
+                                    : const Color(0xff666666),
+                              ),
                             ),
-                            Visibility(
-                                visible: vendorModel.reviewsCount != 0,
-                                child: Text(
-                                    "(${vendorModel.reviewsCount.toStringAsFixed(1)})")),
-                          ]),
+                          ],
+                        ],
+                      ),
                     ],
                   ),
                 ),
-              ),
-              // SizedBox(height: 4),
-
-              // SizedBox(height: 4),
-              // Visibility(
-              //   visible: vendorModel.reviewsCount != 0,
-              //   child: RichText(
-              //     text: TextSpan(
-              //       style: TextStyle(
-              //           color: isDarkMode(context)
-              //               ? Colors.grey.shade200
-              //               : Colors.black),
-              //       children: [
-              //         TextSpan(
-              //             text:
-              //                 '${double.parse((vendorModel.reviewsSum / vendorModel.reviewsCount).toStringAsFixed(decimal))} '),
-              //         WidgetSpan(
-              //           child: Icon(
-              //             Icons.star,
-              //             size: 20,
-              //             color: AppThemeData.primary500,
-              //           ),
-              //         ),
-              //         TextSpan(text: ' (${vendorModel.reviewsCount})'),
-              //       ],
-              //     ),
-              //   ),
-              // ),
-            ],
+              ],
+            ),
           ),
         ),
       ),

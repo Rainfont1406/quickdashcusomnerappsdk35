@@ -19,7 +19,7 @@ class FavouriteStoreScreen extends StatefulWidget {
   _FavouriteStoreScreenState createState() => _FavouriteStoreScreenState();
 }
 
-class _FavouriteStoreScreenState extends State<FavouriteStoreScreen> {
+class _FavouriteStoreScreenState extends State<FavouriteStoreScreen> with SingleTickerProviderStateMixin {
   late Future<List<VendorModel>> vendorFuture;
   final fireStoreUtils = FireStoreUtils();
   List<VendorModel> storeAllLst = [];
@@ -28,40 +28,102 @@ class _FavouriteStoreScreenState extends State<FavouriteStoreScreen> {
   bool showLoader = true;
   VendorModel? vendorModel;
 
+  late AnimationController _shimmerController;
+
   @override
   void initState() {
-    // TODO: implement initState
     super.initState();
+    _shimmerController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    )..repeat(reverse: true);
     getData();
+  }
+
+  @override
+  void dispose() {
+    _shimmerController.dispose();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-        backgroundColor: isDarkMode(context) ? AppThemeData.surfaceDark : AppThemeData.surface,
-        body: showLoader
-            ? Center(
-                child: CircularProgressIndicator.adaptive(
-                  valueColor: AlwaysStoppedAnimation(AppThemeData.primary500),
-                ),
-              )
-            : lstFavourite.isEmpty
-                ? showEmptyState('No Favourite Stores'.tr(), context)
-                : ListView.builder(
-                    shrinkWrap: true,
-                    scrollDirection: Axis.vertical,
-                    physics: const BouncingScrollPhysics(),
-                    itemCount: lstFavourite.length,
-                    itemBuilder: (context, index) {
-                      if (storeAllLst.isNotEmpty) {
-                        for (int a = 0; a < storeAllLst.length; a++) {
-                          if (storeAllLst[a].id == lstFavourite[index].store_id) {
-                            vendorModel = storeAllLst[a];
-                          } else {}
+      backgroundColor: isDarkMode(context) ? AppThemeData.surfaceDark : AppThemeData.surface,
+      body: showLoader
+          ? _buildShimmerList()
+          : lstFavourite.isEmpty
+              ? _buildEmptyState()
+              : ListView.builder(
+                  shrinkWrap: true,
+                  scrollDirection: Axis.vertical,
+                  physics: const BouncingScrollPhysics(),
+                  itemCount: lstFavourite.length,
+                  itemBuilder: (context, index) {
+                    if (storeAllLst.isNotEmpty) {
+                      for (int a = 0; a < storeAllLst.length; a++) {
+                        if (storeAllLst[a].id == lstFavourite[index].store_id) {
+                          vendorModel = storeAllLst[a];
                         }
                       }
-                      return vendorModel == null ? Container() : buildAllStoreData(vendorModel!, index);
-                    }));
+                    }
+                    return vendorModel == null ? const SizedBox.shrink() : buildAllStoreData(vendorModel!, index);
+                  },
+                ),
+    );
+  }
+
+  Widget _buildShimmerList() {
+    return ListView.builder(
+      physics: const NeverScrollableScrollPhysics(),
+      itemCount: 5,
+      itemBuilder: (_, __) => _buildShimmerCard(),
+    );
+  }
+
+  Widget _buildShimmerCard() {
+    return AnimatedBuilder(
+      animation: _shimmerController,
+      builder: (context, _) {
+        final isDark = isDarkMode(context);
+        final color = Color.lerp(
+          isDark ? AppThemeData.grey900 : AppThemeData.grey100,
+          isDark ? AppThemeData.grey700 : AppThemeData.grey300,
+          _shimmerController.value,
+        )!;
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          child: Container(
+            height: 116,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              color: color,
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildEmptyState() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.store_outlined, size: 72, color: AppThemeData.primary500.withValues(alpha: 0.35)),
+          const SizedBox(height: 16),
+          Text(
+            'No Favourite Stores',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: AppThemeData.grey600),
+          ).tr(),
+          const SizedBox(height: 6),
+          Text(
+            'Stores you love will appear here',
+            style: TextStyle(fontSize: 13, color: AppThemeData.grey400),
+          ).tr(),
+        ],
+      ),
+    );
   }
 
   Widget buildAllStoreData(VendorModel vendorModel, int index) {
@@ -79,7 +141,7 @@ class _FavouriteStoreScreenState extends State<FavouriteStoreScreen> {
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(12),
             ),
-            shadows: [
+            shadows: const [
               BoxShadow(
                 color: Color(0x0A000000),
                 blurRadius: 32,
@@ -104,22 +166,34 @@ class _FavouriteStoreScreenState extends State<FavouriteStoreScreen> {
                       image: DecorationImage(image: imageProvider, fit: BoxFit.cover),
                     ),
                   ),
-                  placeholder: (context, url) => Center(
-                      child: CircularProgressIndicator.adaptive(
-                    valueColor: AlwaysStoppedAnimation(AppThemeData.primary500),
-                  )),
+                  placeholder: (context, url) => AnimatedBuilder(
+                    animation: _shimmerController,
+                    builder: (_, __) => Container(
+                      width: 100,
+                      height: 100,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(10),
+                        color: Color.lerp(
+                          AppThemeData.grey100,
+                          AppThemeData.grey300,
+                          _shimmerController.value,
+                        ),
+                      ),
+                    ),
+                  ),
                   errorWidget: (context, url, error) => ClipRRect(
-                      borderRadius: BorderRadius.circular(20),
-                      child: Image.network(
-                        placeholderImage,
-                        fit: BoxFit.cover,
-                      )),
+                    borderRadius: BorderRadius.circular(20),
+                    child: Image.network(
+                      placeholderImage,
+                      fit: BoxFit.cover,
+                      width: 100,
+                      height: 100,
+                    ),
+                  ),
                   fit: BoxFit.cover,
                 ),
               ),
-              const SizedBox(
-                width: 10,
-              ),
+              const SizedBox(width: 10),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -136,34 +210,24 @@ class _FavouriteStoreScreenState extends State<FavouriteStoreScreen> {
                         GestureDetector(
                           onTap: () {
                             setState(() {
-                              FavouriteModel favouriteModel = FavouriteModel(store_id: vendorModel.id, user_id: MyAppState.currentUser!.userID);
+                              FavouriteModel favouriteModel = FavouriteModel(
+                                  store_id: vendorModel.id, user_id: MyAppState.currentUser!.userID);
                               lstFavourite.removeWhere((item) => item == vendorModel.id);
                               FireStoreUtils.removeFavouriteStore(favouriteModel);
-
                               lstFavourite.removeAt(index);
                             });
                           },
-                          child: Icon(
-                            Icons.favorite,
-                            color: AppThemeData.primary500,
-                          ),
+                          child: Icon(Icons.favorite, color: AppThemeData.primary500),
                         )
                       ],
                     ),
-                    const SizedBox(
-                      height: 10,
-                    ),
+                    const SizedBox(height: 10),
                     Text(
                       vendorModel.location,
                       maxLines: 1,
-                      style: const TextStyle(
-                        fontSize: 16,
-                        color: Color(0xff9091A4),
-                      ),
+                      style: const TextStyle(fontSize: 16, color: Color(0xff9091A4)),
                     ),
-                    const SizedBox(
-                      height: 10,
-                    ),
+                    const SizedBox(height: 10),
                     Container(
                       decoration: BoxDecoration(
                         color: Colors.green,
@@ -174,14 +238,14 @@ class _FavouriteStoreScreenState extends State<FavouriteStoreScreen> {
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            Text(vendorModel.reviewsCount != 0 ? (vendorModel.reviewsSum / vendorModel.reviewsCount).toStringAsFixed(1) : 0.toString(),
-                                style: const TextStyle(letterSpacing: 0.5, fontSize: 12, color: Colors.white)),
-                            const SizedBox(width: 3),
-                            const Icon(
-                              Icons.star,
-                              size: 16,
-                              color: Colors.white,
+                            Text(
+                              vendorModel.reviewsCount != 0
+                                  ? (vendorModel.reviewsSum / vendorModel.reviewsCount).toStringAsFixed(1)
+                                  : '0',
+                              style: const TextStyle(letterSpacing: 0.5, fontSize: 12, color: Colors.white),
                             ),
+                            const SizedBox(width: 3),
+                            const Icon(Icons.star, size: 16, color: Colors.white),
                           ],
                         ),
                       ),

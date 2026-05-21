@@ -88,7 +88,7 @@ class _OtpScreenState extends State<OtpScreen> {
     if (!_canResend || _isVerifying) return;
     _otpController.clear();
     _startTimer();
-    ShowToastDialog.showLoader('Sending OTP…'.tr());
+    ShowToastDialog.showLoader('Sending verification code...');
     try {
       await auth.FirebaseAuth.instance.verifyPhoneNumber(
         phoneNumber: countryCode + phoneNumber,
@@ -108,7 +108,7 @@ class _OtpScreenState extends State<OtpScreen> {
           verificationId = vid;
           if (token != null) resendToken = token;
           ShowToastDialog.closeLoader();
-          ShowToastDialog.showToast('A new OTP has been sent to your number.');
+          ShowToastDialog.showToast('Verification code sent successfully.');
         },
         timeout: const Duration(seconds: 25),
         forceResendingToken: resendToken,
@@ -130,7 +130,7 @@ class _OtpScreenState extends State<OtpScreen> {
     }
 
     if (mounted) setState(() => _isVerifying = true);
-    ShowToastDialog.showLoader('Verifying…'.tr());
+    ShowToastDialog.showLoader('Verifying your account...');
     try {
       final credential = auth.PhoneAuthProvider.credential(
         verificationId: verificationId,
@@ -144,7 +144,7 @@ class _OtpScreenState extends State<OtpScreen> {
 
       if (!mounted) return;
 
-      if (value.additionalUserInfo!.isNewUser) {
+      if (value.additionalUserInfo?.isNewUser ?? false) {
         User userModel = User()
           ..userID = value.user!.uid
           ..countryCode = countryCode
@@ -196,7 +196,7 @@ class _OtpScreenState extends State<OtpScreen> {
 
       if (!userModel.active) {
         ShowToastDialog.showToast(
-            'Your account has been deactivated. Please contact support for assistance.');
+            'Your account is temporarily restricted. Please contact support.');
         await auth.FirebaseAuth.instance.signOut();
         ShowToastDialog.closeLoader();
         if (!mounted) return;
@@ -228,19 +228,19 @@ class _OtpScreenState extends State<OtpScreen> {
       switch (e.code) {
         case 'invalid-verification-code':
           ShowToastDialog.showToast(
-              'The OTP you entered is incorrect. Please try again.');
+              'Incorrect verification code. Please try again.');
           break;
         case 'session-expired':
           ShowToastDialog.showToast(
-              'OTP has expired. Please tap Resend to get a new code.');
+              'This verification code has expired. Request a new one.');
           break;
         case 'too-many-requests':
           ShowToastDialog.showToast(
-              'Too many attempts. Please wait a moment and try again.');
+              'Too many attempts. Please try again in a few minutes.');
           break;
         case 'network-request-failed':
           ShowToastDialog.showToast(
-              'Network error. Please check your internet connection and try again.');
+              'Unable to connect right now. Please try again.');
           break;
         default:
           ShowToastDialog.showToast(
@@ -318,10 +318,17 @@ class _OtpScreenState extends State<OtpScreen> {
                               ),
                             ],
                           ),
-                          padding: const EdgeInsets.all(8),
-                          child: Image.asset(
-                            'assets/images/app_logo_new.png',
-                            fit: BoxFit.contain,
+                          child: Center(
+                            child: Text(
+                              'Q',
+                              style: TextStyle(
+                                fontSize: 26,
+                                fontFamily: AppThemeData.bold,
+                                color: AppThemeData.primary500,
+                                height: 1.0,
+                                letterSpacing: -1.0,
+                              ),
+                            ),
                           ),
                         ),
                         const SizedBox(width: 12),

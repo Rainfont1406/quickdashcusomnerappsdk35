@@ -1897,6 +1897,26 @@ class FireStoreUtils {
     return orderModel;
   }
 
+  static Future<int> getSlotBookingCount({
+    required String vendorId,
+    required String slotId,
+    required DateTime date,
+  }) async {
+    final startOfDay = DateTime(date.year, date.month, date.day);
+    final endOfDay = startOfDay.add(const Duration(days: 1));
+    final snapshot = await firestore
+        .collection(ORDERS_TABLE)
+        .where('vendorID', isEqualTo: vendorId)
+        .where('slotId', isEqualTo: slotId)
+        .where('date', isGreaterThanOrEqualTo: Timestamp.fromDate(startOfDay))
+        .where('date', isLessThan: Timestamp.fromDate(endOfDay))
+        .get();
+    return snapshot.docs.where((doc) {
+      final status = doc.data()['status'] as String? ?? '';
+      return status != 'Cancelled' && status != 'Rejected';
+    }).length;
+  }
+
   Future<OrderModel> placeOrder(OrderModel orderModel) async {
     DocumentReference documentReference = firestore.collection(ORDERS).doc(orderModel.id);
     orderModel.id = documentReference.id;

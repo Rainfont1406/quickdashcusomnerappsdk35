@@ -1,13 +1,15 @@
 import 'dart:io';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:country_code_picker/country_code_picker.dart';
 import 'package:easy_localization/easy_localization.dart';
+import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
+import 'package:emartconsumer/ui/auth_screen/login_screen.dart';
 import 'package:emartconsumer/ui/auth_screen/otp_screen.dart';
-import 'package:emartconsumer/ui/auth_screen/signup_screen.dart';
 import 'package:emartconsumer/ui/location_permission_screen.dart';
 import 'package:emartconsumer/ui/privacy_policy/privacy_policy.dart';
 import 'package:emartconsumer/ui/service_list_screen.dart';
@@ -65,7 +67,37 @@ class _PhoneNumberScreenState extends State<PhoneNumberScreen> {
     if (_isSending) return;
     if (mounted) setState(() => _isSending = true);
 
-    ShowToastDialog.showLoader('Please wait'.tr());
+    // Step 1: Check whether this phone number already has an account
+    ShowToastDialog.showLoader('Checking your account...');
+    bool isNewUser;
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection(USERS)
+          .where('phoneNumber', isEqualTo: _phoneController.text.trim())
+          .where('countryCode', isEqualTo: _countryCode)
+          .where('role', isEqualTo: USER_ROLE_CUSTOMER)
+          .get();
+      isNewUser = snap.docs.isEmpty;
+    } catch (_) {
+      ShowToastDialog.closeLoader();
+      if (mounted) setState(() => _isSending = false);
+      ShowToastDialog.showToast('Unable to connect right now. Please try again.');
+      return;
+    }
+    if (!mounted) {
+      ShowToastDialog.closeLoader();
+      setState(() => _isSending = false);
+      return;
+    }
+    ShowToastDialog.closeLoader();
+    if (!isNewUser) {
+      ShowToastDialog.showToast("Welcome back! Let's get you in.");
+    } else {
+      ShowToastDialog.showToast("Looks like you're new here. Let's create your account.");
+    }
+
+    // Step 2: Send OTP
+    ShowToastDialog.showLoader('Sending verification code...');
     try {
       await auth.FirebaseAuth.instance.verifyPhoneNumber(
         phoneNumber: _countryCode + _phoneController.text,
@@ -82,11 +114,11 @@ class _PhoneNumberScreenState extends State<PhoneNumberScreen> {
               break;
             case 'too-many-requests':
               ShowToastDialog.showToast(
-                  'Too many requests. Please wait a moment and try again.');
+                  'Too many attempts. Please try again in a few minutes.');
               break;
             case 'network-request-failed':
               ShowToastDialog.showToast(
-                  'Network error. Please check your internet connection.');
+                  'Unable to connect right now. Please try again.');
               break;
             default:
               ShowToastDialog.showToast(
@@ -95,6 +127,7 @@ class _PhoneNumberScreenState extends State<PhoneNumberScreen> {
         },
         codeSent: (String verificationId, int? resendToken) {
           ShowToastDialog.closeLoader();
+          ShowToastDialog.showToast('Verification code sent successfully.');
           if (mounted) setState(() => _isSending = false);
           if (!mounted) return;
           push(
@@ -115,7 +148,7 @@ class _PhoneNumberScreenState extends State<PhoneNumberScreen> {
       ShowToastDialog.closeLoader();
       if (mounted) setState(() => _isSending = false);
       ShowToastDialog.showToast(
-          'Too many requests. Please try again after some time.');
+          'Too many attempts. Please try again in a few minutes.');
     }
   }
 
@@ -221,10 +254,17 @@ class _PhoneNumberScreenState extends State<PhoneNumberScreen> {
                               ),
                             ],
                           ),
-                          padding: const EdgeInsets.all(8),
-                          child: Image.asset(
-                            'assets/images/app_logo_new.png',
-                            fit: BoxFit.contain,
+                          child: Center(
+                            child: Text(
+                              'Q',
+                              style: TextStyle(
+                                fontSize: 26,
+                                fontFamily: AppThemeData.bold,
+                                color: AppThemeData.primary500,
+                                height: 1.0,
+                                letterSpacing: -1.0,
+                              ),
+                            ),
                           ),
                         ),
                         const SizedBox(width: 12),
@@ -264,7 +304,9 @@ class _PhoneNumberScreenState extends State<PhoneNumberScreen> {
 
           // Form area
           Expanded(
-            child: SingleChildScrollView(
+            child: GestureDetector(
+              onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
+              child: SingleChildScrollView(
               padding: const EdgeInsets.fromLTRB(24, 28, 24, 16),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -537,6 +579,7 @@ class _PhoneNumberScreenState extends State<PhoneNumberScreen> {
                 ],
               ),
             ),
+            ),
           ),
 
           // Bottom sign up link
@@ -560,7 +603,7 @@ class _PhoneNumberScreenState extends State<PhoneNumberScreen> {
                     ),
                     TextSpan(
                       recognizer: TapGestureRecognizer()
-                        ..onTap = () => push(context, const SignupScreen()),
+                        ..onTap = () => pushAndRemoveUntil(context, const LoginScreen(startOnSignup: true)),
                       text: 'Sign up'.tr(),
                       style: const TextStyle(
                         color: AppThemeData.primary500,

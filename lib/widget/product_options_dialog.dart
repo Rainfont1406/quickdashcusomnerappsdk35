@@ -40,59 +40,69 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
   @override
   void initState() {
     super.initState();
+    // Eagerly initialize all selection state before the first build()
+    // to prevent RangeError when accessing selectedAddOns/selectedVariants.
+    _initSelectionsSync();
     _loadAttributes();
+  }
+
+  // Synchronous init — runs before the first build so no index is ever
+  // accessed on an empty list.
+  void _initSelectionsSync() {
+    // Add-ons: fill all slots with 0 immediately
+    selectedAddOns = List.filled(widget.productModel.addOnsTitle.length, 0);
+
+    // Variants: pick the first available option per attribute
+    final attrs = widget.productModel.itemAttributes?.attributes;
+    if (attrs == null || attrs.isEmpty) return;
+
+    for (int i = 0; i < attrs.length; i++) {
+      final options = attrs[i].attributeOptions;
+      if (options == null || options.isEmpty) {
+        // Keep lists in sync even when an attribute has no options
+        selectedVariants.add('');
+        selectedIndexVariants.add('$i _');
+        selectedIndexArray.add('${i}_-1');
+        continue;
+      }
+      String defaultOption = options[0].toString();
+      int defaultOptionIndex = 0;
+      for (int j = 0; j < options.length; j++) {
+        final opt = options[j].toString();
+        if (_isOptionAvailable(i, opt)) {
+          defaultOption = opt;
+          defaultOptionIndex = j;
+          break;
+        }
+      }
+      selectedVariants.add(defaultOption);
+      selectedIndexVariants.add('$i _$defaultOption');
+      selectedIndexArray.add('${i}_$defaultOptionIndex');
+    }
+    _updatePrice();
   }
 
   void _loadAttributes() async {
     try {
       final attributes = await FireStoreUtils.getAttributes();
-      setState(() {
-        attributesList = attributes;
-        isLoading = false;
-      });
-      _initializeSelections();
-      _updatePrice();
-    } catch (e) {
-      setState(() => isLoading = false);
-      _initializeSelections();
-      _updatePrice();
-    }
-  }
-
-  void _initializeSelections() {
-    if (widget.productModel.itemAttributes != null &&
-        widget.productModel.itemAttributes!.attributes!.isNotEmpty) {
-      for (var element in widget.productModel.itemAttributes!.attributes!) {
-        if (element.attributeOptions!.isNotEmpty) {
-          final attrIndex =
-              widget.productModel.itemAttributes!.attributes!.indexOf(element);
-          // Default to first option; prefer first available (non-OOS) option
-          String defaultOption = element.attributeOptions![0].toString();
-          int defaultOptionIndex = 0;
-          for (int i = 0; i < element.attributeOptions!.length; i++) {
-            final opt = element.attributeOptions![i].toString();
-            if (_isOptionAvailable(attrIndex, opt)) {
-              defaultOption = opt;
-              defaultOptionIndex = i;
-              break;
-            }
-          }
-          selectedVariants.add(defaultOption);
-          selectedIndexVariants.add('$attrIndex _$defaultOption');
-          selectedIndexArray.add('${attrIndex}_$defaultOptionIndex');
-        }
+      if (mounted) {
+        setState(() {
+          attributesList = attributes;
+          isLoading = false;
+        });
       }
+    } catch (e) {
+      if (mounted) setState(() => isLoading = false);
     }
-    selectedAddOns = List.filled(widget.productModel.addOnsTitle.length, 0);
   }
 
   void _updatePrice() {
     double basePrice = 0.0;
     double discountPrice = 0.0;
 
-    if (widget.productModel.itemAttributes != null &&
-        widget.productModel.itemAttributes!.attributes!.isNotEmpty) {
-      final variants = widget.productModel.itemAttributes!.variants!;
+    final attrs = widget.productModel.itemAttributes?.attributes;
+    final variants = widget.productModel.itemAttributes?.variants;
+    if (attrs != null && attrs.isNotEmpty && variants != null) {
       final matchingVariants = variants
           .where((e) => e.variant_sku == selectedVariants.join('-'));
       if (matchingVariants.isNotEmpty) {
@@ -111,10 +121,11 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
     }
 
     double addOnsTotal = 0.0;
+    final priceList = widget.productModel.addOnsPrice;
     for (int i = 0; i < selectedAddOns.length; i++) {
-      if (selectedAddOns[i] > 0) {
-        addOnsTotal += double.parse(productCommissionPrice(
-                widget.productModel.addOnsPrice[i].toString())) *
+      if (selectedAddOns[i] > 0 && i < priceList.length) {
+        addOnsTotal += double.parse(
+                productCommissionPrice(priceList[i].toString())) *
             selectedAddOns[i];
       }
     }
@@ -194,11 +205,12 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
       digitalProduct: widget.productModel.digitalProduct,
     );
 
+    final iaVariants = widget.productModel.itemAttributes?.variants;
+    final iaAttrs = widget.productModel.itemAttributes?.attributes;
     if (selectedVariants.isNotEmpty &&
-        widget.productModel.itemAttributes != null) {
-      final variants = widget.productModel.itemAttributes!.variants!;
-      final attrs = widget.productModel.itemAttributes!.attributes!;
-      final matchingVariants = variants
+        iaVariants != null &&
+        iaAttrs != null) {
+      final matchingVariants = iaVariants
           .where((e) => e.variant_sku == selectedVariants.join('-'));
       if (matchingVariants.isNotEmpty) {
         final selectedVariant = matchingVariants.first;
@@ -220,13 +232,14 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
           return;
         }
         final Map<String, String> mapData = {};
-        for (var attr in attrs) {
+        for (int ai = 0; ai < iaAttrs.length; ai++) {
+          if (ai >= selectedVariants.length) break;
+          final attr = iaAttrs[ai];
           final attrModel = attributesList.firstWhere(
             (a) => a.id == attr.attributesId,
             orElse: () => AttributesModel(id: attr.attributesId, title: attr.attributesId ?? ''),
           );
-          mapData[attrModel.title.toString()] =
-              selectedVariants[attrs.indexOf(attr)];
+          mapData[attrModel.title.toString()] = selectedVariants[ai];
         }
         updatedProduct.variant_info = VariantInfo(
           variant_id: selectedVariant.variant_id,
@@ -390,24 +403,20 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
           Divider(height: 20, thickness: 1, color: divColor),
 
           // ── Scrollable content ────────────────────────────────
-          if (isLoading && hasVariants)
-            const Padding(
-              padding: EdgeInsets.all(32),
-              child: CircularProgressIndicator(color: AppThemeData.primary500),
-            )
-          else
-            Flexible(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    if (hasVariants) ..._buildVariantsSection(),
-                    if (hasAddOns) ..._buildAddOnsSection(),
-                  ],
-                ),
+          // Selections are pre-initialized so content renders immediately.
+          // Attribute display names update once Firebase responds (isLoading).
+          Flexible(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (hasVariants) ..._buildVariantsSection(),
+                  if (hasAddOns) ..._buildAddOnsSection(),
+                ],
               ),
             ),
+          ),
 
           // ── Footer: price + add button ────────────────────────
           SafeArea(
@@ -502,6 +511,10 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
           if (found?.title?.isNotEmpty == true) attributeName = found!.title!;
         } catch (_) {}
 
+        // Skip attributes with no options instead of crashing on null/empty
+        final options = attribute.attributeOptions;
+        if (options == null || options.isEmpty) return const SizedBox.shrink();
+
         return Container(
           margin: const EdgeInsets.only(bottom: 14),
           padding: const EdgeInsets.all(12),
@@ -552,7 +565,7 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
               Wrap(
                 spacing: 8,
                 runSpacing: 8,
-                children: attribute.attributeOptions!
+                children: options
                     .asMap()
                     .entries
                     .map((optionEntry) {
@@ -658,6 +671,11 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
       ...widget.productModel.addOnsTitle.asMap().entries.map((entry) {
         int index = entry.key;
         String title = entry.value.toString();
+        // Guard against price list being shorter than title list
+        if (index >= widget.productModel.addOnsPrice.length ||
+            index >= selectedAddOns.length) {
+          return const SizedBox.shrink();
+        }
         String price = widget.productModel.addOnsPrice[index].toString();
         bool isSelected = selectedAddOns[index] > 0;
 

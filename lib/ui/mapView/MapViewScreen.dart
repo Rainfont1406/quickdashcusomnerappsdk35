@@ -67,7 +67,10 @@ class _MapViewScreenState extends State<MapViewScreen> {
       mapOsmController = osmMap.MapController(initPosition: osmMap.GeoPoint(latitude: 20.9153, longitude: -100.7439), useExternalTracking: false); //OSM
     }
     setState(() {
-      _mapFuture = fireStoreUtils.getVendors1().asBroadcastStream();
+      _mapFuture = (allstoreList.isNotEmpty
+              ? Stream.value(List<VendorModel>.from(allstoreList))
+              : fireStoreUtils.getAllStores())
+          .asBroadcastStream();
       vendorsFuture = _mapFuture;
     });
     setCustomMaker();

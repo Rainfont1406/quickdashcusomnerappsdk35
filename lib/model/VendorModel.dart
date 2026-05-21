@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:easy_localization/easy_localization.dart';
+import 'package:emartconsumer/model/BookingSlotModel.dart';
 import 'package:emartconsumer/model/DeliveryChargeModel.dart';
 import 'package:emartconsumer/model/SpecialDiscountModel.dart';
 import 'package:emartconsumer/model/WorkingHoursModel.dart';
@@ -58,6 +59,22 @@ class VendorModel {
   bool reststatus;
   bool isVendorOnline;
   bool enabledDiveInFuture;
+
+  // ── Dine-In Booking Configuration ──────────────────────────────
+  String bookingType;              // 'flexible' | 'slot_based'
+  String bookingOpenTime;
+  String bookingCloseTime;
+  int minBookingNoticeMinutes;
+  int maxAdvanceBookingDays;
+  int guestCapacity;
+  int bufferTimeBetweenReservations;
+  String bookingPricingModel;      // 'free' | 'per_person' | 'table_charge' | 'cover_charge'
+  num bookingCharge;
+  int minGuests;
+  int maxGuests;
+  String approvalMode;             // 'auto' | 'manual'
+  List<BookingSlotModel> bookingSlots;
+  String cuisineType;
   DeliveryChargeModel? deliveryCharge;
   List<WorkingHoursModel> workingHours;
   List<SpecialDiscountModel> specialDiscount;
@@ -98,6 +115,20 @@ class VendorModel {
       this.reststatus = false,
       this.isVendorOnline = false,
       this.enabledDiveInFuture = false,
+      this.bookingType = 'flexible',
+      this.bookingOpenTime = '',
+      this.bookingCloseTime = '',
+      this.minBookingNoticeMinutes = 30,
+      this.maxAdvanceBookingDays = 7,
+      this.guestCapacity = 50,
+      this.bufferTimeBetweenReservations = 15,
+      this.bookingPricingModel = 'free',
+      this.bookingCharge = 0,
+      this.minGuests = 1,
+      this.maxGuests = 20,
+      this.approvalMode = 'auto',
+      this.bookingSlots = const [],
+      this.cuisineType = '',
       geoFireData,
       this.deliveryCharge})
       : geoFireData = geoFireData ??
@@ -177,6 +208,22 @@ class VendorModel {
       workingHours: workingHours,
       specialDiscountEnable: parsedJson['specialDiscountEnable'] ?? false,
       specialDiscount: specialDiscount,
+      bookingType: parsedJson['bookingType'] as String? ?? 'flexible',
+      bookingOpenTime: parsedJson['bookingOpenTime'] as String? ?? '',
+      bookingCloseTime: parsedJson['bookingCloseTime'] as String? ?? '',
+      minBookingNoticeMinutes: (parsedJson['minBookingNoticeMinutes'] is num) ? (parsedJson['minBookingNoticeMinutes'] as num).toInt() : 30,
+      maxAdvanceBookingDays: (parsedJson['maxAdvanceBookingDays'] is num) ? (parsedJson['maxAdvanceBookingDays'] as num).toInt() : 7,
+      guestCapacity: (parsedJson['guestCapacity'] is num) ? (parsedJson['guestCapacity'] as num).toInt() : 50,
+      bufferTimeBetweenReservations: (parsedJson['bufferTimeBetweenReservations'] is num) ? (parsedJson['bufferTimeBetweenReservations'] as num).toInt() : 15,
+      bookingPricingModel: parsedJson['bookingPricingModel'] as String? ?? 'free',
+      bookingCharge: parsedJson['bookingCharge'] is num ? parsedJson['bookingCharge'] as num : 0,
+      minGuests: (parsedJson['minGuests'] is num) ? (parsedJson['minGuests'] as num).toInt() : 1,
+      maxGuests: (parsedJson['maxGuests'] is num) ? (parsedJson['maxGuests'] as num).toInt() : 20,
+      approvalMode: parsedJson['approvalMode'] as String? ?? 'auto',
+      bookingSlots: parsedJson.containsKey('bookingSlots') && parsedJson['bookingSlots'] is List
+          ? (parsedJson['bookingSlots'] as List).map((e) => BookingSlotModel.fromJson(e as Map<String, dynamic>)).toList()
+          : [],
+      cuisineType: parsedJson['cuisineType'] as String? ?? '',
     );
   }
 
@@ -217,6 +264,20 @@ class VendorModel {
       'specialDiscount': this.specialDiscount.map((e) => e.toJson()).toList(),
       'specialDiscountEnable': this.specialDiscountEnable,
       'workingHours': workingHours.map((e) => e.toJson()).toList(),
+      'bookingType': bookingType,
+      'bookingOpenTime': bookingOpenTime,
+      'bookingCloseTime': bookingCloseTime,
+      'minBookingNoticeMinutes': minBookingNoticeMinutes,
+      'maxAdvanceBookingDays': maxAdvanceBookingDays,
+      'guestCapacity': guestCapacity,
+      'bufferTimeBetweenReservations': bufferTimeBetweenReservations,
+      'bookingPricingModel': bookingPricingModel,
+      'bookingCharge': bookingCharge,
+      'minGuests': minGuests,
+      'maxGuests': maxGuests,
+      'approvalMode': approvalMode,
+      'bookingSlots': bookingSlots.map((e) => e.toJson()).toList(),
+      'cuisineType': cuisineType,
     };
     if (deliveryCharge != null) {
       json.addAll({'deliveryCharge': deliveryCharge!.toJson()});

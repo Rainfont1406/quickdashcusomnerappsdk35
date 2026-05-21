@@ -1,1314 +1,200 @@
-import 'dart:async';
-import 'dart:developer';
-
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/BookTableModel.dart';
-import 'package:emartconsumer/model/Ratingmodel.dart';
+import 'package:emartconsumer/model/BookingSlotModel.dart';
+import 'package:emartconsumer/model/User.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
-import 'package:emartconsumer/send_notification.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/auth_screen/login_screen.dart';
-import 'package:emartconsumer/ui/dineInScreen/my_booking_screen.dart';
-import 'package:emartconsumer/ui/fullScreenImageViewer/FullScreenImageViewer.dart';
-import 'package:emartconsumer/ui/vendorProductsScreen/photos.dart';
+import 'package:emartconsumer/ui/dineInScreen/booking_confirmation_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:google_maps_flutter/google_maps_flutter.dart';
-import 'package:share_plus/share_plus.dart';
-import 'package:url_launcher/url_launcher.dart';
-
-import '../vendorProductsScreen/newVendorProductsScreen.dart';
 
 class DineInRestaurantDetailsScreen extends StatefulWidget {
   final VendorModel vendorModel;
 
-  const DineInRestaurantDetailsScreen({Key? key, required this.vendorModel}) : super(key: key);
+  const DineInRestaurantDetailsScreen({Key? key, required this.vendorModel})
+      : super(key: key);
 
   @override
-  State<DineInRestaurantDetailsScreen> createState() => _DineInRestaurantDetailsScreenState();
+  State<DineInRestaurantDetailsScreen> createState() =>
+      _DineInRestaurantDetailsScreenState();
 }
 
-class _DineInRestaurantDetailsScreenState extends State<DineInRestaurantDetailsScreen> {
-  final fireStoreUtils = FireStoreUtils();
-
-  String _selectedOccasion = '';
-  bool _isFirstTime = false;
+class _DineInRestaurantDetailsScreenState
+    extends State<DineInRestaurantDetailsScreen> {
+  // ── State ──────────────────────────────────────────────────────
+  DateTime _selectedDate = DateTime.now();
+  String _selectedTime = '';          // for flexible
+  String _selectedSlotId = '';        // for slot-based
+  String _selectedSlotStart = '';
+  String _selectedSlotEnd = '';
   int _guestCount = 2;
-  final TextEditingController _reqController = TextEditingController();
 
-  String _userFName = '', _userLName = '', _userPhone = '', _userEmail = '';
+  // Slot booking count cache: slotId → count
+  Map<String, int> _slotBookingCounts = {};
+  bool _loadingSlotCounts = false;
 
-  var position = const LatLng(23.12, 70.22);
-  late Future<List<RatingModel>> ratingFuture;
-
-  var tags = [];
-  late List<String> occasionList;
-  List<Timestamp> dateList = [];
-  List<DateTime> timeSlotList = [];
-
-  Timestamp? _selectedDate;
-  String _selectedTimeSlot = '';
-
-  void _getUserLocation() {
-    setState(() {
-      position = LatLng(
-        MyAppState.selectedPosotion.location!.latitude,
-        MyAppState.selectedPosotion.location!.longitude,
-      );
-    });
-  }
-
-  DateTime _stringToDate(String time) {
-    return DateFormat('HH:mm').parse(
-      DateFormat('HH:mm').format(
-        DateFormat('hh:mm a').parse(
-          (Intl.getCurrentLocale() == 'en_US') ? time : time.toLowerCase(),
-        ),
-      ),
-    );
-  }
-
-  int _calculateDifference(DateTime date) {
-    final now = DateTime.now();
-    return DateTime(date.year, date.month, date.day)
-        .difference(DateTime(now.year, now.month, now.day))
-        .inDays;
-  }
-
-  List<DateTime> get _availableTimeSlots {
-    if (_selectedDate == null || timeSlotList.isEmpty) return timeSlotList;
-    final now = DateTime.now();
-    final selected = _selectedDate!.toDate();
-    final isToday = selected.year == now.year &&
-        selected.month == now.month &&
-        selected.day == now.day;
-    if (!isToday) return timeSlotList;
-    final cutoff = now.add(const Duration(minutes: 30));
-    return timeSlotList.where((slot) {
-      final slotToday = DateTime(now.year, now.month, now.day, slot.hour, slot.minute);
-      return slotToday.isAfter(cutoff);
-    }).toList();
-  }
-
-  void _onDateSelected(Timestamp ts) {
-    setState(() {
-      _selectedDate = ts;
-      final available = _availableTimeSlots;
-      if (available.isNotEmpty) {
-        _selectedTimeSlot = DateFormat('hh:mm a').format(available.first);
-      } else {
-        _selectedTimeSlot = '';
-      }
-    });
-  }
+  static const Color _accent = Color(0xFFFF8A50);
+  static const LinearGradient _accentGrad = LinearGradient(
+    colors: [Color(0xFFFF8A50), Color(0xFFFFB07F)],
+    begin: Alignment.topLeft,
+    end: Alignment.bottomRight,
+  );
 
   @override
   void initState() {
     super.initState();
-    _getUserLocation();
-    occasionList = ['Birthday'.tr(), 'Anniversary'.tr()];
-
-    for (int i = 0; i < 10; i++) {
-      dateList.add(Timestamp.fromDate(DateTime.now().add(Duration(days: i))));
-    }
-
-    DateTime startTime = DateTime.now().add(const Duration(hours: 9));
-    DateTime endTime = DateTime.now().add(const Duration(hours: 21));
-
-    if (widget.vendorModel.openDineTime.isNotEmpty) {
-      startTime = _stringToDate(widget.vendorModel.openDineTime);
-    }
-    if (widget.vendorModel.closeDineTime.isNotEmpty) {
-      endTime = _stringToDate(widget.vendorModel.closeDineTime);
-    }
-
-    for (DateTime t = startTime; t.isBefore(endTime); t = t.add(const Duration(minutes: 30))) {
-      timeSlotList.add(t);
-    }
-
-    // Auto-select today and first available slot
-    _selectedDate = dateList.isNotEmpty ? dateList[0] : null;
-    final available = _availableTimeSlots;
-    _selectedTimeSlot = available.isNotEmpty ? DateFormat('hh:mm a').format(available.first) : '';
-
-    ratingFuture = fireStoreUtils.getReviewsbyVendorID(widget.vendorModel.id);
-    fireStoreUtils.getVendorCusions(widget.vendorModel.id).then((value) {
-      tags.addAll(value);
-      if (mounted) setState(() {});
-    });
-
-    if (MyAppState.currentUser != null) {
-      _userFName = MyAppState.currentUser!.firstName;
-      _userLName = MyAppState.currentUser!.lastName;
-      _userEmail = MyAppState.currentUser!.email;
-      _userPhone = MyAppState.currentUser!.phoneNumber;
+    // Clamp guest count to vendor's limits
+    _guestCount = widget.vendorModel.minGuests.clamp(1, 100);
+    if (widget.vendorModel.bookingType == 'slot_based') {
+      _loadSlotCounts();
     }
   }
 
-  @override
-  void dispose() {
-    _reqController.dispose();
-    super.dispose();
+  // ── Slot Availability ──────────────────────────────────────────
+  Future<void> _loadSlotCounts() async {
+    setState(() => _loadingSlotCounts = true);
+    final Map<String, int> counts = {};
+    for (final slot in widget.vendorModel.bookingSlots) {
+      counts[slot.id] = await FireStoreUtils.getSlotBookingCount(
+        vendorId: widget.vendorModel.id,
+        slotId: slot.id,
+        date: _selectedDate,
+      );
+    }
+    if (mounted) setState(() {
+      _slotBookingCounts = counts;
+      _loadingSlotCounts = false;
+      // Reset slot selection if it became unavailable
+      if (_selectedSlotId.isNotEmpty) {
+        final slot = widget.vendorModel.bookingSlots
+            .where((s) => s.id == _selectedSlotId)
+            .firstOrNull;
+        if (slot == null || !_isSlotAvailable(slot)) {
+          _selectedSlotId = '';
+          _selectedSlotStart = '';
+          _selectedSlotEnd = '';
+        }
+      }
+    });
+  }
+
+  bool _isSlotAvailable(BookingSlotModel slot) {
+    if (!slot.isEnabled) return false;
+    final count = _slotBookingCounts[slot.id] ?? 0;
+    return count < slot.maxCapacity;
+  }
+
+  // ── Price calculation ──────────────────────────────────────────
+  num get _totalCharge {
+    final vendor = widget.vendorModel;
+    switch (vendor.bookingPricingModel) {
+      case 'per_person':
+      case 'cover_charge':
+        return vendor.bookingCharge * _guestCount;
+      case 'table_charge':
+        return vendor.bookingCharge;
+      default:
+        return 0;
+    }
+  }
+
+  double _getKm() {
+    if (MyAppState.selectedPosotion.location == null) return 0;
+    return Geolocator.distanceBetween(
+          widget.vendorModel.latitude,
+          widget.vendorModel.longitude,
+          MyAppState.selectedPosotion.location!.latitude,
+          MyAppState.selectedPosotion.location!.longitude,
+        ) /
+        1000;
+  }
+
+  bool get _canConfirm {
+    if (widget.vendorModel.bookingType == 'slot_based') {
+      return _selectedSlotId.isNotEmpty;
+    }
+    return _selectedTime.isNotEmpty;
   }
 
   @override
   Widget build(BuildContext context) {
     final bool dark = isDarkMode(context);
-    double distanceInMeters = Geolocator.distanceBetween(
-        widget.vendorModel.latitude, widget.vendorModel.longitude,
-        position.latitude, position.longitude);
-    double kilometer = distanceInMeters / 1000;
-    double minutes = 1.2;
-    double value = minutes * kilometer;
-    final int hour = value ~/ 60;
-    final double minute = value % 60;
-
     return Scaffold(
-      backgroundColor: dark ? AppThemeData.surfaceDark : AppThemeData.surface,
-      body: SingleChildScrollView(
-        child: Container(
-          color: dark ? Colors.black : const Color(0xffFFFFFF),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Stack(children: [
-                Container(
-                  height: MediaQuery.of(context).size.height * 0.3,
-                  width: double.infinity,
-                  child: CachedNetworkImage(
-                    imageUrl: getImageVAlidUrl(widget.vendorModel.photo),
-                    imageBuilder: (context, imageProvider) => Container(
-                      decoration: BoxDecoration(
-                        image: DecorationImage(image: imageProvider, fit: BoxFit.cover),
-                      ),
-                    ),
-                    placeholder: (context, url) => Container(
-                      color: AppThemeData.grey100,
-                      child: Center(child: CircularProgressIndicator.adaptive(
-                        valueColor: AlwaysStoppedAnimation(AppThemeData.primary500),
-                      )),
-                    ),
-                    errorWidget: (context, url, error) => Image.network(
-                      placeholderImage,
-                      fit: BoxFit.cover,
-                    ),
-                    fit: BoxFit.cover,
-                  ),
-                ),
-                Positioned(
-                  top: MediaQuery.of(context).padding.top + 8,
-                  left: 12,
-                  child: CircleAvatar(
-                    backgroundColor: Colors.black54,
-                    radius: 20,
-                    child: IconButton(
-                      onPressed: () => Navigator.pop(context),
-                      icon: const Icon(Icons.arrow_back, color: Colors.white, size: 20),
-                    ),
-                  ),
-                ),
-                Positioned(
-                  bottom: 10,
-                  right: 12,
-                  child: Material(
-                    color: Colors.black54,
-                    borderRadius: BorderRadius.circular(20),
-                    child: InkWell(
-                      borderRadius: BorderRadius.circular(20),
-                      onTap: () => push(context, StorePhotos(vendorModel: widget.vendorModel)),
-                      child: const Padding(
-                        padding: EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                        child: Row(children: [
-                          Icon(Icons.photo_library_outlined, color: Colors.white, size: 16),
-                          SizedBox(width: 4),
-                          Text('Photos', style: TextStyle(color: Colors.white, fontSize: 13)),
-                        ]),
-                      ),
-                    ),
-                  ),
-                ),
-              ]),
-              // Title + open/closed
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  crossAxisAlignment: CrossAxisAlignment.start,
+      backgroundColor: dark ? AppThemeData.surfaceDark : const Color(0xFFF5F5F5),
+      body: Stack(
+        children: [
+          CustomScrollView(
+            slivers: [
+              _buildSliverHeader(dark),
+              SliverToBoxAdapter(
+                child: Column(
                   children: [
-                    Expanded(
-                      child: Text(
-                        widget.vendorModel.title,
-                        style: TextStyle(
-                          fontSize: 20,
-                          fontFamily: AppThemeData.semiBold,
-                          color: dark ? Colors.white : const Color(0xff2A2A2A),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    _buildOpenClosedBadge(),
+                    _buildRestaurantInfo(dark),
+                    const SizedBox(height: 8),
+                    _buildDateSelector(dark),
+                    const SizedBox(height: 8),
+                    if (widget.vendorModel.bookingType == 'slot_based')
+                      _buildSlotGrid(dark)
+                    else
+                      _buildTimePicker(dark),
+                    const SizedBox(height: 8),
+                    _buildGuestStepper(dark),
+                    const SizedBox(height: 8),
+                    _buildPriceSummary(dark),
+                    const SizedBox(height: 120),
                   ],
                 ),
               ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
-                child: Row(children: [
-                  Icon(Icons.location_on_outlined, size: 16, color: AppThemeData.grey400),
-                  const SizedBox(width: 4),
-                  Expanded(
-                    child: Text(
-                      widget.vendorModel.location,
-                      maxLines: 2,
-                      style: const TextStyle(fontSize: 13, color: AppThemeData.grey400),
-                    ),
-                  ),
-                ]),
-              ),
-              // Info row
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 8),
-                  decoration: BoxDecoration(
-                    color: dark ? const Color(0xFF1A1A2E) : Colors.white,
-                    borderRadius: BorderRadius.circular(12),
-                    boxShadow: dark
-                        ? []
-                        : [BoxShadow(color: Colors.grey.shade200, blurRadius: 8, spreadRadius: 1)],
-                  ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceAround,
-                    children: [
-                      _infoColumn(
-                        icon: Icons.straighten,
-                        label: '${kilometer.toStringAsFixed(currencyData?.decimal ?? 1)} km',
-                      ),
-                      _verticalDivider(),
-                      _infoColumn(
-                        icon: Icons.payments_outlined,
-                        label: widget.vendorModel.vendorCost == 0
-                            ? 'Free'.tr()
-                            : amountShow(amount: widget.vendorModel.vendorCost.toString()) + ' for 2',
-                      ),
-                      _verticalDivider(),
-                      _infoColumn(
-                        icon: Icons.star_rounded,
-                        label: widget.vendorModel.reviewsCount == 0
-                            ? '0.0'
-                            : (widget.vendorModel.reviewsSum / widget.vendorModel.reviewsCount)
-                                .toStringAsFixed(1),
-                      ),
-                      _verticalDivider(),
-                      GestureDetector(
-                        onTap: () async {
-                          await Share.share(
-                            '${widget.vendorModel.location}\n${widget.vendorModel.photo}',
-                            subject: widget.vendorModel.title,
-                          );
-                        },
-                        child: _infoColumn(icon: Icons.share_outlined, label: 'Share'.tr()),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              // Delivery card
-              _actionCard(
-                context: context,
-                icon: 'assets/images/food_delivery.png',
-                title: 'Available food delivery'.tr(),
-                subtitle:
-                    '${hour.toString().padLeft(2, '0')}h ${minute.toStringAsFixed(0).padLeft(2, '0')} ${'min'.tr()}',
-                onTap: () => push(context, NewVendorProductsScreen(vendorModel: widget.vendorModel)),
-              ),
-              // Book a table card
-              _actionCard(
-                context: context,
-                icon: 'assets/images/book_table.png',
-                title: 'Book a Table'.tr(),
-                subtitle: 'Get instant confirmation'.tr(),
-                onTap: () {
-                  if (MyAppState.currentUser == null) {
-                    push(context, const LoginScreen());
-                  } else {
-                    _bookTableSheet();
-                  }
-                },
-                highlight: true,
-              ),
-              // Menu photos
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 20, 16, 0),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text('Menus'.tr(),
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontFamily: AppThemeData.semiBold,
-                          color: dark ? Colors.white : Colors.black,
-                        )),
-                    if (widget.vendorModel.vendorMenuPhotos.isNotEmpty)
-                      GestureDetector(
-                        onTap: () => push(context,
-                            StoreMenuPhoto(vendorMenuPhotos: widget.vendorModel.vendorMenuPhotos)),
-                        child: Text('View All'.tr(),
-                            style: TextStyle(color: AppThemeData.primary500, fontSize: 13)),
-                      ),
-                  ],
-                ),
-              ),
-              widget.vendorModel.vendorMenuPhotos.isEmpty
-                  ? Padding(
-                      padding: const EdgeInsets.all(12),
-                      child: showEmptyState('No Menu Photos'.tr(), context),
-                    )
-                  : SizedBox(
-                      height: 100,
-                      child: ListView.builder(
-                        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-                        scrollDirection: Axis.horizontal,
-                        itemCount: widget.vendorModel.vendorMenuPhotos.length,
-                        itemBuilder: (context, index) {
-                          return InkWell(
-                            onTap: () => push(context,
-                                FullScreenImageViewer(
-                                    imageUrl: widget.vendorModel.vendorMenuPhotos[index])),
-                            child: Padding(
-                              padding: const EdgeInsets.only(right: 8),
-                              child: ClipRRect(
-                                borderRadius: BorderRadius.circular(10),
-                                child: CachedNetworkImage(
-                                  height: 80,
-                                  width: 80,
-                                  imageUrl: getImageVAlidUrl(
-                                      widget.vendorModel.vendorMenuPhotos[index]),
-                                  fit: BoxFit.cover,
-                                  placeholder: (c, u) => Container(color: AppThemeData.grey100),
-                                  errorWidget: (c, u, e) =>
-                                      Image.network(placeholderImage, fit: BoxFit.cover),
-                                ),
-                              ),
-                            ),
-                          );
-                        },
-                      ),
-                    ),
-              const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 16),
-                child: Divider(color: Colors.black12),
-              ),
-              // Info section
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-                child: Column(children: [
-                  _infoRow(
-                    iconAsset: 'assets/images/time.png',
-                    title: 'Timings'.tr(),
-                    value:
-                        '${widget.vendorModel.openDineTime.isEmpty ? "10:00 AM" : widget.vendorModel.openDineTime}'
-                        ' — '
-                        '${widget.vendorModel.closeDineTime.isEmpty ? "10:00 PM" : widget.vendorModel.closeDineTime}',
-                    dark: dark,
-                  ),
-                  const SizedBox(height: 14),
-                  _infoRow(
-                    iconAsset: 'assets/images/price.png',
-                    title: 'Cost'.tr(),
-                    value: widget.vendorModel.vendorCost == 0
-                        ? 'Approx cost is not added'.tr()
-                        : '${'Cost for two'.tr()} ${amountShow(amount: widget.vendorModel.vendorCost.toString())} (${'Approx'.tr()})',
-                    dark: dark,
-                  ),
-                  const SizedBox(height: 14),
-                  Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Image(
-                        image: const AssetImage('assets/images/location.png'),
-                        color: AppThemeData.primary500,
-                        height: 22),
-                    const SizedBox(width: 14),
-                    Expanded(
-                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        Text('Location'.tr(),
-                            style: TextStyle(
-                              fontFamily: AppThemeData.semiBold,
-                              color: dark ? Colors.white : Colors.black,
-                            )),
-                        const SizedBox(height: 2),
-                        Text(widget.vendorModel.location,
-                            style: TextStyle(
-                                color: dark ? AppThemeData.grey300 : AppThemeData.grey600)),
-                      ]),
-                    ),
-                    GestureDetector(
-                      onTap: () => launchUrl(createCoordinatesUrl(
-                          widget.vendorModel.latitude, widget.vendorModel.longitude,
-                          widget.vendorModel.title)),
-                      child: Text('Direction'.tr(),
-                          style: TextStyle(color: AppThemeData.primary500, fontSize: 13)),
-                    ),
-                  ]),
-                ]),
-              ),
-              const Padding(
-                padding: EdgeInsets.fromLTRB(16, 12, 16, 0),
-                child: Divider(color: Colors.black12),
-              ),
-              // Cuisines
-              if (tags.isNotEmpty) ...[
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-                  child: Text('Cuisines'.tr(),
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontFamily: AppThemeData.semiBold,
-                        color: dark ? Colors.white : Colors.black,
-                      )),
-                ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
-                  child: Wrap(
-                    spacing: 6,
-                    runSpacing: 4,
-                    children: tags
-                        .map((tag) => Chip(
-                              label: Text('$tag',
-                                  style: TextStyle(color: AppThemeData.primary500, fontSize: 12)),
-                              backgroundColor: AppThemeData.primary500.withOpacity(0.08),
-                              side: BorderSide(color: AppThemeData.primary500.withOpacity(0.3)),
-                              padding: EdgeInsets.zero,
-                            ))
-                        .toList(),
-                  ),
-                ),
-              ],
-              const SizedBox(height: 20),
             ],
           ),
-        ),
+          _buildConfirmButton(dark),
+        ],
       ),
     );
   }
 
-  Widget _buildOpenClosedBadge() {
-    final bool open = widget.vendorModel.reststatus == true;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-      decoration: BoxDecoration(
-        color: open ? const Color(0xFFE8F5E9) : const Color(0xFFFFEBEE),
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Row(mainAxisSize: MainAxisSize.min, children: [
-        Icon(Icons.circle, size: 8, color: open ? const Color(0xFF2E7D32) : AppThemeData.error500),
-        const SizedBox(width: 5),
-        Text(
-          open ? 'Open'.tr() : 'Closed'.tr(),
-          style: TextStyle(
-            fontSize: 12,
-            fontFamily: AppThemeData.semiBold,
-            color: open ? const Color(0xFF2E7D32) : AppThemeData.error500,
-          ),
-        ),
-      ]),
-    );
-  }
-
-  Widget _infoColumn({required IconData icon, required String label}) {
-    final bool dark = isDarkMode(context);
-    return Column(mainAxisSize: MainAxisSize.min, children: [
-      Icon(icon, color: AppThemeData.primary500, size: 22),
-      const SizedBox(height: 6),
-      Text(label,
-          style: TextStyle(
-            fontSize: 11,
-            color: dark ? AppThemeData.grey300 : AppThemeData.grey600,
-          ),
-          textAlign: TextAlign.center),
-    ]);
-  }
-
-  Widget _verticalDivider() {
-    return Container(height: 32, width: 1, color: AppThemeData.grey200);
-  }
-
-  Widget _actionCard({
-    required BuildContext context,
-    required String icon,
-    required String title,
-    required String subtitle,
-    required VoidCallback onTap,
-    bool highlight = false,
-  }) {
-    final bool dark = isDarkMode(context);
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-        padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(
-          color: dark ? const Color(0xFF1A1A2E) : Colors.white,
-          borderRadius: BorderRadius.circular(12),
-          border: highlight
-              ? Border.all(color: AppThemeData.primary500.withOpacity(0.4), width: 1.2)
-              : Border.all(color: Colors.black12, width: 0.8),
-          boxShadow: dark
-              ? []
-              : [BoxShadow(color: Colors.grey.shade200, blurRadius: 8, spreadRadius: 1)],
-        ),
-        child: Row(children: [
-          Image(image: AssetImage(icon), height: 32, color: AppThemeData.primary500),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(title,
-                  style: TextStyle(
-                    fontFamily: AppThemeData.semiBold,
-                    fontSize: 14,
-                    color: dark ? Colors.white : Colors.black,
-                  )),
-              const SizedBox(height: 2),
-              Text(subtitle,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: dark ? AppThemeData.grey400 : AppThemeData.grey500,
-                  )),
-            ]),
-          ),
-          Container(
-            padding: const EdgeInsets.all(6),
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              border: Border.all(
-                color: highlight ? AppThemeData.primary500 : Colors.black26,
-                width: 1,
-              ),
+  // ─── Sliver Header ────────────────────────────────────────────
+  Widget _buildSliverHeader(bool dark) {
+    return SliverAppBar(
+      expandedHeight: 240,
+      pinned: true,
+      backgroundColor: _accent,
+      foregroundColor: Colors.white,
+      flexibleSpace: FlexibleSpaceBar(
+        background: Stack(
+          fit: StackFit.expand,
+          children: [
+            CachedNetworkImage(
+              imageUrl: getImageVAlidUrl(widget.vendorModel.photo),
+              fit: BoxFit.cover,
+              placeholder: (_, __) =>
+                  Container(color: Colors.grey.shade300),
+              errorWidget: (_, __, ___) =>
+                  Container(color: Colors.grey.shade300,
+                      child: const Icon(Icons.restaurant, size: 40, color: Colors.grey)),
             ),
-            child: Icon(
-              Icons.arrow_forward_ios_rounded,
-              size: 14,
-              color: highlight ? AppThemeData.primary500 : (dark ? Colors.white54 : Colors.black54),
-            ),
-          ),
-        ]),
-      ),
-    );
-  }
-
-  Widget _infoRow({
-    required String iconAsset,
-    required String title,
-    required String value,
-    required bool dark,
-  }) {
-    return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Image(image: AssetImage(iconAsset), color: AppThemeData.primary500, height: 22),
-      const SizedBox(width: 14),
-      Expanded(
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(title,
-              style: TextStyle(
-                fontFamily: AppThemeData.semiBold,
-                color: dark ? Colors.white : Colors.black,
-              )),
-          const SizedBox(height: 2),
-          Text(value,
-              style: TextStyle(
-                  color: dark ? AppThemeData.grey300 : AppThemeData.grey600, fontSize: 13)),
-        ]),
-      ),
-    ]);
-  }
-
-  // ─── Booking Sheet ──────────────────────────────────────────────────────────
-
-  void _bookTableSheet() {
-    // Reset per-session state
-    _selectedOccasion = '';
-    _isFirstTime = false;
-    _guestCount = 2;
-    _reqController.clear();
-    _selectedDate = dateList.isNotEmpty ? dateList[0] : null;
-    final available = _availableTimeSlots;
-    _selectedTimeSlot = available.isNotEmpty ? DateFormat('hh:mm a').format(available.first) : '';
-
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setSheetState) {
-          final bool dark = isDarkMode(context);
-          final available = _availableTimeSlots;
-          final double sheetH = (MediaQuery.of(context).size.height - MediaQuery.of(context).padding.top - 32)
-              .clamp(400.0, MediaQuery.of(context).size.height * 0.92);
-          return Container(
-            height: sheetH,
-            decoration: BoxDecoration(
-              color: dark ? AppThemeData.darkBgSecondary : Colors.white,
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
-            ),
-            child: Column(
-              children: [
-                // Handle bar
-                Padding(
-                  padding: const EdgeInsets.only(top: 12),
-                  child: Container(
-                    width: 40,
-                    height: 4,
-                    decoration: BoxDecoration(
-                      color: dark ? AppThemeData.darkBorderPrimary : AppThemeData.grey300,
-                      borderRadius: BorderRadius.circular(2),
-                    ),
+            // Dark gradient overlay at bottom
+            Positioned(
+              bottom: 0,
+              left: 0,
+              right: 0,
+              height: 100,
+              child: Container(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [Colors.transparent, Colors.black.withOpacity(0.6)],
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
                   ),
                 ),
-                // Header
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                          Text('Book a Table'.tr(),
-                              style: TextStyle(
-                                fontSize: 18,
-                                fontFamily: AppThemeData.semiBold,
-                                color: dark ? Colors.white : Colors.black,
-                              )),
-                          Text(widget.vendorModel.title,
-                              style: TextStyle(
-                                fontSize: 13,
-                                color: dark ? AppThemeData.grey400 : AppThemeData.grey500,
-                              )),
-                        ]),
-                      ),
-                      IconButton(
-                        onPressed: () => Navigator.pop(ctx),
-                        icon: Icon(Icons.close,
-                            color: dark ? Colors.white54 : Colors.black45, size: 22),
-                      ),
-                    ],
-                  ),
-                ),
-                Divider(color: dark ? AppThemeData.darkBorderPrimary : AppThemeData.grey200,
-                    height: 1),
-                // Scrollable content
-                Expanded(
-                  child: SingleChildScrollView(
-                    padding: EdgeInsets.only(
-                      bottom: MediaQuery.of(context).viewInsets.bottom + 20,
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        // DATE
-                        _sheetSection(
-                          label: 'Select Date'.tr(),
-                          dark: dark,
-                          child: SizedBox(
-                            height: (MediaQuery.of(context).size.height * 0.11).clamp(72.0, 100.0),
-                            child: ListView.separated(
-                              padding: const EdgeInsets.symmetric(horizontal: 16),
-                              scrollDirection: Axis.horizontal,
-                              itemCount: dateList.length,
-                              separatorBuilder: (_, __) => const SizedBox(width: 8),
-                              itemBuilder: (_, index) {
-                                final ts = dateList[index];
-                                final isSelected = _selectedDate == ts;
-                                final diff = _calculateDifference(ts.toDate());
-                                return GestureDetector(
-                                  onTap: () => setSheetState(() => _onDateSelected(ts)),
-                                  child: AnimatedContainer(
-                                    duration: const Duration(milliseconds: 180),
-                                    width: 70,
-                                    decoration: BoxDecoration(
-                                      color: isSelected
-                                          ? AppThemeData.primary500
-                                          : (dark ? AppThemeData.darkBgTertiary : AppThemeData.grey100),
-                                      borderRadius: BorderRadius.circular(12),
-                                      border: isSelected
-                                          ? null
-                                          : Border.all(
-                                              color: dark
-                                                  ? AppThemeData.darkBorderPrimary
-                                                  : AppThemeData.grey200),
-                                    ),
-                                    child: Column(
-                                      mainAxisAlignment: MainAxisAlignment.center,
-                                      children: [
-                                        Text(
-                                          diff == 0
-                                              ? 'Today'.tr()
-                                              : diff == 1
-                                                  ? 'Tmrw'.tr()
-                                                  : DateFormat('EEE', 'en_US').format(ts.toDate()),
-                                          style: TextStyle(
-                                            fontSize: 11,
-                                            fontFamily: AppThemeData.medium,
-                                            color: isSelected ? Colors.white70 : AppThemeData.grey500,
-                                          ),
-                                        ),
-                                        const SizedBox(height: 4),
-                                        Text(
-                                          DateFormat('d').format(ts.toDate()),
-                                          style: TextStyle(
-                                            fontSize: 20,
-                                            fontFamily: AppThemeData.semiBold,
-                                            color: isSelected ? Colors.white : (dark ? Colors.white : Colors.black),
-                                          ),
-                                        ),
-                                        Text(
-                                          DateFormat('MMM').format(ts.toDate()),
-                                          style: TextStyle(
-                                            fontSize: 11,
-                                            color: isSelected ? Colors.white70 : AppThemeData.grey500,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                );
-                              },
-                            ),
-                          ),
-                        ),
-                        // TIME SLOTS
-                        _sheetSection(
-                          label: 'Select Time'.tr(),
-                          dark: dark,
-                          child: available.isEmpty
-                              ? Padding(
-                                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                                  child: Container(
-                                    padding: const EdgeInsets.all(12),
-                                    decoration: BoxDecoration(
-                                      color: AppThemeData.danger50,
-                                      borderRadius: BorderRadius.circular(8),
-                                    ),
-                                    child: Row(children: [
-                                      Icon(Icons.info_outline, color: AppThemeData.error500, size: 18),
-                                      const SizedBox(width: 8),
-                                      Expanded(
-                                        child: Text(
-                                          'No time slots available for today. Please select another date.'.tr(),
-                                          style: const TextStyle(
-                                            fontSize: 12, color: AppThemeData.error500,
-                                          ),
-                                        ),
-                                      ),
-                                    ]),
-                                  ),
-                                )
-                              : SizedBox(
-                                  height: (MediaQuery.of(context).size.height * 0.075).clamp(48.0, 70.0),
-                                  child: ListView.separated(
-                                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                                    scrollDirection: Axis.horizontal,
-                                    itemCount: available.length,
-                                    separatorBuilder: (_, __) => const SizedBox(width: 8),
-                                    itemBuilder: (_, index) {
-                                      final slot = available[index];
-                                      final label = DateFormat('hh:mm a').format(slot);
-                                      final isSelected = _selectedTimeSlot == label;
-                                      return GestureDetector(
-                                        onTap: () => setSheetState(() => _selectedTimeSlot = label),
-                                        child: AnimatedContainer(
-                                          duration: const Duration(milliseconds: 180),
-                                          padding: const EdgeInsets.symmetric(horizontal: 14),
-                                          decoration: BoxDecoration(
-                                            color: isSelected
-                                                ? AppThemeData.primary500
-                                                : (dark ? AppThemeData.darkBgTertiary : AppThemeData.grey100),
-                                            borderRadius: BorderRadius.circular(10),
-                                            border: isSelected
-                                                ? null
-                                                : Border.all(
-                                                    color: dark
-                                                        ? AppThemeData.darkBorderPrimary
-                                                        : AppThemeData.grey200),
-                                          ),
-                                          child: Center(
-                                            child: Text(
-                                              label,
-                                              style: TextStyle(
-                                                fontSize: 13,
-                                                fontFamily: AppThemeData.medium,
-                                                color: isSelected
-                                                    ? Colors.white
-                                                    : (dark ? Colors.white70 : Colors.black87),
-                                              ),
-                                            ),
-                                          ),
-                                        ),
-                                      );
-                                    },
-                                  ),
-                                ),
-                        ),
-                        // GUEST COUNT
-                        _sheetSection(
-                          label: 'Number of Guests'.tr(),
-                          dark: dark,
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 16),
-                            child: Row(children: [
-                              _guestButton(
-                                icon: Icons.remove,
-                                onTap: _guestCount > 1
-                                    ? () => setSheetState(() => _guestCount--)
-                                    : null,
-                                dark: dark,
-                              ),
-                              Expanded(
-                                child: Column(children: [
-                                  Text(
-                                    '$_guestCount',
-                                    style: TextStyle(
-                                      fontSize: 28,
-                                      fontFamily: AppThemeData.semiBold,
-                                      color: dark ? Colors.white : Colors.black,
-                                    ),
-                                  ),
-                                  Text(
-                                    _guestCount == 1 ? 'Person'.tr() : 'People'.tr(),
-                                    style: const TextStyle(
-                                        fontSize: 12, color: AppThemeData.grey500),
-                                  ),
-                                ]),
-                              ),
-                              _guestButton(
-                                icon: Icons.add,
-                                onTap: _guestCount < 20
-                                    ? () => setSheetState(() => _guestCount++)
-                                    : null,
-                                dark: dark,
-                              ),
-                            ]),
-                          ),
-                        ),
-                        // PERSONAL DETAILS
-                        _sheetSection(
-                          label: 'Personal Details'.tr(),
-                          dark: dark,
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 16),
-                            child: Container(
-                              padding: const EdgeInsets.all(14),
-                              decoration: BoxDecoration(
-                                color: dark ? AppThemeData.darkBgTertiary : AppThemeData.grey100,
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: Row(
-                                children: [
-                                  CircleAvatar(
-                                    radius: 22,
-                                    backgroundColor: AppThemeData.primary500.withOpacity(0.12),
-                                    child: Icon(Icons.person_outline,
-                                        color: AppThemeData.primary500, size: 22),
-                                  ),
-                                  const SizedBox(width: 12),
-                                  Expanded(
-                                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                                      Text('$_userFName $_userLName',
-                                          style: TextStyle(
-                                            fontFamily: AppThemeData.semiBold,
-                                            fontSize: 14,
-                                            color: dark ? Colors.white : Colors.black,
-                                          )),
-                                      Text(_userPhone,
-                                          style: TextStyle(
-                                            fontSize: 12,
-                                            color: dark ? AppThemeData.grey400 : AppThemeData.grey500,
-                                          )),
-                                      Text(_userEmail,
-                                          style: TextStyle(
-                                            fontSize: 12,
-                                            color: dark ? AppThemeData.grey400 : AppThemeData.grey500,
-                                          )),
-                                    ]),
-                                  ),
-                                  TextButton(
-                                    onPressed: () {
-                                      _showPersonalDetailsDialog(context, () {
-                                        setSheetState(() {});
-                                      });
-                                    },
-                                    style: TextButton.styleFrom(
-                                      foregroundColor: AppThemeData.primary500,
-                                      padding: EdgeInsets.zero,
-                                      minimumSize: Size.zero,
-                                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                                    ),
-                                    child: Text('Edit'.tr(),
-                                        style: const TextStyle(
-                                            fontSize: 12, fontFamily: AppThemeData.semiBold)),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ),
-                        // SPECIAL OCCASION
-                        _sheetSection(
-                          label: 'Special Occasion (Optional)'.tr(),
-                          dark: dark,
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 16),
-                            child: Wrap(
-                              spacing: 8,
-                              children: occasionList.map((occ) {
-                                final selected = _selectedOccasion == occ;
-                                return ChoiceChip(
-                                  label: Text(occ),
-                                  selected: selected,
-                                  onSelected: (_) => setSheetState(() {
-                                    _selectedOccasion = selected ? '' : occ;
-                                  }),
-                                  selectedColor: AppThemeData.primary500,
-                                  labelStyle: TextStyle(
-                                    color: selected ? Colors.white : (dark ? Colors.white70 : Colors.black87),
-                                    fontSize: 13,
-                                  ),
-                                  backgroundColor:
-                                      dark ? AppThemeData.darkBgTertiary : AppThemeData.grey100,
-                                  side: BorderSide(
-                                    color: selected
-                                        ? AppThemeData.primary500
-                                        : (dark ? AppThemeData.darkBorderPrimary : AppThemeData.grey300),
-                                  ),
-                                );
-                              }).toList(),
-                            ),
-                          ),
-                        ),
-                        // FIRST VISIT
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(12, 0, 12, 0),
-                          child: Row(children: [
-                            Checkbox(
-                              value: _isFirstTime,
-                              onChanged: (v) => setSheetState(() => _isFirstTime = v ?? false),
-                              activeColor: AppThemeData.primary500,
-                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
-                            ),
-                            Text('Is this your first visit?'.tr(),
-                                style: TextStyle(
-                                  fontSize: 14,
-                                  color: dark ? Colors.white70 : Colors.black87,
-                                )),
-                          ]),
-                        ),
-                        // ADDITIONAL REQUESTS
-                        _sheetSection(
-                          label: 'Additional Requests (Optional)'.tr(),
-                          dark: dark,
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 16),
-                            child: Container(
-                              decoration: BoxDecoration(
-                                color: dark ? AppThemeData.darkBgTertiary : AppThemeData.grey100,
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: TextFormField(
-                                controller: _reqController,
-                                maxLines: 3,
-                                style: TextStyle(
-                                  color: dark ? Colors.white : Colors.black,
-                                  fontSize: 14,
-                                ),
-                                decoration: InputDecoration(
-                                  contentPadding: const EdgeInsets.all(14),
-                                  border: InputBorder.none,
-                                  hintText:
-                                      'Any special requests, allergies, seating preferences...'.tr(),
-                                  hintStyle: const TextStyle(
-                                      color: AppThemeData.grey400, fontSize: 13),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                      ],
-                    ),
-                  ),
-                ),
-                // BOOK NOW CTA
-                Container(
-                  padding: EdgeInsets.fromLTRB(16, 12, 16, MediaQuery.of(context).padding.bottom + 16),
-                  decoration: BoxDecoration(
-                    color: dark ? AppThemeData.darkBgSecondary : Colors.white,
-                    border: Border(
-                      top: BorderSide(
-                          color: dark ? AppThemeData.darkBorderPrimary : AppThemeData.grey200),
-                    ),
-                  ),
-                  child: SizedBox(
-                    width: double.infinity,
-                    height: 52,
-                    child: ElevatedButton(
-                      onPressed: available.isEmpty
-                          ? null
-                          : () => _submitBooking(ctx, setSheetState),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: AppThemeData.primary500,
-                        disabledBackgroundColor: AppThemeData.grey300,
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12)),
-                        elevation: 0,
-                      ),
-                      child: Text(
-                        'Confirm Reservation'.tr(),
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 15,
-                          fontFamily: AppThemeData.semiBold,
-                          letterSpacing: 0.3,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _sheetSection({
-    required String label,
-    required Widget child,
-    required bool dark,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.only(top: 20),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
-          child: Text(
-            label,
-            style: TextStyle(
-              fontSize: 13,
-              fontFamily: AppThemeData.semiBold,
-              color: dark ? AppThemeData.grey400 : AppThemeData.grey600,
-              letterSpacing: 0.3,
-            ),
-          ),
-        ),
-        child,
-      ]),
-    );
-  }
-
-  Widget _guestButton({required IconData icon, required VoidCallback? onTap, required bool dark}) {
-    return Material(
-      color: onTap == null
-          ? (dark ? AppThemeData.darkBgTertiary : AppThemeData.grey100)
-          : AppThemeData.primary500.withOpacity(0.1),
-      borderRadius: BorderRadius.circular(12),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(12),
-        child: SizedBox(
-          width: 48,
-          height: 48,
-          child: Icon(icon,
-              color: onTap == null ? AppThemeData.grey400 : AppThemeData.primary500, size: 22),
-        ),
-      ),
-    );
-  }
-
-  Future<void> _submitBooking(BuildContext sheetCtx, StateSetter setSheetState) async {
-    if (_selectedDate == null) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('Please select a date'.tr()),
-        backgroundColor: AppThemeData.primary500,
-      ));
-      return;
-    }
-    if (_selectedTimeSlot.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('No time slots available for the selected date'.tr()),
-        backgroundColor: AppThemeData.error500,
-      ));
-      return;
-    }
-
-    // Build the final datetime
-    DateTime dt = _selectedDate!.toDate();
-    String hhmm = DateFormat('HH:mm').format(
-      DateFormat('hh:mm a').parse(
-        (Intl.getCurrentLocale() == 'en_US') ? _selectedTimeSlot : _selectedTimeSlot.toLowerCase(),
-      ),
-    );
-    dt = DateTime(dt.year, dt.month, dt.day,
-        int.parse(hhmm.split(':')[0]), int.parse(hhmm.split(':')[1]));
-    final bookingTimestamp = Timestamp.fromDate(dt);
-
-    // Block past bookings (safety check)
-    if (bookingTimestamp.toDate().isBefore(DateTime.now())) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('Selected time is in the past. Please choose another slot.'.tr()),
-        backgroundColor: AppThemeData.error500,
-      ));
-      return;
-    }
-
-    await showProgress('Please wait...'.tr(), false);
-    try {
-      final fireStore = FireStoreUtils();
-      final VendorModel vendorModel =
-          await fireStore.getVendorByVendorID(widget.vendorModel.id);
-
-      final BookTableModel booking = BookTableModel(
-        author: MyAppState.currentUser,
-        authorID: MyAppState.currentUser!.userID,
-        createdAt: Timestamp.now(),
-        date: bookingTimestamp,
-        status: ORDER_STATUS_PLACED,
-        vendor: vendorModel,
-        section_id: sectionConstantModel!.id,
-        specialRequest: _reqController.text.trim(),
-        vendorID: widget.vendorModel.id,
-        guestEmail: _userEmail,
-        guestFirstName: _userFName,
-        guestLastName: _userLName,
-        guestPhone: _userPhone,
-        occasion: _selectedOccasion,
-        totalGuest: _guestCount,
-        firstVisit: _isFirstTime,
-      );
-
-      await fireStore.bookTable(booking);
-
-      final Map<String, dynamic> payload = {'type': 'dine_in', 'orderId': booking.id};
-      await SendNotification.sendFcmMessage(
-          dineInPlaced, widget.vendorModel.fcmToken, payload);
-      log('Booking created: ${booking.toJson()}');
-
-      hideProgress();
-      Navigator.pop(sheetCtx); // close sheet
-
-      // Success feedback
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Row(children: [
-          const Icon(Icons.check_circle, color: Colors.white),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text('Reservation placed! The restaurant will confirm shortly.'.tr(),
-                style: const TextStyle(color: Colors.white)),
-          ),
-        ]),
-        backgroundColor: const Color(0xFF2E7D32),
-        duration: const Duration(seconds: 4),
-        action: SnackBarAction(
-          label: 'View'.tr(),
-          textColor: Colors.white,
-          onPressed: () => push(context, const MyBookingScreen()),
-        ),
-      ));
-    } catch (e) {
-      hideProgress();
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('Failed to place reservation. Please try again.'.tr()),
-        backgroundColor: AppThemeData.error500,
-      ));
-    }
-  }
-
-  void _showPersonalDetailsDialog(BuildContext parentCtx, VoidCallback onSaved) {
-    final formKey = GlobalKey<FormState>();
-    AutovalidateMode validateMode = AutovalidateMode.disabled;
-    String tempFName = _userFName;
-    String tempLName = _userLName;
-    String tempEmail = _userEmail;
-    String tempPhone = _userPhone;
-    final bool dark = isDarkMode(context);
-
-    showDialog(
-      context: parentCtx,
-      builder: (dialogCtx) => StatefulBuilder(
-        builder: (dialogCtx, setDialogState) => AlertDialog(
-          backgroundColor: dark ? AppThemeData.darkBgSecondary : Colors.white,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          title: Text('Edit Details'.tr(),
-              style: TextStyle(
-                  fontFamily: AppThemeData.semiBold,
-                  color: dark ? Colors.white : Colors.black)),
-          content: Form(
-            key: formKey,
-            autovalidateMode: validateMode,
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              _detailField(
-                label: 'First Name'.tr(),
-                initial: tempFName,
-                onSaved: (v) => tempFName = v!,
-                validator: validateName,
-                dark: dark,
               ),
-              const SizedBox(height: 10),
-              _detailField(
-                label: 'Last Name'.tr(),
-                initial: tempLName,
-                onSaved: (v) => tempLName = v!,
-                validator: validateName,
-                dark: dark,
-              ),
-              const SizedBox(height: 10),
-              _detailField(
-                label: 'Email'.tr(),
-                initial: tempEmail,
-                onSaved: (v) => tempEmail = v!,
-                validator: validateEmail,
-                keyboardType: TextInputType.emailAddress,
-                dark: dark,
-              ),
-              const SizedBox(height: 10),
-              _detailField(
-                label: 'Phone'.tr(),
-                initial: tempPhone,
-                onSaved: (v) => tempPhone = v!,
-                validator: validateMobile,
-                keyboardType: TextInputType.phone,
-                dark: dark,
-              ),
-            ]),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogCtx),
-              child: Text('Cancel'.tr(),
-                  style: TextStyle(color: dark ? Colors.white54 : Colors.black54)),
-            ),
-            ElevatedButton(
-              onPressed: () {
-                if (formKey.currentState?.validate() ?? false) {
-                  formKey.currentState!.save();
-                  _userFName = tempFName;
-                  _userLName = tempLName;
-                  _userEmail = tempEmail;
-                  _userPhone = tempPhone;
-                  onSaved();
-                  Navigator.pop(dialogCtx);
-                } else {
-                  setDialogState(() {
-                    validateMode = AutovalidateMode.onUserInteraction;
-                  });
-                }
-              },
-              style: ElevatedButton.styleFrom(
-                backgroundColor: AppThemeData.primary500,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-              ),
-              child: Text('Save'.tr(), style: const TextStyle(color: Colors.white)),
             ),
           ],
         ),
@@ -1316,38 +202,815 @@ class _DineInRestaurantDetailsScreenState extends State<DineInRestaurantDetailsS
     );
   }
 
-  Widget _detailField({
-    required String label,
-    required String initial,
-    required FormFieldSetter<String> onSaved,
-    required FormFieldValidator<String> validator,
-    TextInputType keyboardType = TextInputType.text,
-    required bool dark,
-  }) {
-    return TextFormField(
-      initialValue: initial,
-      onSaved: onSaved,
-      validator: validator,
-      keyboardType: keyboardType,
-      textCapitalization: keyboardType == TextInputType.text
-          ? TextCapitalization.words
-          : TextCapitalization.none,
-      style: TextStyle(color: dark ? Colors.white : Colors.black),
-      decoration: InputDecoration(
-        labelText: label,
-        labelStyle: TextStyle(
-            color: dark ? AppThemeData.grey400 : AppThemeData.grey500, fontSize: 13),
-        filled: true,
-        fillColor: dark ? AppThemeData.darkBgTertiary : AppThemeData.grey100,
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: BorderSide.none,
+  // ─── Restaurant Info ──────────────────────────────────────────
+  Widget _buildRestaurantInfo(bool dark) {
+    final vendor = widget.vendorModel;
+    final rating = vendor.reviewsCount > 0
+        ? vendor.reviewsSum / vendor.reviewsCount
+        : 0.0;
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+      padding: const EdgeInsets.all(16),
+      decoration: _cardDeco(dark),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(vendor.title,
+              style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w800,
+                  color: dark ? Colors.white : Colors.black87)),
+          const SizedBox(height: 6),
+          Row(
+            children: [
+              if (vendor.cuisineType.isNotEmpty) ...[
+                Icon(Icons.restaurant_menu, size: 14, color: Colors.grey.shade500),
+                const SizedBox(width: 4),
+                Text(vendor.cuisineType,
+                    style: TextStyle(
+                        fontSize: 13, color: dark ? Colors.white60 : Colors.grey.shade600)),
+                const SizedBox(width: 12),
+              ],
+              Icon(Icons.location_on_outlined, size: 14, color: Colors.grey.shade500),
+              const SizedBox(width: 4),
+              Text('${_getKm().toStringAsFixed(1)} km',
+                  style: TextStyle(
+                      fontSize: 13, color: dark ? Colors.white60 : Colors.grey.shade600)),
+              const Spacer(),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                    color: const Color(0xFFFFF3E0), borderRadius: BorderRadius.circular(6)),
+                child: Row(
+                  children: [
+                    const Icon(Icons.star_rounded, size: 14, color: Color(0xFFFF8A50)),
+                    const SizedBox(width: 3),
+                    Text(rating.toStringAsFixed(1),
+                        style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: Color(0xFFE65100))),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          // Booking type chip
+          Row(
+            children: [
+              _chip(
+                  vendor.bookingType == 'slot_based'
+                      ? 'Slot Booking'.tr()
+                      : 'Flexible Booking'.tr(),
+                  vendor.bookingType == 'slot_based'
+                      ? const Color(0xFF4CAF50)
+                      : const Color(0xFF2196F3)),
+              const SizedBox(width: 8),
+              if (vendor.bookingPricingModel != 'free')
+                _chip(_pricingLabel(vendor), _accent),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ─── Date Selector ────────────────────────────────────────────
+  Widget _buildDateSelector(bool dark) {
+    final maxDays = widget.vendorModel.maxAdvanceBookingDays.clamp(1, 60);
+    final today = DateTime.now();
+    final dates = List.generate(maxDays, (i) => today.add(Duration(days: i)));
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      padding: const EdgeInsets.all(16),
+      decoration: _cardDeco(dark),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _sectionTitle(dark, Icons.calendar_today_rounded, 'Select Date'.tr()),
+          const SizedBox(height: 14),
+          SizedBox(
+            height: 72,
+            child: ListView.builder(
+              scrollDirection: Axis.horizontal,
+              itemCount: dates.length,
+              itemBuilder: (_, i) {
+                final date = dates[i];
+                final isSelected = _selectedDate.year == date.year &&
+                    _selectedDate.month == date.month &&
+                    _selectedDate.day == date.day;
+                return GestureDetector(
+                  onTap: () {
+                    setState(() {
+                      _selectedDate = date;
+                      _selectedSlotId = '';
+                      _selectedSlotStart = '';
+                      _selectedSlotEnd = '';
+                    });
+                    if (widget.vendorModel.bookingType == 'slot_based') _loadSlotCounts();
+                  },
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 200),
+                    width: 52,
+                    margin: const EdgeInsets.only(right: 10),
+                    decoration: BoxDecoration(
+                      gradient: isSelected ? _accentGrad : null,
+                      color: isSelected ? null : (dark ? Colors.grey.shade800 : Colors.grey.shade100),
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text(
+                          DateFormat('EEE').format(date),
+                          style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                              color: isSelected ? Colors.white : Colors.grey.shade500),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          '${date.day}',
+                          style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.w800,
+                              color: isSelected ? Colors.white : (dark ? Colors.white : Colors.black87)),
+                        ),
+                        Text(
+                          DateFormat('MMM').format(date),
+                          style: TextStyle(
+                              fontSize: 10,
+                              color: isSelected ? Colors.white70 : Colors.grey.shade500),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ─── Slot Grid ────────────────────────────────────────────────
+  Widget _buildSlotGrid(bool dark) {
+    final enabledSlots = widget.vendorModel.bookingSlots.where((s) => s.isEnabled).toList();
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      padding: const EdgeInsets.all(16),
+      decoration: _cardDeco(dark),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _sectionTitle(dark, Icons.grid_view_rounded, 'Select Time Slot'.tr()),
+          const SizedBox(height: 6),
+          Text('30-minute dining sessions'.tr(),
+              style: TextStyle(fontSize: 12, color: dark ? Colors.white54 : Colors.grey.shade500)),
+          const SizedBox(height: 14),
+          if (_loadingSlotCounts)
+            const Center(child: CircularProgressIndicator())
+          else if (enabledSlots.isEmpty)
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Text('No slots available for this date'.tr(),
+                    style: TextStyle(
+                        color: dark ? Colors.white54 : Colors.grey.shade500, fontSize: 13)),
+              ),
+            )
+          else
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: enabledSlots.map((slot) {
+                final available = _isSlotAvailable(slot);
+                final selected = _selectedSlotId == slot.id;
+                final count = _slotBookingCounts[slot.id] ?? 0;
+                final remaining = (slot.maxCapacity - count).clamp(0, slot.maxCapacity);
+
+                return GestureDetector(
+                  onTap: available
+                      ? () => setState(() {
+                            _selectedSlotId = slot.id;
+                            _selectedSlotStart = slot.startTime;
+                            _selectedSlotEnd = slot.endTime;
+                          })
+                      : null,
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 180),
+                    width: (MediaQuery.of(context).size.width - 72) / 2,
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      gradient: selected ? _accentGrad : null,
+                      color: selected
+                          ? null
+                          : available
+                              ? (dark ? Colors.grey.shade800 : Colors.grey.shade100)
+                              : (dark ? Colors.grey.shade900 : Colors.grey.shade200),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: selected
+                            ? Colors.transparent
+                            : available
+                                ? (dark ? Colors.grey.shade700 : Colors.grey.shade300)
+                                : Colors.grey.shade400,
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '${slot.startTime}',
+                          style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w700,
+                              color: selected
+                                  ? Colors.white
+                                  : available
+                                      ? (dark ? Colors.white : Colors.black87)
+                                      : Colors.grey),
+                        ),
+                        Text(
+                          '${slot.endTime}',
+                          style: TextStyle(
+                              fontSize: 12,
+                              color: selected ? Colors.white70 : Colors.grey.shade500),
+                        ),
+                        const SizedBox(height: 6),
+                        if (!available)
+                          Text('Fully Booked'.tr(),
+                              style: const TextStyle(
+                                  fontSize: 11,
+                                  color: Colors.red,
+                                  fontWeight: FontWeight.w600))
+                        else
+                          Text('$remaining spots left'.tr(),
+                              style: TextStyle(
+                                  fontSize: 11,
+                                  color: selected ? Colors.white70 : Colors.grey.shade500)),
+                      ],
+                    ),
+                  ),
+                );
+              }).toList(),
+            ),
+        ],
+      ),
+    );
+  }
+
+  // ─── Time Picker (Flexible) ───────────────────────────────────
+  Widget _buildTimePicker(bool dark) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      padding: const EdgeInsets.all(16),
+      decoration: _cardDeco(dark),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _sectionTitle(dark, Icons.access_time_rounded, 'Select Time'.tr()),
+          const SizedBox(height: 14),
+          GestureDetector(
+            onTap: () async {
+              final minNotice = widget.vendorModel.minBookingNoticeMinutes;
+              final earliest = DateTime.now().add(Duration(minutes: minNotice));
+              final t = await showTimePicker(
+                context: context,
+                initialTime: TimeOfDay.fromDateTime(earliest),
+                builder: (context, child) => Theme(
+                  data: ThemeData.light().copyWith(
+                      colorScheme: const ColorScheme.light(primary: _accent)),
+                  child: child!,
+                ),
+              );
+              if (t != null) setState(() => _selectedTime = t.format(context));
+            },
+            child: Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: _selectedTime.isNotEmpty
+                    ? _accent.withOpacity(0.08)
+                    : (dark ? Colors.grey.shade800 : Colors.grey.shade100),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: _selectedTime.isNotEmpty ? _accent : Colors.transparent,
+                  width: 2,
+                ),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.access_time_rounded,
+                      color: _selectedTime.isNotEmpty ? _accent : Colors.grey.shade400, size: 22),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      _selectedTime.isEmpty ? 'Tap to select time'.tr() : _selectedTime,
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: _selectedTime.isNotEmpty ? FontWeight.w700 : FontWeight.normal,
+                        color: _selectedTime.isNotEmpty
+                            ? _accent
+                            : (dark ? Colors.white38 : Colors.grey.shade400),
+                      ),
+                    ),
+                  ),
+                  Icon(Icons.chevron_right_rounded,
+                      color: dark ? Colors.white38 : Colors.grey.shade400),
+                ],
+              ),
+            ),
+          ),
+          if (widget.vendorModel.minBookingNoticeMinutes > 0)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(
+                'Min ${widget.vendorModel.minBookingNoticeMinutes} min advance notice required'.tr(),
+                style: TextStyle(fontSize: 11, color: dark ? Colors.white38 : Colors.grey.shade500),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  // ─── Guest Stepper ────────────────────────────────────────────
+  Widget _buildGuestStepper(bool dark) {
+    final vendor = widget.vendorModel;
+    final canDecrement = _guestCount > vendor.minGuests;
+    final canIncrement = _guestCount < vendor.maxGuests;
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      padding: const EdgeInsets.all(16),
+      decoration: _cardDeco(dark),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _sectionTitle(dark, Icons.people_alt_outlined, 'Number of Guests'.tr()),
+          const SizedBox(height: 14),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              _stepperBtn(
+                icon: Icons.remove_rounded,
+                enabled: canDecrement,
+                onTap: () => setState(() => _guestCount--),
+              ),
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 150),
+                width: 80,
+                child: Text(
+                  '$_guestCount',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 32,
+                    fontWeight: FontWeight.w800,
+                    color: dark ? Colors.white : Colors.black87,
+                  ),
+                ),
+              ),
+              _stepperBtn(
+                icon: Icons.add_rounded,
+                enabled: canIncrement,
+                onTap: () => setState(() => _guestCount++),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Center(
+            child: Text(
+              '${vendor.minGuests}–${vendor.maxGuests} guests allowed'.tr(),
+              style: TextStyle(
+                  fontSize: 12, color: dark ? Colors.white38 : Colors.grey.shade500),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _stepperBtn({required IconData icon, required bool enabled, required VoidCallback onTap}) {
+    return GestureDetector(
+      onTap: enabled ? onTap : null,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        width: 48,
+        height: 48,
+        decoration: BoxDecoration(
+          gradient: enabled ? _accentGrad : null,
+          color: enabled ? null : Colors.grey.shade300,
+          shape: BoxShape.circle,
+          boxShadow: enabled
+              ? [BoxShadow(color: _accent.withOpacity(0.3), blurRadius: 8, offset: const Offset(0, 3))]
+              : null,
         ),
-        errorBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: const BorderSide(color: AppThemeData.error500),
+        child: Icon(icon, color: enabled ? Colors.white : Colors.grey.shade500, size: 22),
+      ),
+    );
+  }
+
+  // ─── Price Summary ────────────────────────────────────────────
+  Widget _buildPriceSummary(bool dark) {
+    final vendor = widget.vendorModel;
+    final sym = currencyData?.symbol ?? '₹';
+    final isFree = vendor.bookingPricingModel == 'free';
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      padding: const EdgeInsets.all(16),
+      decoration: _cardDeco(dark),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _sectionTitle(dark, Icons.receipt_outlined, 'Price Summary'.tr()),
+          const SizedBox(height: 14),
+          if (isFree)
+            Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: const Color(0xFFE8F5E9),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.check_circle_rounded, color: Color(0xFF4CAF50), size: 20),
+                  const SizedBox(width: 10),
+                  Text('No booking charge — Completely free!'.tr(),
+                      style: const TextStyle(
+                          fontSize: 13,
+                          color: Color(0xFF2E7D32),
+                          fontWeight: FontWeight.w600)),
+                ],
+              ),
+            )
+          else ...[
+            _priceRow(dark, _priceLineLabel(vendor), '$sym${vendor.bookingCharge.toStringAsFixed(0)}'),
+            if (vendor.bookingPricingModel == 'per_person' ||
+                vendor.bookingPricingModel == 'cover_charge') ...[
+              const SizedBox(height: 6),
+              _priceRow(dark, 'Guests'.tr(), '× $_guestCount'),
+            ],
+            Divider(height: 20, color: dark ? Colors.white12 : Colors.grey.shade200),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text('Total'.tr(),
+                    style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                        color: dark ? Colors.white : Colors.black87)),
+                AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 300),
+                  child: Text(
+                    '$sym${_totalCharge.toStringAsFixed(0)}',
+                    key: ValueKey(_totalCharge),
+                    style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w800,
+                        color: _accent),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  String _priceLineLabel(VendorModel vendor) {
+    switch (vendor.bookingPricingModel) {
+      case 'per_person':
+        return 'Per person'.tr();
+      case 'table_charge':
+        return 'Table reservation charge'.tr();
+      case 'cover_charge':
+        return 'Cover charge / person'.tr();
+      default:
+        return '';
+    }
+  }
+
+  Widget _priceRow(bool dark, String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label,
+              style: TextStyle(
+                  fontSize: 13, color: dark ? Colors.white60 : Colors.grey.shade600)),
+          Text(value,
+              style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: dark ? Colors.white : Colors.black87)),
+        ],
+      ),
+    );
+  }
+
+  // ─── Confirm Button ───────────────────────────────────────────
+  Widget _buildConfirmButton(bool dark) {
+    return Positioned(
+      bottom: 0,
+      left: 0,
+      right: 0,
+      child: Container(
+        padding: EdgeInsets.only(
+          left: 20,
+          right: 20,
+          top: 16,
+          bottom: MediaQuery.of(context).padding.bottom + 16,
         ),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: dark ? const Color(0xff1a1a1a) : Colors.white,
+          boxShadow: [
+            BoxShadow(
+                color: Colors.black.withOpacity(0.1), blurRadius: 20, offset: const Offset(0, -4)),
+          ],
+        ),
+        child: SizedBox(
+          height: 54,
+          child: ElevatedButton(
+            onPressed: _canConfirm ? _confirmBooking : null,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: _canConfirm ? null : Colors.grey.shade300,
+              padding: EdgeInsets.zero,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              elevation: _canConfirm ? 6 : 0,
+              shadowColor: _accent.withOpacity(0.4),
+            ),
+            child: Ink(
+              decoration: BoxDecoration(
+                gradient: _canConfirm ? _accentGrad : null,
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Container(
+                alignment: Alignment.center,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.event_seat_rounded,
+                        color: _canConfirm ? Colors.white : Colors.grey, size: 20),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Confirm Booking'.tr(),
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                        color: _canConfirm ? Colors.white : Colors.grey,
+                        letterSpacing: 0.3,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ─── Confirm Logic ────────────────────────────────────────────
+  Future<void> _confirmBooking() async {
+    if (MyAppState.currentUser == null) {
+      push(context, const LoginScreen());
+      return;
+    }
+
+    // Show skeleton loading overlay
+    _showSkeletonLoader();
+
+    try {
+      final vendor = widget.vendorModel;
+      final user = MyAppState.currentUser!;
+
+      // Validate slot availability (real-time check)
+      if (vendor.bookingType == 'slot_based') {
+        final count = await FireStoreUtils.getSlotBookingCount(
+          vendorId: vendor.id,
+          slotId: _selectedSlotId,
+          date: _selectedDate,
+        );
+        final slot = vendor.bookingSlots.firstWhere((s) => s.id == _selectedSlotId);
+        if (count >= slot.maxCapacity) {
+          Navigator.pop(context); // close loader
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Sorry, this slot is fully booked. Please choose another.'.tr()),
+              backgroundColor: Colors.red,
+            ),
+          );
+          await _loadSlotCounts();
+          return;
+        }
+      }
+
+      // Build booking date timestamp
+      final bookingDateTime = DateTime(
+        _selectedDate.year,
+        _selectedDate.month,
+        _selectedDate.day,
+      );
+
+      final booking = BookTableModel(
+        author: user,
+        authorID: user.userID,
+        createdAt: Timestamp.now(),
+        date: Timestamp.fromDate(bookingDateTime),
+        vendorID: vendor.id,
+        vendor: vendor,
+        section_id: sectionConstantModel?.id ?? '',
+        status: vendor.approvalMode == 'auto' ? ORDER_STATUS_ACCEPTED : ORDER_STATUS_PLACED,
+        guestFirstName: user.firstName,
+        guestLastName: user.lastName,
+        guestEmail: user.email,
+        guestPhone: user.phoneNumber,
+        totalGuest: _guestCount,
+        bookingType: vendor.bookingType,
+        slotId: _selectedSlotId,
+        selectedTime: vendor.bookingType == 'slot_based' ? _selectedSlotStart : _selectedTime,
+        selectedEndTime: vendor.bookingType == 'slot_based' ? _selectedSlotEnd : '',
+        bookingDate: DateFormat('EEE, MMM d yyyy').format(_selectedDate),
+        pricingModel: vendor.bookingPricingModel,
+        bookingCharge: vendor.bookingCharge,
+        totalCharge: _totalCharge,
+        approvalMode: vendor.approvalMode,
+      );
+
+      final saved = await FireStoreUtils().bookTable(booking);
+
+      // Write notification to Firestore for vendor push notification
+      try {
+        await FireStoreUtils.firestore.collection('notifications').add({
+          'to': vendor.fcmToken,
+          'title': 'New Table Booking',
+          'body': '${user.firstName} ${user.lastName} booked a table for $_guestCount guests on ${booking.bookingDate}',
+          'createdAt': Timestamp.now(),
+        });
+      } catch (_) {}
+
+      Navigator.pop(context); // close loader
+      push(context, BookingConfirmationScreen(booking: saved));
+    } catch (e) {
+      Navigator.pop(context); // close loader
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Booking failed. Please try again.'.tr()),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  void _showSkeletonLoader() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const _BookingSkeletonLoader(),
+    );
+  }
+
+  // ─── Shared helpers ───────────────────────────────────────────
+  BoxDecoration _cardDeco(bool dark) => BoxDecoration(
+        color: dark ? const Color(0xff1e1e1e) : Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+              color: Colors.black.withOpacity(dark ? 0.25 : 0.06),
+              blurRadius: 10,
+              offset: const Offset(0, 3)),
+        ],
+      );
+
+  Widget _sectionTitle(bool dark, IconData icon, String title) => Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(6),
+            decoration: BoxDecoration(gradient: _accentGrad, borderRadius: BorderRadius.circular(8)),
+            child: Icon(icon, size: 15, color: Colors.white),
+          ),
+          const SizedBox(width: 10),
+          Text(title,
+              style: TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w700,
+                  color: dark ? Colors.white : Colors.black87)),
+        ],
+      );
+
+  Widget _chip(String text, Color color) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        decoration: BoxDecoration(
+            color: color.withOpacity(0.12), borderRadius: BorderRadius.circular(20)),
+        child: Text(text,
+            style: TextStyle(
+                fontSize: 11, fontWeight: FontWeight.w600, color: color.withOpacity(0.9))),
+      );
+
+  String _pricingLabel(VendorModel vendor) {
+    final sym = currencyData?.symbol ?? '₹';
+    switch (vendor.bookingPricingModel) {
+      case 'per_person':
+        return '$sym${vendor.bookingCharge.toStringAsFixed(0)}/person';
+      case 'table_charge':
+        return '$sym${vendor.bookingCharge.toStringAsFixed(0)} table';
+      case 'cover_charge':
+        return '$sym${vendor.bookingCharge.toStringAsFixed(0)} cover';
+      default:
+        return 'Free'.tr();
+    }
+  }
+}
+
+// ─── Skeleton Loader ────────────────────────────────────────────────
+class _BookingSkeletonLoader extends StatefulWidget {
+  const _BookingSkeletonLoader();
+
+  @override
+  State<_BookingSkeletonLoader> createState() => _BookingSkeletonLoaderState();
+}
+
+class _BookingSkeletonLoaderState extends State<_BookingSkeletonLoader>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _ctrl;
+  late Animation<double> _anim;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 1200))
+      ..repeat(reverse: true);
+    _anim = CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut);
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      elevation: 0,
+      child: Container(
+        padding: const EdgeInsets.all(24),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            AnimatedBuilder(
+              animation: _anim,
+              builder: (_, __) => Column(
+                children: [
+                  _shimmer(200, 16),
+                  const SizedBox(height: 10),
+                  _shimmer(150, 12),
+                  const SizedBox(height: 16),
+                  _shimmer(double.infinity, 12),
+                  const SizedBox(height: 8),
+                  _shimmer(double.infinity, 12),
+                  const SizedBox(height: 8),
+                  _shimmer(double.infinity, 12),
+                  const SizedBox(height: 20),
+                  _shimmer(160, 44),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'Validating & Confirming Booking...'.tr(),
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Color(0xFFFF8A50)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _shimmer(double width, double height) {
+    return AnimatedBuilder(
+      animation: _anim,
+      builder: (_, __) => Container(
+        width: width,
+        height: height,
+        decoration: BoxDecoration(
+          color: Color.lerp(Colors.grey.shade200, Colors.grey.shade100, _anim.value),
+          borderRadius: BorderRadius.circular(8),
+        ),
       ),
     );
   }

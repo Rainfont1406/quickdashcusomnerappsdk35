@@ -30,7 +30,9 @@ class ForgotPasswordScreen extends StatelessWidget {
               onPressed: () => Navigator.pop(context),
             ),
           ),
-          body: SafeArea(
+          body: GestureDetector(
+            onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
+            child: SafeArea(
             child: SingleChildScrollView(
               physics: const BouncingScrollPhysics(),
               padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
@@ -194,6 +196,7 @@ class ForgotPasswordScreen extends StatelessWidget {
                 ],
               ),
             ),
+          ),
           ),
         );
       },

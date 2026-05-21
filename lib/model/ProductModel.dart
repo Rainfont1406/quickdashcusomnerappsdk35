@@ -1,6 +1,8 @@
 import 'dart:convert';
 
 import 'package:emartconsumer/model/ItemAttributes.dart';
+import 'package:emartconsumer/model/NutritionInfo.dart';
+import 'package:emartconsumer/model/ProductAttributeConfig.dart';
 import 'package:emartconsumer/model/variant_info.dart';
 
 class ProductModel {
@@ -25,6 +27,8 @@ class ProductModel {
   String? disPrice = "0";
   bool takeaway;
   bool deliveryOption;
+  bool dineIn;
+  bool dineAwayTakeaway;
   List<dynamic> addOnsTitle = [];
   List<dynamic> addOnsPrice = [];
   String? addon_name;
@@ -37,6 +41,9 @@ class ProductModel {
   VariantInfo? variant_info;
   bool? isDigitalProduct;
   String? digitalProduct;
+  List<ProductAttributeConfig> productAttributes;
+  bool nutritionEnabled;
+  NutritionInfo? nutritionInfo;
 
   ProductModel({
     this.categoryID = '',
@@ -62,6 +69,8 @@ class ProductModel {
     this.disPrice,
     this.takeaway = false,
     this.deliveryOption = false,
+    this.dineIn = false,
+    this.dineAwayTakeaway = false,
     this.reviewsCount = 0,
     this.reviewsSum = 0,
     this.addOnsPrice = const [],
@@ -72,6 +81,9 @@ class ProductModel {
     this.reviewAttributes,
     this.isDigitalProduct,
     this.digitalProduct,
+    this.productAttributes = const [],
+    this.nutritionEnabled = false,
+    this.nutritionInfo,
     /*this.lstSizeCustom = const [],
         this.lstAddOnsCustom = const []*/
   });
@@ -123,6 +135,14 @@ class ProductModel {
       })(),
       takeaway: parsedJson['takeawayOption'] ?? false,
       deliveryOption: parsedJson['deliveryOption'] ?? false,
+      dineIn: parsedJson['dineIn'] ?? false,
+      dineAwayTakeaway: (() {
+        final stored = parsedJson['dineAwayTakeaway'] as bool?;
+        if (stored != null) return stored;
+        final hadTakeaway = parsedJson['takeawayOption'] ?? false;
+        final hadDineIn = parsedJson['dineIn'] ?? false;
+        return hadTakeaway == true && hadDineIn == false;
+      })(),
       addOnsPrice: parsedJson['addOnsPrice'] ?? [],
       addOnsTitle: parsedJson['addOnsTitle'] ?? [],
       reviewsCount: parsedJson['reviewsCount'] ?? 0,
@@ -162,6 +182,28 @@ class ProductModel {
       })(),
       isDigitalProduct: parsedJson['isDigitalProduct'] ?? false,
       digitalProduct: parsedJson['digitalProduct'] ?? "",
+      productAttributes: (() {
+        final raw = parsedJson['product_attributes'];
+        if (raw == null) return <ProductAttributeConfig>[];
+        try {
+          if (raw is List) {
+            return raw.map((e) => ProductAttributeConfig.fromJson(e as Map<String, dynamic>)).toList();
+          }
+          if (raw is String && raw.isNotEmpty && raw != 'null') {
+            return ProductAttributeConfig.listFromJson(raw);
+          }
+        } catch (_) {}
+        return <ProductAttributeConfig>[];
+      })(),
+      nutritionEnabled: parsedJson['nutrition_enabled'] ?? false,
+      nutritionInfo: (() {
+        final raw = parsedJson['nutrition_info'];
+        if (raw == null) return null;
+        try {
+          if (raw is Map<String, dynamic>) return NutritionInfo.fromJson(raw);
+        } catch (_) {}
+        return null;
+      })(),
     );
   }
 
@@ -188,6 +230,8 @@ class ProductModel {
       'nonveg': nonveg,
       'takeawayOption': takeaway,
       'deliveryOption': deliveryOption,
+      'dineIn': dineIn,
+      'dineAwayTakeaway': dineAwayTakeaway,
       'disPrice': disPrice,
       "addOnsTitle": addOnsTitle,
       "addOnsPrice": addOnsPrice,
@@ -201,6 +245,9 @@ class ProductModel {
       'reviewsSum': reviewsSum,
       'isDigitalProduct': isDigitalProduct,
       'digitalProduct': digitalProduct,
+      'product_attributes': productAttributes.map((e) => e.toJson()).toList(),
+      'nutrition_enabled': nutritionEnabled,
+      'nutrition_info': nutritionInfo?.toJson(),
       //"lstAddOnsCustom":this.lstAddOnsCustom.map((e) => e.toJson()).toList(),
       //"lstSizeCustom":this.lstSizeCustom.map((e) => e.toJson()).toList()
     };

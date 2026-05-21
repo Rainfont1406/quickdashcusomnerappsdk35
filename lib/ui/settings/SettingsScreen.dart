@@ -1,13 +1,10 @@
 import 'package:easy_localization/easy_localization.dart';
-import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/User.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
-import 'package:emartconsumer/utils/DarkThemeProvider.dart';
-import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -22,11 +19,8 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   late User user;
-
   late CartDatabase cartDatabase;
-
   late bool pushNewMessages, orderUpdates, newArrivals, promotions;
-  int cartCount = 0;
 
   @override
   void initState() {
@@ -46,49 +40,35 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = isDarkMode(context);
     return Scaffold(
-      backgroundColor: isDarkMode(context) ? AppThemeData.darkBgPrimary : AppThemeData.neutral50,
-      appBar: AppBar(
-        backgroundColor: AppThemeData.neutral0,
-        elevation: 0,
-        shadowColor: Colors.transparent,
-        surfaceTintColor: Colors.transparent,
-        title: Text(
-          'settings'.tr(),
-          style: TextStyle(
-            fontSize: 20,
-            fontWeight: FontWeight.w600,
-            color: isDarkMode(context) ? AppThemeData.darkTextPrimary : AppThemeData.neutral900,
-          ),
-        ),
-        iconTheme: IconThemeData(
-          color: isDarkMode(context) ? AppThemeData.darkTextPrimary : AppThemeData.neutral900,
-        ),
-      ),
-      body: SingleChildScrollView(
-        child: Builder(
-            builder: (buildContext) => Padding(
+      backgroundColor: isDark ? AppThemeData.darkBgPrimary : AppThemeData.neutral50,
+      body: Column(
+        children: [
+          _buildGradientHeader(),
+          Expanded(
+            child: SingleChildScrollView(
+              child: Builder(
+                builder: (buildContext) => Padding(
                   padding: const EdgeInsets.all(16.0),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
-                      // Section Header
+                      const SizedBox(height: 8),
                       Text(
                         'pushNotifications'.tr(),
                         style: TextStyle(
                           fontSize: 18,
                           fontWeight: FontWeight.w600,
-                          color: isDarkMode(context) ? AppThemeData.darkTextPrimary : AppThemeData.neutral900,
+                          color: isDark ? AppThemeData.darkTextPrimary : AppThemeData.neutral900,
                         ),
                       ),
                       const SizedBox(height: 16),
-
-                      // Notification Settings Card
                       Container(
                         decoration: BoxDecoration(
-                          color: isDarkMode(context) ? AppThemeData.darkBgSecondary : AppThemeData.neutral0,
+                          color: isDark ? AppThemeData.darkBgSecondary : AppThemeData.neutral0,
                           borderRadius: BorderRadius.circular(12),
-                          boxShadow: [
+                          boxShadow: const [
                             BoxShadow(
                               color: Color.fromRGBO(0, 0, 0, 0.06),
                               offset: Offset(0, 2),
@@ -101,79 +81,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             _buildSwitchTile(
                               title: 'allowPushNotifications'.tr(),
                               value: pushNewMessages,
-                              onChanged: (bool newValue) {
-                                pushNewMessages = newValue;
-                                setState(() {});
-                              },
-                              isDarkMode: isDarkMode(context),
+                              onChanged: (v) => setState(() => pushNewMessages = v),
+                              isDark: isDark,
                             ),
                             Divider(height: 1, color: AppThemeData.neutral200),
                             _buildSwitchTile(
                               title: 'Order Updates'.tr(),
                               value: orderUpdates,
-                              onChanged: (bool newValue) {
-                                orderUpdates = newValue;
-                                setState(() {});
-                              },
-                              isDarkMode: isDarkMode(context),
+                              onChanged: (v) => setState(() => orderUpdates = v),
+                              isDark: isDark,
                             ),
                             Divider(height: 1, color: AppThemeData.neutral200),
                             _buildSwitchTile(
                               title: 'Promotions'.tr(),
                               value: promotions,
-                              onChanged: (bool newValue) {
-                                promotions = newValue;
-                                setState(() {});
-                              },
-                              isDarkMode: isDarkMode(context),
+                              onChanged: (v) => setState(() => promotions = v),
+                              isDark: isDark,
                             ),
                           ],
                         ),
                       ),
-
                       const SizedBox(height: 32),
-
-                      // Dark Mode Section
-                      Text(
-                        'appearance'.tr(),
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w600,
-                          color: isDarkMode(context) ? AppThemeData.darkTextPrimary : AppThemeData.neutral900,
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-
-                      // Dark Mode Card
-                      Container(
-                        decoration: BoxDecoration(
-                          color: isDarkMode(context) ? AppThemeData.darkBgSecondary : AppThemeData.neutral0,
-                          borderRadius: BorderRadius.circular(12),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Color.fromRGBO(0, 0, 0, 0.06),
-                              offset: Offset(0, 2),
-                              blurRadius: 4,
-                            ),
-                          ],
-                        ),
-                        child: Consumer<DarkThemeProvider>(
-                          builder: (context, themeProvider, child) {
-                            return _buildSwitchTile(
-                              title: 'darkMode'.tr(),
-                              value: themeProvider.darkTheme,
-                              onChanged: (bool newValue) {
-                                themeProvider.darkTheme = newValue;
-                              },
-                              isDarkMode: isDarkMode(context),
-                            );
-                          },
-                        ),
-                      ),
-
-                      const SizedBox(height: 32),
-
-                      // Save Button
                       SizedBox(
                         width: double.infinity,
                         child: ElevatedButton(
@@ -189,11 +117,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
                               this.user = updateUser;
                               MyAppState.currentUser = user;
                               ScaffoldMessenger.of(buildContext).showSnackBar(SnackBar(
-                                  duration: const Duration(seconds: 3),
-                                  content: Text(
-                                    'settingsSavedSuccessfully'.tr(),
-                                    style: const TextStyle(fontSize: 17),
-                                  ).tr()));
+                                duration: const Duration(seconds: 3),
+                                content: Text(
+                                  'settingsSavedSuccessfully'.tr(),
+                                  style: const TextStyle(fontSize: 17),
+                                ).tr(),
+                              ));
                             }
                           },
                           style: ElevatedButton.styleFrom(
@@ -207,16 +136,68 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           ),
                           child: Text(
                             'save'.tr(),
-                            style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w500,
-                            ),
+                            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
                           ),
                         ),
                       ),
                     ],
                   ),
-                )),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildGradientHeader() {
+    return Container(
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          colors: [AppThemeData.primary500, AppThemeData.primary400],
+          begin: Alignment.centerLeft,
+          end: Alignment.centerRight,
+        ),
+        borderRadius: BorderRadius.only(
+          bottomLeft: Radius.circular(32),
+          bottomRight: Radius.circular(32),
+        ),
+      ),
+      child: SafeArea(
+        bottom: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+          child: Row(
+            children: [
+              GestureDetector(
+                onTap: () => Navigator.pop(context),
+                child: Container(
+                  width: 36,
+                  height: 36,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.2),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Icon(
+                    Icons.arrow_back_ios_new_rounded,
+                    color: Colors.white,
+                    size: 18,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Text(
+                'settings'.tr(),
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 20,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -225,7 +206,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     required String title,
     required bool value,
     required ValueChanged<bool> onChanged,
-    required bool isDarkMode,
+    required bool isDark,
   }) {
     return SwitchListTile.adaptive(
       activeColor: AppThemeData.primary500,
@@ -234,7 +215,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         style: TextStyle(
           fontSize: 16,
           fontWeight: FontWeight.w400,
-          color: isDarkMode ? AppThemeData.darkTextPrimary : AppThemeData.neutral900,
+          color: isDark ? AppThemeData.darkTextPrimary : AppThemeData.neutral900,
         ),
       ),
       value: value,

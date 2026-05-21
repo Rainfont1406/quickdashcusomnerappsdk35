@@ -85,10 +85,17 @@ class AuthHeader extends StatelessWidget {
                         ),
                       ],
                     ),
-                    padding: const EdgeInsets.all(8),
-                    child: Image.asset(
-                      'assets/images/app_logo_new.png',
-                      fit: BoxFit.contain,
+                    child: Center(
+                      child: Text(
+                        'Q',
+                        style: TextStyle(
+                          fontSize: 26,
+                          fontFamily: AppThemeData.bold,
+                          color: AppThemeData.primary500,
+                          height: 1.0,
+                          letterSpacing: -1.0,
+                        ),
+                      ),
                     ),
                   ),
                   const SizedBox(width: 12),

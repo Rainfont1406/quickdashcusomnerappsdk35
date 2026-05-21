@@ -20,42 +20,102 @@ class FavouriteItemScreen extends StatefulWidget {
   _FavouriteItemScreenState createState() => _FavouriteItemScreenState();
 }
 
-class _FavouriteItemScreenState extends State<FavouriteItemScreen> {
+class _FavouriteItemScreenState extends State<FavouriteItemScreen> with SingleTickerProviderStateMixin {
   final fireStoreUtils = FireStoreUtils();
   List<FavouriteItemModel> lstFavourite = [];
   List<ProductModel> favProductList = [];
   var position = const LatLng(23.12, 70.22);
   bool showLoader = true;
 
+  late AnimationController _shimmerController;
+
   @override
   void initState() {
-    // TODO: implement initState
     super.initState();
+    _shimmerController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    )..repeat(reverse: true);
     getData();
+  }
+
+  @override
+  void dispose() {
+    _shimmerController.dispose();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-        backgroundColor: isDarkMode(context) ? AppThemeData.surfaceDark : AppThemeData.surface,
-        body: showLoader
-            ? Center(
-                child: CircularProgressIndicator.adaptive(
-                  valueColor: AlwaysStoppedAnimation(AppThemeData.primary500),
+      backgroundColor: isDarkMode(context) ? AppThemeData.surfaceDark : AppThemeData.surface,
+      body: showLoader
+          ? _buildShimmerList()
+          : favProductList.isEmpty
+              ? _buildEmptyState()
+              : ListView.builder(
+                  shrinkWrap: true,
+                  scrollDirection: Axis.vertical,
+                  physics: const BouncingScrollPhysics(),
+                  itemCount: favProductList.length,
+                  itemBuilder: (context, index) {
+                    return buildAllStoreData(favProductList[index], index);
+                  },
                 ),
-              )
-            : favProductList.isEmpty
-                ? showEmptyState('No Favourite Item'.tr(), context)
-                : ListView.builder(
-                    shrinkWrap: true,
-                    scrollDirection: Axis.vertical,
-                    physics: const BouncingScrollPhysics(),
-                    itemCount: favProductList.length,
-                    itemBuilder: (context, index) {
-                      ProductModel? productModel = favProductList[index];
+    );
+  }
 
-                      return productModel == null ? Container() : buildAllStoreData(productModel, index);
-                    }));
+  Widget _buildShimmerList() {
+    return ListView.builder(
+      physics: const NeverScrollableScrollPhysics(),
+      itemCount: 5,
+      itemBuilder: (_, __) => _buildShimmerCard(),
+    );
+  }
+
+  Widget _buildShimmerCard() {
+    return AnimatedBuilder(
+      animation: _shimmerController,
+      builder: (context, _) {
+        final isDark = isDarkMode(context);
+        final color = Color.lerp(
+          isDark ? AppThemeData.grey900 : AppThemeData.grey100,
+          isDark ? AppThemeData.grey700 : AppThemeData.grey300,
+          _shimmerController.value,
+        )!;
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          child: Container(
+            height: 116,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              color: color,
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildEmptyState() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.favorite_border_rounded, size: 72, color: AppThemeData.primary500.withValues(alpha: 0.35)),
+          const SizedBox(height: 16),
+          Text(
+            'No Favourite Items',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: AppThemeData.grey600),
+          ).tr(),
+          const SizedBox(height: 6),
+          Text(
+            'Items you love will appear here',
+            style: TextStyle(fontSize: 13, color: AppThemeData.grey400),
+          ).tr(),
+        ],
+      ),
+    );
   }
 
   Widget buildAllStoreData(ProductModel productModel, int index) {
@@ -81,7 +141,7 @@ class _FavouriteItemScreenState extends State<FavouriteItemScreen> {
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(12),
             ),
-            shadows: [
+            shadows: const [
               BoxShadow(
                 color: Color(0x0A000000),
                 blurRadius: 32,
@@ -106,24 +166,34 @@ class _FavouriteItemScreenState extends State<FavouriteItemScreen> {
                       image: DecorationImage(image: imageProvider, fit: BoxFit.cover),
                     ),
                   ),
-                  placeholder: (context, url) => Center(
-                      child: CircularProgressIndicator.adaptive(
-                    valueColor: AlwaysStoppedAnimation(AppThemeData.primary500),
-                  )),
+                  placeholder: (context, url) => AnimatedBuilder(
+                    animation: _shimmerController,
+                    builder: (_, __) => Container(
+                      width: 100,
+                      height: 100,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(10),
+                        color: Color.lerp(
+                          AppThemeData.grey100,
+                          AppThemeData.grey300,
+                          _shimmerController.value,
+                        ),
+                      ),
+                    ),
+                  ),
                   errorWidget: (context, url, error) => ClipRRect(
-                      borderRadius: BorderRadius.circular(15),
-                      child: Image.network(
-                        placeholderImage,
-                        fit: BoxFit.cover,
-                        width: MediaQuery.of(context).size.width,
-                        height: MediaQuery.of(context).size.height,
-                      )),
+                    borderRadius: BorderRadius.circular(15),
+                    child: Image.network(
+                      placeholderImage,
+                      fit: BoxFit.cover,
+                      width: 100,
+                      height: 100,
+                    ),
+                  ),
                   fit: BoxFit.cover,
                 ),
               ),
-              const SizedBox(
-                width: 10,
-              ),
+              const SizedBox(width: 10),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -133,9 +203,7 @@ class _FavouriteItemScreenState extends State<FavouriteItemScreen> {
                         Expanded(
                           child: Text(
                             productModel.name,
-                            style: const TextStyle(
-                              fontSize: 18,
-                            ),
+                            style: const TextStyle(fontSize: 18),
                             maxLines: 1,
                           ),
                         ),
@@ -143,22 +211,20 @@ class _FavouriteItemScreenState extends State<FavouriteItemScreen> {
                           onTap: () {
                             setState(() {
                               FavouriteItemModel favouriteModel = FavouriteItemModel(
-                                  product_id: productModel.id, section_id: sectionConstantModel!.id, store_id: productModel.vendorID, user_id: MyAppState.currentUser!.userID);
+                                  product_id: productModel.id,
+                                  section_id: sectionConstantModel!.id,
+                                  store_id: productModel.vendorID,
+                                  user_id: MyAppState.currentUser!.userID);
                               lstFavourite.removeWhere((item) => item.product_id == productModel.id);
                               favProductList.removeAt(index);
                               FireStoreUtils.removeFavouriteItem(favouriteModel);
                             });
                           },
-                          child: Icon(
-                            Icons.favorite,
-                            color: AppThemeData.primary500,
-                          ),
+                          child: Icon(Icons.favorite, color: AppThemeData.primary500),
                         )
                       ],
                     ),
-                    const SizedBox(
-                      height: 5,
-                    ),
+                    const SizedBox(height: 5),
                     Container(
                       decoration: BoxDecoration(
                         color: Colors.green,
@@ -169,21 +235,19 @@ class _FavouriteItemScreenState extends State<FavouriteItemScreen> {
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            Text(productModel.reviewsCount != 0 ? (productModel.reviewsSum / productModel.reviewsCount).toStringAsFixed(1) : 0.toString(),
-                                style: const TextStyle(letterSpacing: 0.5, fontSize: 12, color: Colors.white)),
-                            const SizedBox(width: 3),
-                            const Icon(
-                              Icons.star,
-                              size: 16,
-                              color: Colors.white,
+                            Text(
+                              productModel.reviewsCount != 0
+                                  ? (productModel.reviewsSum / productModel.reviewsCount).toStringAsFixed(1)
+                                  : '0',
+                              style: const TextStyle(letterSpacing: 0.5, fontSize: 12, color: Colors.white),
                             ),
+                            const SizedBox(width: 3),
+                            const Icon(Icons.star, size: 16, color: Colors.white),
                           ],
                         ),
                       ),
                     ),
-                    const SizedBox(
-                      height: 5,
-                    ),
+                    const SizedBox(height: 5),
                     productModel.disPrice == "" || productModel.disPrice == "0"
                         ? Text(
                             amountShow(amount: productCommissionPrice(productModel.price)),
@@ -192,20 +256,21 @@ class _FavouriteItemScreenState extends State<FavouriteItemScreen> {
                         : Row(
                             children: [
                               Text(
-                                "${amountShow(amount: productCommissionPrice(productModel.disPrice.toString()))}",
-                                // "$symbol${double.parse(productModel.disPrice.toString()).toStringAsFixed(decimal)}",
+                                amountShow(amount: productCommissionPrice(productModel.disPrice.toString())),
                                 style: TextStyle(
                                   fontSize: 16,
                                   fontWeight: FontWeight.bold,
                                   color: AppThemeData.primary500,
                                 ),
                               ),
-                              const SizedBox(
-                                width: 10,
-                              ),
+                              const SizedBox(width: 10),
                               Text(
                                 amountShow(amount: productCommissionPrice(productModel.price)),
-                                style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.grey, decoration: TextDecoration.lineThrough),
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.grey,
+                                  decoration: TextDecoration.lineThrough,
+                                ),
                               ),
                             ],
                           ),
@@ -220,7 +285,6 @@ class _FavouriteItemScreenState extends State<FavouriteItemScreen> {
   }
 
   Future<void> getData() async {
-    print(MyAppState.currentUser!.userID);
     await fireStoreUtils.getFavouritesProductList(MyAppState.currentUser!.userID).then((value) {
       setState(() {
         lstFavourite.clear();
@@ -231,8 +295,8 @@ class _FavouriteItemScreenState extends State<FavouriteItemScreen> {
     await fireStoreUtils.getAllProducts().then((value) {
       setState(() {
         lstFavourite.forEach((element) {
-          final bool _productIsInList = value.any((product) => product.id == element.product_id);
-          if (_productIsInList) {
+          final bool productIsInList = value.any((product) => product.id == element.product_id);
+          if (productIsInList) {
             ProductModel productModel = value.firstWhere((product) => product.id == element.product_id);
             favProductList.add(productModel);
           }

@@ -33,6 +33,7 @@ import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../services/localDatabase.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class OrderDetailsScreen extends StatefulWidget {
   final OrderModel? orderModel;
@@ -194,10 +195,40 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                 onPressed: () => Navigator.pop(context),
               ),
         actions: [
-          IconButton(
-            icon: Icon(CupertinoIcons.chat_bubble_2_fill, color: AppThemeData.primary500, size: 20),
-            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => AdminChatScreen())),
-            tooltip: 'Support'.tr(),
+          Padding(
+            padding: const EdgeInsets.only(right: 14),
+            child: GestureDetector(
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) =>
+                      AdminChatScreen(orderId: orderModel?.id),
+                ),
+              ),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                decoration: BoxDecoration(
+                  color: AppThemeData.primary500.withValues(alpha: 0.10),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.headset_mic_rounded,
+                        size: 16, color: AppThemeData.primary500),
+                    const SizedBox(width: 5),
+                    Text(
+                      'Support'.tr(),
+                      style: TextStyle(
+                        fontFamily: AppThemeData.semiBold,
+                        fontSize: 13,
+                        color: AppThemeData.primary500,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           ),
         ],
       ),
@@ -390,6 +421,10 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
       orderTypeLabel = 'DineAway (Takeaway)';
       badgeColor = const Color(0xFFD97706);
       badgeIcon = Icons.shopping_bag_outlined;
+    } else if (order.orderType == "Bill Pay") {
+      orderTypeLabel = 'DineAway (Bill Pay)';
+      badgeColor = AppThemeData.success400;
+      badgeIcon = Icons.receipt_long_rounded;
     } else if (order.takeAway == false) {
       orderTypeLabel = 'Delivery';
       badgeColor = AppThemeData.primary500;
@@ -617,7 +652,7 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                             getPriceTotalText(item),
                           ],
                         ),
-                        // Customization chips â€” variants + add-ons unified
+                        // Customization chips — variants + add-ons unified
                         if ((variantInfo?.variant_options?.isNotEmpty ?? false) || addons.isNotEmpty) ...[
                           const SizedBox(height: 7),
                           Padding(
@@ -628,7 +663,7 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                               children: [
                                 if (variantInfo?.variant_options?.isNotEmpty ?? false)
                                   ...variantInfo!.variant_options!.entries.map((e) =>
-                                    _buildChip('${e.key}: ${e.value}', e.key.hashCode)),
+                                    _buildChip(e.value.toString(), e.key.hashCode, isVariant: true)),
                                 ...addons.asMap().entries.map((e) =>
                                   _buildChip(e.value, e.key + 100)),
                               ],
@@ -728,7 +763,8 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
   }
 
   Widget _buildStatusCard(OrderModel order) {
-    final bool isDineAway = order.orderType == "Dining" || order.orderType == "Takeaway";
+    final bool isDineAway = order.orderType == "Dining" || order.orderType == "Takeaway" || order.orderType == "Bill Pay";
+    final bool isBillPay = order.orderType == "Bill Pay";
     String statusTitle;
     String statusSubtitle;
     Color statusColor;
@@ -772,10 +808,16 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
         statusIcon = Icons.local_shipping_outlined;
         break;
       case ORDER_STATUS_COMPLETED:
-        statusTitle = isDineAway ? 'Order Ready'.tr() : 'Order Delivered'.tr();
-        statusSubtitle = isDineAway ? 'Enjoy your meal!'.tr() : 'Your order has been delivered'.tr();
+        if (isBillPay) {
+          statusTitle = 'Payment Received'.tr();
+          statusSubtitle = 'Your bill has been paid successfully'.tr();
+          statusIcon = Icons.receipt_long_rounded;
+        } else {
+          statusTitle = isDineAway ? 'Order Ready'.tr() : 'Order Delivered'.tr();
+          statusSubtitle = isDineAway ? 'Enjoy your meal!'.tr() : 'Your order has been delivered'.tr();
+          statusIcon = Icons.check_circle_rounded;
+        }
         statusColor = AppThemeData.success400;
-        statusIcon = Icons.check_circle_rounded;
         break;
       default:
         statusTitle = order.status.tr();
@@ -783,19 +825,25 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
         statusColor = AppThemeData.primary500;
         statusIcon = Icons.info_outline_rounded;
     }
-    final List<String> steps = isDineAway
-        ? ['Placed', 'Preparing', 'Ready']
-        : ['Placed', 'Preparing', 'Driver', 'Delivered'];
+    final List<String> steps = isBillPay
+        ? ['Payment Confirmed']
+        : isDineAway
+            ? ['Placed', 'Preparing', 'Ready']
+            : ['Placed', 'Preparing', 'Driver', 'Delivered'];
     int currentStep;
-    switch (order.status) {
-      case ORDER_STATUS_PLACED:      currentStep = 0; break;
-      case ORDER_STATUS_ACCEPTED:    currentStep = 1; break;
-      case ORDER_STATUS_DRIVER_PENDING:
-      case ORDER_STATUS_DRIVER_REJECTED: currentStep = 1; break;
-      case ORDER_STATUS_SHIPPED:     currentStep = 2; break;
-      case ORDER_STATUS_IN_TRANSIT:  currentStep = isDineAway ? 2 : 3; break;
-      case ORDER_STATUS_COMPLETED:   currentStep = isDineAway ? 2 : 3; break;
-      default:                       currentStep = 0;
+    if (isBillPay) {
+      currentStep = 0;
+    } else {
+      switch (order.status) {
+        case ORDER_STATUS_PLACED:      currentStep = 0; break;
+        case ORDER_STATUS_ACCEPTED:    currentStep = 1; break;
+        case ORDER_STATUS_DRIVER_PENDING:
+        case ORDER_STATUS_DRIVER_REJECTED: currentStep = 1; break;
+        case ORDER_STATUS_SHIPPED:     currentStep = 2; break;
+        case ORDER_STATUS_IN_TRANSIT:  currentStep = isDineAway ? 2 : 3; break;
+        case ORDER_STATUS_COMPLETED:   currentStep = isDineAway ? 2 : 3; break;
+        default:                       currentStep = 0;
+      }
     }
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 16),
@@ -851,7 +899,7 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
               ],
             ),
           ),
-          // Prep time tile
+          // Live prep countdown tile
           if ((order.status == ORDER_STATUS_ACCEPTED ||
                order.status == ORDER_STATUS_DRIVER_PENDING ||
                order.status == ORDER_STATUS_DRIVER_REJECTED) &&
@@ -859,40 +907,13 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
               order.estimatedTimeToPrepare!.isNotEmpty &&
               sectionConstantModel!.serviceTypeFlag != "ecommerce-service") ...[
             Divider(height: 1, color: isDarkMode(context) ? AppThemeData.darkBgTertiary : const Color(0xFFF0F0F5)),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
-              child: Row(
-                children: [
-                  Container(
-                    width: 48,
-                    height: 48,
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFF59E0B).withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: lottie.Lottie.asset(
-                      isDarkMode(context) ? 'assets/images/chef_dark_bg.json' : 'assets/images/chef_light_bg.json',
-                      fit: BoxFit.cover,
-                    ),
-                  ),
-                  const SizedBox(width: 14),
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('Estimated Prep Time'.tr(), style: TextStyle(fontSize: 11, color: AppThemeData.grey500)),
-                      const SizedBox(height: 4),
-                      Text(
-                        '${order.estimatedTimeToPrepare}${int.parse(order.estimatedTimeToPrepare!.split(":").first) == 0 ? " mins" : " hr"}',
-                        style: const TextStyle(
-                          fontFamily: AppThemeData.semiBold,
-                          fontSize: 24,
-                          color: Color(0xFFF59E0B),
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
+            _PrepCountdownTile(
+              key: ValueKey('prep_${order.id}'),
+              orderId: order.id,
+              estimatedTimeToPrepare: order.estimatedTimeToPrepare,
+              acceptedAt: order.acceptedAt,
+              alreadyPrepared: order.status == ORDER_STATUS_DRIVER_PENDING ||
+                  order.status == ORDER_STATUS_DRIVER_REJECTED,
             ),
           ],
           // Progress step indicator
@@ -1377,18 +1398,17 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                         ),
                         if ((variantIno?.variant_options?.isNotEmpty ?? false) || addon.isNotEmpty) ...[
                           const SizedBox(height: 6),
-                          Builder(builder: (context) {
-                            final List<String> parts = [
+                          Wrap(
+                            spacing: 5,
+                            runSpacing: 4,
+                            children: [
                               if (variantIno?.variant_options?.isNotEmpty ?? false)
-                                ...variantIno!.variant_options!.entries
-                                    .map((e) => '${e.key}: ${e.value}'),
-                              ...addon,
-                            ];
-                            return Text(
-                              parts.join(' Â· '),
-                              style: TextStyle(fontSize: 12, color: AppThemeData.grey500),
-                            );
-                          }),
+                                ...variantIno!.variant_options!.entries.map((e) =>
+                                  _buildChip(e.value.toString(), e.key.hashCode, isVariant: true)),
+                              ...addon.asMap().entries.map((e) =>
+                                _buildChip(e.value, e.key + 100)),
+                            ],
+                          ),
                         ],
                         const SizedBox(height: 10),
                         GestureDetector(
@@ -2075,19 +2095,31 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
     );
   }
 
-  Widget _buildChip(String label, int attributesOptionIndex) {
+  Widget _buildChip(String label, int attributesOptionIndex, {bool isVariant = false}) {
+    final dark = isDarkMode(context);
+    final bgColor = isVariant
+        ? AppThemeData.primary500.withValues(alpha: dark ? 0.18 : 0.10)
+        : (dark ? AppThemeData.darkBgTertiary : const Color(0xFFF2F2F2));
+    final borderColor = isVariant
+        ? AppThemeData.primary500.withValues(alpha: dark ? 0.40 : 0.30)
+        : (dark ? AppThemeData.darkBorderSecondary : const Color(0xFFE0E0E0));
+    final textColor = isVariant
+        ? AppThemeData.primary500
+        : (dark ? AppThemeData.darkTextSecondary : const Color(0xFF555555));
     return Container(
       decoration: BoxDecoration(
-        color: isDarkMode(context) ? AppThemeData.darkBgTertiary : const Color(0xffEEEDED),
-        borderRadius: BorderRadius.circular(4),
+        color: bgColor,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: borderColor, width: 0.6),
       ),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-        child: Text(
-          label,
-          style: TextStyle(
-            color: isDarkMode(context) ? Colors.white : Colors.black,
-          ),
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+      child: Text(
+        label,
+        style: TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w600,
+          letterSpacing: 0.1,
+          color: textColor,
         ),
       ),
     );
@@ -2215,6 +2247,251 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
       print('pdf downloading error = $error');
       return File('');
     }
+  }
+}
+
+// ── Live preparation countdown widget ────────────────────────────────────────
+
+class _PrepCountdownTile extends StatefulWidget {
+  final String orderId;
+  final String? estimatedTimeToPrepare;
+  final Timestamp? acceptedAt;
+  final bool alreadyPrepared;
+
+  const _PrepCountdownTile({
+    super.key,
+    required this.orderId,
+    required this.estimatedTimeToPrepare,
+    this.acceptedAt,
+    this.alreadyPrepared = false,
+  });
+
+  @override
+  State<_PrepCountdownTile> createState() => _PrepCountdownTileState();
+}
+
+class _PrepCountdownTileState extends State<_PrepCountdownTile> {
+  Timer? _ticker;
+  Duration _remaining = Duration.zero;
+  bool _initialized = false;
+
+  // ── Lifecycle ─────────────────────────────────────────────────────────────
+
+  @override
+  void initState() {
+    super.initState();
+    _boot();
+  }
+
+  @override
+  void didUpdateWidget(_PrepCountdownTile old) {
+    super.didUpdateWidget(old);
+    if (old.acceptedAt != widget.acceptedAt ||
+        old.estimatedTimeToPrepare != widget.estimatedTimeToPrepare ||
+        old.alreadyPrepared != widget.alreadyPrepared) {
+      _ticker?.cancel();
+      _boot();
+    }
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    super.dispose();
+  }
+
+  // ── Init logic ────────────────────────────────────────────────────────────
+
+  Future<void> _boot() async {
+    if (widget.alreadyPrepared) {
+      if (mounted) setState(() { _remaining = Duration.zero; _initialized = true; });
+      return;
+    }
+
+    final prepDuration = _parseDuration(widget.estimatedTimeToPrepare);
+    if (prepDuration == Duration.zero) {
+      if (mounted) setState(() { _initialized = true; });
+      return;
+    }
+
+    DateTime acceptanceTime;
+
+    if (widget.acceptedAt != null) {
+      // Vendor-provided timestamp — most accurate
+      acceptanceTime = widget.acceptedAt!.toDate();
+    } else {
+      // Fall back to a client-side timestamp persisted in SharedPreferences
+      final prefs = await SharedPreferences.getInstance();
+      final key = 'prep_accepted_at_${widget.orderId}';
+      final saved = prefs.getInt(key);
+      if (saved != null) {
+        acceptanceTime = DateTime.fromMillisecondsSinceEpoch(saved);
+      } else {
+        acceptanceTime = DateTime.now();
+        await prefs.setInt(key, acceptanceTime.millisecondsSinceEpoch);
+      }
+    }
+
+    _recalculate(acceptanceTime, prepDuration);
+    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+      _recalculate(acceptanceTime, prepDuration);
+    });
+
+    if (mounted) setState(() => _initialized = true);
+  }
+
+  void _recalculate(DateTime start, Duration prep) {
+    final end = start.add(prep);
+    final left = end.difference(DateTime.now());
+    if (!mounted) return;
+    setState(() => _remaining = left > Duration.zero ? left : Duration.zero);
+    if (left <= Duration.zero) _ticker?.cancel();
+  }
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
+
+  static Duration _parseDuration(String? raw) {
+    if (raw == null || raw.trim().isEmpty) return Duration.zero;
+    final parts = raw.trim().split(':');
+    if (parts.length >= 2) {
+      final h = int.tryParse(parts[0]) ?? 0;
+      final m = int.tryParse(parts[1]) ?? 0;
+      return Duration(hours: h, minutes: m);
+    }
+    final m = int.tryParse(raw.trim()) ?? 0;
+    return Duration(minutes: m);
+  }
+
+  String get _timerLabel {
+    final m = _remaining.inMinutes;
+    final s = _remaining.inSeconds % 60;
+    return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
+  }
+
+  bool get _isDone => _initialized && _remaining == Duration.zero;
+
+  // ── Build ─────────────────────────────────────────────────────────────────
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_initialized) return const SizedBox.shrink();
+
+    final dark = isDarkMode(context);
+
+    if (_isDone) {
+      return _buildPreparedState(dark);
+    }
+    return _buildCountdownState(dark);
+  }
+
+  // Order is fully prepared ──────────────────────────────────────────────────
+
+  Widget _buildPreparedState(bool dark) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+      child: Row(
+        children: [
+          Container(
+            width: 48,
+            height: 48,
+            decoration: BoxDecoration(
+              color: AppThemeData.success400.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Icon(Icons.check_circle_rounded,
+                color: AppThemeData.success400, size: 26),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '🍽️  Your order is ready',
+                  style: TextStyle(
+                    fontFamily: AppThemeData.semiBold,
+                    fontSize: 14,
+                    color: dark ? Colors.white : const Color(0xFF1A1A2E),
+                    height: 1.3,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  'Preparation complete'.tr(),
+                  style: TextStyle(
+                    fontFamily: AppThemeData.regular,
+                    fontSize: 12,
+                    color: AppThemeData.success400,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Live countdown ───────────────────────────────────────────────────────────
+
+  Widget _buildCountdownState(bool dark) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          // Animated chef icon
+          Container(
+            width: 48,
+            height: 48,
+            decoration: BoxDecoration(
+              color: const Color(0xFFF59E0B).withValues(alpha: 0.10),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: lottie.Lottie.asset(
+              dark
+                  ? 'assets/images/chef_dark_bg.json'
+                  : 'assets/images/chef_light_bg.json',
+              fit: BoxFit.cover,
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.baseline,
+                  textBaseline: TextBaseline.alphabetic,
+                  children: [
+                    // MM:SS countdown
+                    Text(
+                      _timerLabel,
+                      style: const TextStyle(
+                        fontFamily: AppThemeData.semiBold,
+                        fontSize: 30,
+                        color: Color(0xFFF59E0B),
+                        letterSpacing: 1.5,
+                        height: 1.1,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      'remaining'.tr(),
+                      style: TextStyle(
+                        fontFamily: AppThemeData.regular,
+                        fontSize: 12,
+                        color: AppThemeData.grey500,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 

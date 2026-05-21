@@ -8,6 +8,8 @@ import 'package:emartconsumer/model/AttributesModel.dart';
 import 'package:emartconsumer/model/BrandsModel.dart';
 import 'package:emartconsumer/model/FavouriteItemModel.dart';
 import 'package:emartconsumer/model/ItemAttributes.dart';
+import 'package:emartconsumer/model/NutritionInfo.dart';
+import 'package:emartconsumer/model/ProductAttributeConfig.dart';
 import 'package:emartconsumer/model/ProductModel.dart';
 import 'package:emartconsumer/model/Ratingmodel.dart';
 import 'package:emartconsumer/model/ReviewAttributeModel.dart';
@@ -199,6 +201,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
       }
     }
     getData();
+    _initAttributeSelections();
   }
 
   void loadOrderType() async {
@@ -221,6 +224,11 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
 
   List<AttributesModel> attributesList = [];
   List<RatingModel> reviewList = [];
+
+  // SS/MS attribute selections
+  // Key: attributeId, Value: list of selected ProductAttributeOption ids
+  final Map<String, List<String>> _selectedAttrOptions = {};
+  double _attrAddOnTotal = 0.0;
 
   getData() async {
     if (MyAppState.currentUser != null) {
@@ -293,9 +301,41 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
     setState(() {});
   }
 
+  void _initAttributeSelections() {
+    final configs = widget.productModel.productAttributes;
+    if (configs.isEmpty) return;
+    setState(() {
+      for (final cfg in configs) {
+        _selectedAttrOptions[cfg.attributeId] = [];
+        // For SS, pre-select first enabled option
+        if (cfg.type == 'SS') {
+          final firstEnabled = cfg.options.where((o) => o.enabled).firstOrNull;
+          if (firstEnabled != null) {
+            _selectedAttrOptions[cfg.attributeId] = [firstEnabled.id];
+          }
+        }
+      }
+      _recalcAttrTotal();
+    });
+  }
+
+  void _recalcAttrTotal() {
+    double total = 0.0;
+    for (final cfg in widget.productModel.productAttributes) {
+      final selectedIds = _selectedAttrOptions[cfg.attributeId] ?? [];
+      for (final opt in cfg.options) {
+        if (opt.enabled && selectedIds.contains(opt.id)) {
+          total += opt.price;
+        }
+      }
+    }
+    _attrAddOnTotal = total;
+  }
+
   @override
   void didChangeDependencies() {
-    cartDatabase = Provider.of<CartDatabase>(context, listen: true);
+    super.didChangeDependencies();
+    cartDatabase = Provider.of<CartDatabase>(context, listen: false);
 
     cartDatabase.allCartProducts.then((value) {
       final bool _productIsInList = value.any((product) =>
@@ -339,7 +379,6 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
         });
       }
     });
-    super.didChangeDependencies();
   }
 
   final PageController _controller =
@@ -347,21 +386,26 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // Update the showAddButton logic to check both delivery and takeaway options
-    bool showAddButton = (selectedOrderType == "Takeaway".tr() &&
-            widget.productModel.takeaway) ||
-        (selectedOrderType == "Delivery".tr() &&
-            widget.productModel.deliveryOption) ||
-        (selectedOrderType != "Takeaway".tr() &&
-            selectedOrderType != "Delivery".tr());
+    // A product has explicit order-type restrictions only when at least one flag is set.
+    // Legacy products (all flags false) are treated as unrestricted.
+    final bool _hasRestrictions = widget.productModel.deliveryOption ||
+        widget.productModel.dineAwayTakeaway ||
+        widget.productModel.dineIn;
+    final bool _isDineaway = selectedOrderType == "Takeaway".tr() ||
+        selectedOrderType == "Dineaway".tr();
 
-    // Add a message to display when product is not available for selected order type
+    bool showAddButton = !_hasRestrictions ||
+        (_isDineaway && widget.productModel.dineAwayTakeaway) ||
+        (selectedOrderType == "Delivery".tr() && widget.productModel.deliveryOption);
+
     String unavailabilityMessage = "";
-    if (selectedOrderType == "Takeaway".tr() && !widget.productModel.takeaway) {
-      unavailabilityMessage = "This product is not available for Takeaway";
-    } else if (selectedOrderType == "Delivery".tr() &&
-        !widget.productModel.deliveryOption) {
-      unavailabilityMessage = "This product is not available for Delivery";
+    if (_hasRestrictions) {
+      if (_isDineaway && !widget.productModel.dineAwayTakeaway) {
+        unavailabilityMessage = "This product is not available for DineAway/Takeaway";
+      } else if (selectedOrderType == "Delivery".tr() &&
+          !widget.productModel.deliveryOption) {
+        unavailabilityMessage = "This product is not available for Delivery";
+      }
     }
 
     return Scaffold(
@@ -595,6 +639,11 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                       ],
                                     ],
                                   ),
+                                  if (widget.productModel.nutritionEnabled &&
+                                      widget.productModel.nutritionInfo != null) ...[
+                                    const SizedBox(height: 10),
+                                    _buildNutritionHighlightChips(context, widget.productModel.nutritionInfo!),
+                                  ],
                                //--
                                 ],
                               ),
@@ -1806,9 +1855,14 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                       ],
                     ),
                   ),
-                  attributes!.isEmpty
-                      ? Container()
-                      : Padding(
+                  // NEW: SS/MS dynamic attribute section
+                  if (widget.productModel.productAttributes.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                      child: _buildDynamicAttributeSection(context),
+                    ),
+                  if (widget.productModel.productAttributes.isEmpty && attributes != null && attributes!.isNotEmpty)
+                      Padding(
                           padding: const EdgeInsets.symmetric(horizontal: 16),
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
@@ -3808,6 +3862,22 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
     );
   }
   addtocard(ProductModel productModel, bool isIncerementQuantity) async {
+    // ── Service compatibility gate — hard-block before any cart work ──────────
+    if (productModel.deliveryOption || productModel.dineAwayTakeaway || productModel.dineIn) {
+      final orderType = selectedOrderType ?? 'Delivery';
+      final isDineawayMode = orderType == 'Takeaway' || orderType == 'Dineaway';
+      if (!isDineawayMode && !productModel.deliveryOption) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Delivery order is not available.'.tr())));
+        return;
+      }
+      if (isDineawayMode && !productModel.dineAwayTakeaway) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('DineAway order is not available.'.tr())));
+        return;
+      }
+    }
+
     // Using isAddOnApplied properly to track if any add-ons are applied
     double AddOnVal = 0;
     bool isAddOnApplied = false;
@@ -3967,6 +4037,51 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
       }
       setState(() {});
     } else {
+      // Save full service permissions for CartScreen validation
+      {
+        final sp = await SharedPreferences.getInstance();
+        await sp.setString(
+          'service_perm_${widget.productModel.id}',
+          jsonEncode({
+            'delivery': widget.productModel.deliveryOption,
+            'dineaway': widget.productModel.takeaway,
+            'dineIn': widget.productModel.dineIn,
+            'takeaway': widget.productModel.dineAwayTakeaway,
+          }),
+        );
+        // Remove old schema key if present
+        await sp.remove('dineaway_perm_${widget.productModel.id}');
+      }
+
+      // Save selected attribute options for cart display
+      if (widget.productModel.productAttributes.isNotEmpty) {
+        final sp = await SharedPreferences.getInstance();
+        final selectionMap = <String, dynamic>{};
+        for (final cfg in widget.productModel.productAttributes) {
+          final selectedIds = _selectedAttrOptions[cfg.attributeId] ?? [];
+          final selectedOpts = cfg.options
+              .where((o) => o.enabled && selectedIds.contains(o.id))
+              .map((o) => {'id': o.id, 'name': o.name, 'price': o.price})
+              .toList();
+          if (selectedOpts.isNotEmpty) {
+            selectionMap[cfg.attributeId] = {
+              'title': cfg.attributeTitle,
+              'type': cfg.type,
+              'options': selectedOpts,
+            };
+          }
+        }
+        await sp.setString('attr_sel_${widget.productModel.id}', jsonEncode(selectionMap));
+        // Also update the product price to include add-on total
+        if (_attrAddOnTotal > 0) {
+          final basePrice = double.tryParse(widget.productModel.disPrice?.isNotEmpty == true && widget.productModel.disPrice != '0'
+              ? widget.productModel.disPrice!
+              : widget.productModel.price) ?? 0.0;
+          widget.productModel.price = (basePrice + _attrAddOnTotal).toStringAsFixed(2);
+          widget.productModel.disPrice = '0';
+        }
+      }
+
       if (cartProducts.isEmpty) {
         cartDatabase.addProduct(
             productModel, cartDatabase, isIncerementQuantity);
@@ -3975,7 +4090,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
         // we can simply add the product to the cart here
         cartDatabase.addProduct(
             productModel, cartDatabase, isIncerementQuantity);
-        
+
         if (isAddOnApplied && AddOnVal > 0) {
           priceTemp += (AddOnVal * productQnt);
         }
@@ -4255,6 +4370,353 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
         setState(() {});
       });
     });
+  }
+
+  Widget _buildNutritionHighlightChips(BuildContext context, NutritionInfo info) {
+    final highlights = info.getHighlights();
+    if (highlights.isEmpty) return const SizedBox.shrink();
+    final isDark = isDarkMode(context);
+    return Wrap(
+      spacing: 8,
+      runSpacing: 6,
+      children: highlights.map((h) {
+        final icon = _nutritionIcon(h['metric']!);
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+          decoration: BoxDecoration(
+            color: isDark ? const Color(0xFF1B3A28) : const Color(0xFFE8F5EE),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(
+              color: isDark ? const Color(0xFF2D6A4F) : const Color(0xFF95D5B2),
+              width: 1,
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 13, color: const Color(0xFF2D9A5E)),
+              const SizedBox(width: 5),
+              Text(
+                'High ${h['metric']} • ${h['value']}${h['unit']}',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontFamily: AppThemeData.semiBold,
+                  color: isDark ? const Color(0xFF81C995) : const Color(0xFF1B6B3A),
+                ),
+              ),
+            ],
+          ),
+        );
+      }).toList(),
+    );
+  }
+
+  IconData _nutritionIcon(String metric) {
+    switch (metric) {
+      case 'Calories': return Icons.local_fire_department_outlined;
+      case 'Protein': return Icons.fitness_center_outlined;
+      case 'Carbs': return Icons.grain_outlined;
+      case 'Fat': return Icons.water_drop_outlined;
+      case 'Fiber': return Icons.eco_outlined;
+      default: return Icons.local_dining_outlined;
+    }
+  }
+
+  Widget _buildDynamicAttributeSection(BuildContext context) {
+    final isDark = isDarkMode(context);
+    final configs = widget.productModel.productAttributes;
+    final enabledConfigs = configs.where((c) => c.options.any((o) => o.enabled)).toList();
+    if (enabledConfigs.isEmpty) return const SizedBox.shrink();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Container(
+              width: 3,
+              height: 16,
+              decoration: BoxDecoration(
+                color: AppThemeData.primary500,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              'Customize Your Order'.tr(),
+              style: TextStyle(
+                fontSize: 16,
+                fontFamily: AppThemeData.bold,
+                color: isDark ? AppThemeData.grey50 : AppThemeData.grey900,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        ...enabledConfigs.map((cfg) => _buildAttrGroupCard(cfg, isDark)),
+        if (_attrAddOnTotal > 0) ...[
+          const SizedBox(height: 10),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              color: isDark
+                  ? AppThemeData.primary500.withOpacity(0.15)
+                  : AppThemeData.primary500.withOpacity(0.08),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: AppThemeData.primary500.withOpacity(0.3)),
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.add_circle_outline, size: 14, color: AppThemeData.primary500),
+                const SizedBox(width: 8),
+                Text(
+                  'Add-ons: '.tr(),
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontFamily: AppThemeData.medium,
+                    color: isDark ? AppThemeData.grey300 : AppThemeData.grey600,
+                  ),
+                ),
+                Text(
+                  '+₹${_attrAddOnTotal % 1 == 0 ? _attrAddOnTotal.toInt() : _attrAddOnTotal.toStringAsFixed(2)}',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontFamily: AppThemeData.bold,
+                    color: AppThemeData.primary500,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildAttrGroupCard(ProductAttributeConfig cfg, bool isDark) {
+    final isMS = cfg.type == 'MS';
+    final enabledOptions = cfg.options.where((o) => o.enabled).toList();
+    final selectedIds = _selectedAttrOptions[cfg.attributeId] ?? [];
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: isDark ? const Color(0xFF1F2937) : Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: isDark ? const Color(0xFF374151) : const Color(0xFFF3F4F6),
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.04),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  cfg.attributeTitle,
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontFamily: AppThemeData.semiBold,
+                    color: isDark ? AppThemeData.grey50 : AppThemeData.grey900,
+                  ),
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                decoration: BoxDecoration(
+                  color: isMS
+                      ? const Color(0xFF3B82F6).withOpacity(0.1)
+                      : const Color(0xFF10B981).withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(
+                  isMS ? 'Choose multiple'.tr() : 'Choose one'.tr(),
+                  style: TextStyle(
+                    fontSize: 10,
+                    fontFamily: AppThemeData.medium,
+                    color: isMS ? const Color(0xFF2563EB) : const Color(0xFF059669),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          if (isMS)
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: enabledOptions.map((opt) {
+                final isSelected = selectedIds.contains(opt.id);
+                return _buildMSChip(opt, isSelected, cfg.attributeId, isDark);
+              }).toList(),
+            )
+          else
+            Column(
+              children: enabledOptions.map((opt) {
+                final isSelected = selectedIds.contains(opt.id);
+                return _buildSSRadioRow(opt, isSelected, cfg.attributeId, isDark);
+              }).toList(),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSSRadioRow(ProductAttributeOption opt, bool isSelected, String attrId, bool isDark) {
+    return GestureDetector(
+      onTap: () {
+        setState(() {
+          _selectedAttrOptions[attrId] = [opt.id];
+          _recalcAttrTotal();
+        });
+      },
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: isSelected
+              ? AppThemeData.primary500.withOpacity(0.08)
+              : Colors.transparent,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: isSelected
+                ? AppThemeData.primary500.withOpacity(0.5)
+                : (isDark ? const Color(0xFF374151) : const Color(0xFFE5E7EB)),
+            width: isSelected ? 1.5 : 1.0,
+          ),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 18,
+              height: 18,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: isSelected ? AppThemeData.primary500 : Colors.grey.shade400,
+                  width: 2,
+                ),
+              ),
+              child: isSelected
+                  ? Center(
+                      child: Container(
+                        width: 8,
+                        height: 8,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: AppThemeData.primary500,
+                        ),
+                      ),
+                    )
+                  : null,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                opt.name,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontFamily: isSelected ? AppThemeData.semiBold : AppThemeData.regular,
+                  color: isSelected
+                      ? (isDark ? AppThemeData.grey50 : AppThemeData.grey900)
+                      : (isDark ? AppThemeData.grey300 : AppThemeData.grey600),
+                ),
+              ),
+            ),
+            if (opt.price > 0)
+              Text(
+                '+₹${opt.price % 1 == 0 ? opt.price.toInt() : opt.price.toStringAsFixed(2)}',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontFamily: AppThemeData.semiBold,
+                  color: isSelected ? AppThemeData.primary500 : Colors.grey.shade500,
+                ),
+              )
+            else
+              Text(
+                'Free'.tr(),
+                style: TextStyle(
+                  fontSize: 12,
+                  fontFamily: AppThemeData.medium,
+                  color: const Color(0xFF10B981),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMSChip(ProductAttributeOption opt, bool isSelected, String attrId, bool isDark) {
+    return GestureDetector(
+      onTap: () {
+        setState(() {
+          final current = List<String>.from(_selectedAttrOptions[attrId] ?? []);
+          if (isSelected) {
+            current.remove(opt.id);
+          } else {
+            current.add(opt.id);
+          }
+          _selectedAttrOptions[attrId] = current;
+          _recalcAttrTotal();
+        });
+      },
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: isSelected
+              ? AppThemeData.primary500.withOpacity(0.1)
+              : (isDark ? const Color(0xFF2D3748) : const Color(0xFFF9FAFB)),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: isSelected
+                ? AppThemeData.primary500.withOpacity(0.6)
+                : (isDark ? const Color(0xFF4B5563) : const Color(0xFFE5E7EB)),
+            width: isSelected ? 1.5 : 1.0,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (isSelected) ...[
+              Icon(Icons.check_circle, size: 14, color: AppThemeData.primary500),
+              const SizedBox(width: 5),
+            ],
+            Text(
+              opt.name,
+              style: TextStyle(
+                fontSize: 13,
+                fontFamily: isSelected ? AppThemeData.semiBold : AppThemeData.regular,
+                color: isSelected
+                    ? AppThemeData.primary500
+                    : (isDark ? AppThemeData.grey300 : AppThemeData.grey700),
+              ),
+            ),
+            if (opt.price > 0) ...[
+              const SizedBox(width: 5),
+              Text(
+                '+₹${opt.price % 1 == 0 ? opt.price.toInt() : opt.price.toStringAsFixed(2)}',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontFamily: AppThemeData.semiBold,
+                  color: isSelected ? AppThemeData.primary500 : Colors.grey.shade500,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
   }
 
   Widget _buildChip(String label, int attributesOptionIndex, bool isSelected) {

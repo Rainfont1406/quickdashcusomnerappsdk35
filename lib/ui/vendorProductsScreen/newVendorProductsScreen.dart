@@ -1,10 +1,12 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/FavouriteItemModel.dart';
 import 'package:emartconsumer/model/FavouriteModel.dart';
+import 'package:emartconsumer/model/NutritionInfo.dart';
 import 'package:emartconsumer/model/ProductModel.dart';
 import 'package:emartconsumer/model/VendorCategoryModel.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
@@ -29,6 +31,7 @@ import 'package:collection/collection.dart';
 import 'package:emartconsumer/ui/cartScreen/CartScreen.dart';
 import 'package:emartconsumer/ui/container/ContainerScreen.dart';
 import 'package:emartconsumer/ui/auth_screen/login_screen.dart';
+import 'package:emartconsumer/ui/vendorProductsScreen/vendor_products_skeleton.dart';
 import 'package:emartconsumer/widget/product_options_dialog.dart';
 
 class NewVendorProductsScreen extends StatefulWidget {
@@ -46,47 +49,45 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
     with SingleTickerProviderStateMixin {
   final FireStoreUtils fireStoreUtils = FireStoreUtils();
   late CartDatabase cartDatabase;
+  bool _cartReady = false;
   List<CartProduct> cartProducts = [];
+  StreamSubscription<List<CartProduct>>? _cartSubscription;
 
   bool isLoading = true;
 
   @override
   void initState() {
+    super.initState();
     getFoodType();
     statusCheck();
     animateSlider();
-    super.initState();
   }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    cartDatabase = Provider.of<CartDatabase>(context, listen: false);
-    // Load initial cart data
-    _loadCartData();
-  }
-
-  // Load initial cart data
-  Future<void> _loadCartData() async {
-    try {
-      final products = await cartDatabase.allCartProducts;
-      setState(() {
-        cartProducts = products;
+    final db = Provider.of<CartDatabase>(context, listen: false);
+    // Safely capture the previous instance without touching the late field if not ready
+    final prev = _cartReady ? cartDatabase : null;
+    // Always initialize — eliminates any window where the late field is unset
+    cartDatabase = db;
+    _cartReady = true;
+    if (_cartSubscription == null || prev != db) {
+      _cartSubscription?.cancel();
+      _cartSubscription = cartDatabase.watchProducts.listen((products) {
+        if (mounted) setState(() => cartProducts = products);
       });
-    } catch (e) {
-      print('Error loading cart data: $e');
     }
   }
 
-  // Refresh cart data
+  // Refresh cart data — kept for explicit call sites; stream handles most cases
   Future<void> _refreshCartData() async {
+    if (!_cartReady) return;
     try {
       final products = await cartDatabase.allCartProducts;
-      setState(() {
-        cartProducts = products;
-      });
+      if (mounted) setState(() => cartProducts = products);
     } catch (e) {
-      print('Error refreshing cart data: $e');
+      debugPrint('Error refreshing cart data: $e');
     }
   }
 
@@ -181,17 +182,20 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
 
   @override
   void dispose() {
+    _sliderTimer?.cancel();
     _closingCountdownTimer?.cancel();
+    _cartSubscription?.cancel();
     super.dispose();
   }
 
   List<FavouriteModel> favouriteList = [];
   PageController pageController = PageController();
   int currentPage = 0;
+  Timer? _sliderTimer;
 
   void animateSlider() {
     if (widget.vendorModel.photos.isNotEmpty) {
-      Timer.periodic(const Duration(seconds: 2), (Timer timer) {
+      _sliderTimer = Timer.periodic(const Duration(seconds: 2), (Timer timer) {
         if (currentPage < widget.vendorModel.photos.length - 1) {
           currentPage++;
         } else {
@@ -222,7 +226,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
       backgroundColor:
           isDarkMode(context) ? AppThemeData.surfaceDark : AppThemeData.surface,
       body: isLoading == true
-          ? loader()
+          ? const VendorProductsSkeletonLoader()
           : NestedScrollView(
               headerSliverBuilder:
                   (BuildContext context, bool innerBoxIsScrolled) {
@@ -1012,6 +1016,12 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                         ),
                       ),
 
+                      // Nutrition Filter
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+                        child: _buildNutritionFilterSection(context),
+                      ),
+
                       const SizedBox(height: 16),
 
                       // Product List View
@@ -1124,21 +1134,29 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
 
   bool isVag = false;
   bool isNonVag = false;
+  String? _nutritionFilterType;
+  String? _nutritionFilterLevel;
+
+  static const _nutritionMetrics = ['Calories', 'Protein', 'Carbs', 'Fat', 'Fiber'];
+  static const _nutritionLevels = ['High', 'Medium', 'Low'];
 
   filterRecord() {
-    if (isVag == true && isNonVag == true) {
-      productList = allProductList
-          .where((p0) => p0.nonveg == true || p0.nonveg == false)
-          .toList();
-    } else if (isVag == true && isNonVag == false) {
-      productList = allProductList.where((p0) => p0.nonveg == false).toList();
+    List<ProductModel> base = allProductList;
+
+    if (isVag == true && isNonVag == false) {
+      base = base.where((p0) => p0.nonveg == false).toList();
     } else if (isVag == false && isNonVag == true) {
-      productList = allProductList.where((p0) => p0.nonveg == true).toList();
-    } else if (isVag == false && isNonVag == false) {
-      productList = allProductList
-          .where((p0) => p0.nonveg == true || p0.nonveg == false)
-          .toList();
+      base = base.where((p0) => p0.nonveg == true).toList();
     }
+
+    if (_nutritionFilterType != null && _nutritionFilterLevel != null) {
+      base = base.where((p) {
+        if (!p.nutritionEnabled || p.nutritionInfo == null) return false;
+        return p.nutritionInfo!.classifyMetric(_nutritionFilterType!) == _nutritionFilterLevel;
+      }).toList();
+    }
+
+    productList = base;
     setState(() {});
   }
 
@@ -1149,11 +1167,202 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
     } else {
       isVag = false;
       isNonVag = false;
+      _nutritionFilterType = null;
+      _nutritionFilterLevel = null;
       productList = allProductList
           .where((p0) => p0.name.toLowerCase().contains(name.toLowerCase()))
           .toList();
     }
     setState(() {});
+  }
+
+  Widget _buildNutritionFilterSection(BuildContext context) {
+    final isDark = isDarkMode(context);
+    final hasFilter = _nutritionFilterType != null && _nutritionFilterLevel != null;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(
+              Icons.monitor_heart_outlined,
+              size: 14,
+              color: isDark ? AppThemeData.grey400 : AppThemeData.grey600,
+            ),
+            const SizedBox(width: 6),
+            Text(
+              'Nutrition Filter'.tr(),
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: isDark ? AppThemeData.grey300 : AppThemeData.grey700,
+                fontFamily: AppThemeData.semiBold,
+                letterSpacing: 0.2,
+              ),
+            ),
+            if (hasFilter) ...[
+              const Spacer(),
+              GestureDetector(
+                onTap: () {
+                  setState(() {
+                    _nutritionFilterType = null;
+                    _nutritionFilterLevel = null;
+                  });
+                  filterRecord();
+                },
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: AppThemeData.primary500.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.close, size: 11, color: AppThemeData.primary500),
+                      const SizedBox(width: 3),
+                      Text(
+                        'Clear'.tr(),
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: AppThemeData.primary500,
+                          fontFamily: AppThemeData.medium,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+              child: _buildNutritionDropdown(
+                context: context,
+                hint: 'Nutrition Type'.tr(),
+                value: _nutritionFilterType,
+                items: _nutritionMetrics,
+                onChanged: (val) {
+                  setState(() => _nutritionFilterType = val);
+                  if (_nutritionFilterLevel != null) filterRecord();
+                },
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: _buildNutritionDropdown(
+                context: context,
+                hint: 'Level'.tr(),
+                value: _nutritionFilterLevel,
+                items: _nutritionLevels,
+                onChanged: (val) {
+                  setState(() => _nutritionFilterLevel = val);
+                  if (_nutritionFilterType != null) filterRecord();
+                },
+              ),
+            ),
+          ],
+        ),
+        if (hasFilter) ...[
+          const SizedBox(height: 8),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+            decoration: BoxDecoration(
+              color: isDark ? const Color(0xFF1B3A28) : const Color(0xFFE8F5EE),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: isDark ? const Color(0xFF2D6A4F) : const Color(0xFF95D5B2),
+              ),
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.filter_alt_outlined, size: 14, color: const Color(0xFF2D9A5E)),
+                const SizedBox(width: 6),
+                Text(
+                  '$_nutritionFilterLevel $_nutritionFilterType dishes — ${productList.length} found'.tr(),
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: isDark ? const Color(0xFF81C995) : const Color(0xFF1B6B3A),
+                    fontFamily: AppThemeData.medium,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildNutritionDropdown({
+    required BuildContext context,
+    required String hint,
+    required String? value,
+    required List<String> items,
+    required ValueChanged<String?> onChanged,
+  }) {
+    final isDark = isDarkMode(context);
+    return Container(
+      height: 42,
+      decoration: BoxDecoration(
+        color: isDark ? AppThemeData.grey800 : AppThemeData.grey100,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: value != null
+              ? AppThemeData.primary500
+              : (isDark ? AppThemeData.grey700 : AppThemeData.grey200),
+          width: value != null ? 1.5 : 1,
+        ),
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<String>(
+          value: value,
+          hint: Padding(
+            padding: const EdgeInsets.only(left: 12),
+            child: Text(
+              hint,
+              style: TextStyle(
+                fontSize: 12,
+                color: isDark ? AppThemeData.grey500 : AppThemeData.grey400,
+                fontFamily: AppThemeData.regular,
+              ),
+            ),
+          ),
+          icon: Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: Icon(
+              Icons.keyboard_arrow_down_rounded,
+              size: 18,
+              color: value != null
+                  ? AppThemeData.primary500
+                  : (isDark ? AppThemeData.grey500 : AppThemeData.grey400),
+            ),
+          ),
+          isExpanded: true,
+          dropdownColor: isDark ? AppThemeData.grey800 : Colors.white,
+          borderRadius: BorderRadius.circular(12),
+          items: items.map((item) => DropdownMenuItem<String>(
+            value: item,
+            child: Padding(
+              padding: const EdgeInsets.only(left: 12),
+              child: Text(
+                item,
+                style: TextStyle(
+                  fontSize: 13,
+                  color: isDark ? AppThemeData.grey100 : AppThemeData.grey800,
+                  fontFamily: AppThemeData.medium,
+                ),
+              ),
+            ),
+          )).toList(),
+          onChanged: onChanged,
+        ),
+      ),
+    );
   }
 
   bool isOpen = false;
@@ -1519,40 +1728,26 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                       List<String> selectedVariants = [];
                       List<String> selectedIndexVariants = [];
                       List<String> selectedIndexArray = [];
-                      if (productModel.itemAttributes != null) {
-                        if (productModel
-                            .itemAttributes!.attributes!.isNotEmpty) {
-                          for (var element
-                              in productModel.itemAttributes!.attributes!) {
-                            if (element.attributeOptions!.isNotEmpty) {
-                              selectedVariants.add(productModel
-                                  .itemAttributes!
-                                  .attributes![productModel
-                                      .itemAttributes!.attributes!
-                                      .indexOf(element)]
-                                  .attributeOptions![0]
-                                  .toString());
-                              selectedIndexVariants.add(
-                                  '${productModel.itemAttributes!.attributes!.indexOf(element)} _${productModel.itemAttributes!.attributes![0].attributeOptions![0].toString()}');
-                              selectedIndexArray.add(
-                                  '${productModel.itemAttributes!.attributes!.indexOf(element)}_0');
-                            }
+                      final _ia = productModel.itemAttributes;
+                      if (_ia != null) {
+                        final _attrs = _ia.attributes ?? [];
+                        for (int _ai = 0; _ai < _attrs.length; _ai++) {
+                          final _opts = _attrs[_ai].attributeOptions;
+                          if (_opts != null && _opts.isNotEmpty) {
+                            selectedVariants.add(_opts[0].toString());
+                            selectedIndexVariants.add('$_ai _${_opts[0]}');
+                            selectedIndexArray.add('${_ai}_0');
                           }
                         }
-                        if (productModel.itemAttributes!.variants!
-                            .where((element) =>
-                                element.variant_sku ==
-                                selectedVariants.join('-'))
-                            .isNotEmpty) {
-                          price = productCommissionPrice(productModel
-                                  .itemAttributes!.variants!
-                                  .where((element) =>
-                                      element.variant_sku ==
-                                      selectedVariants.join('-'))
-                                  .first
-                                  .variant_price ??
-                              '0');
-                          disPrice = "0";
+                        final _variants = _ia.variants;
+                        if (_variants != null) {
+                          final _match = _variants.where(
+                              (e) => e.variant_sku == selectedVariants.join('-'));
+                          if (_match.isNotEmpty) {
+                            price = productCommissionPrice(
+                                _match.first.variant_price ?? '0');
+                            disPrice = "0";
+                          }
                         }
                       } else {
                         price = productCommissionPrice(
@@ -1564,33 +1759,50 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                     productModel.disPrice.toString());
                       }
 
-                      bool showAddButton = (foodType == "Takeaway".tr() &&
-                              productModel.takeaway) ||
-                          (foodType == "Delivery".tr() &&
-                              productModel.deliveryOption) ||
-                          (foodType != "Takeaway".tr() &&
-                              foodType != "Delivery".tr());
+                      final bool _pHasRestrictions = productModel.deliveryOption ||
+                          productModel.dineAwayTakeaway || productModel.dineIn;
+                      final bool _pIsDineaway = foodType == "Takeaway".tr() ||
+                          foodType == "Dineaway".tr();
+
+                      bool showAddButton = !_pHasRestrictions ||
+                          (_pIsDineaway && productModel.dineAwayTakeaway) ||
+                          (foodType == "Delivery".tr() && productModel.deliveryOption);
 
                       bool hasVariants = productModel.itemAttributes != null &&
                           productModel.itemAttributes!.attributes!.isNotEmpty;
                       bool hasAddOns = productModel.addOnsTitle.isNotEmpty;
 
                       String unavailabilityMessage = "";
-                      if (foodType == "Takeaway".tr() &&
-                          !productModel.takeaway) {
-                        unavailabilityMessage = "Not available for Takeaway";
-                      } else if (foodType == "Delivery".tr() &&
-                          !productModel.deliveryOption) {
-                        unavailabilityMessage = "Not available for Delivery";
+                      if (_pHasRestrictions) {
+                        if (_pIsDineaway && !productModel.dineAwayTakeaway) {
+                          unavailabilityMessage = "Not available for DineAway/Takeaway";
+                        } else if (foodType == "Delivery".tr() &&
+                            !productModel.deliveryOption) {
+                          unavailabilityMessage = "Not available for Delivery";
+                        }
                       }
 
-                      String cartId = productModel.id +
-                          "~" +
-                          (productModel.variant_info != null
-                              ? productModel.variant_info!.variant_id.toString()
-                              : "");
-                      CartProduct? cartProduct =
-                          cartProducts.firstWhereOrNull((p) => p.id == cartId);
+                      // Build the lookup id.
+                      // Variant products may be stored as "id~variantId" even when
+                      // the listing-level productModel still has variant_info==null
+                      // (before the user explicitly selects a variant). We fall back
+                      // to a prefix search so the quantity badge always shows.
+                      CartProduct? cartProduct;
+                      if (productModel.variant_info != null) {
+                        final cartId = productModel.id +
+                            "~" +
+                            productModel.variant_info!.variant_id.toString();
+                        cartProduct =
+                            cartProducts.firstWhereOrNull((p) => p.id == cartId);
+                      } else {
+                        // Exact match first (no-variant products stored as "id~")
+                        final exactId = "${productModel.id}~";
+                        cartProduct =
+                            cartProducts.firstWhereOrNull((p) => p.id == exactId);
+                        // Fallback: variant was auto-assigned on add — match by prefix
+                        cartProduct ??= cartProducts.firstWhereOrNull(
+                            (p) => p.id.startsWith("${productModel.id}~"));
+                      }
 
                       return Material(
                           color: Colors.transparent,
@@ -1994,59 +2206,83 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
       BuildContext context, CartProduct cartProduct) {
     return Container(
       key: const ValueKey('qty_pill'),
+      height: 34,
       decoration: BoxDecoration(
-        border: Border.all(color: AppThemeData.primary500, width: 1.5),
-        borderRadius: BorderRadius.circular(8),
+        color: AppThemeData.primary500,
+        borderRadius: BorderRadius.circular(10),
+        boxShadow: [
+          BoxShadow(
+            color: AppThemeData.primary500.withValues(alpha: 0.35),
+            blurRadius: 8,
+            offset: const Offset(0, 3),
+          ),
+        ],
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          GestureDetector(
-            onTap: () => _decrementQuantity(cartProduct),
-            child: Container(
-              width: 30,
-              height: 30,
-              decoration: const BoxDecoration(
-                color: AppThemeData.primary500,
-                borderRadius: BorderRadius.only(
-                  topLeft: Radius.circular(6),
-                  bottomLeft: Radius.circular(6),
-                ),
+          // Minus button
+          Material(
+            color: Colors.transparent,
+            child: InkWell(
+              borderRadius: const BorderRadius.only(
+                topLeft: Radius.circular(10),
+                bottomLeft: Radius.circular(10),
               ),
-              child: const Icon(Icons.remove, color: Colors.white, size: 14),
-            ),
-          ),
-          SizedBox(
-            width: 30,
-            height: 30,
-            child: Center(
-              child: Text(
-                cartProduct.quantity.toString(),
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.bold,
-                  color: isDarkMode(context)
-                      ? AppThemeData.grey50
-                      : AppThemeData.grey900,
-                  fontFamily: AppThemeData.semiBold,
-                ),
+              onTap: () => _decrementQuantity(cartProduct),
+              child: SizedBox(
+                width: 34,
+                height: 34,
+                child: const Icon(Icons.remove_rounded,
+                    color: Colors.white, size: 15),
               ),
             ),
           ),
-          GestureDetector(
-            onTap: () => _incrementQuantity(cartProduct),
-            child: Container(
-              width: 30,
-              height: 30,
-              decoration: const BoxDecoration(
-                color: AppThemeData.primary500,
-                borderRadius: BorderRadius.only(
-                  topRight: Radius.circular(6),
-                  bottomRight: Radius.circular(6),
+          // Divider
+          Container(width: 1, height: 18, color: Colors.white.withValues(alpha: 0.3)),
+          // Quantity label
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 160),
+            transitionBuilder: (child, anim) => ScaleTransition(
+              scale: anim,
+              child: child,
+            ),
+            child: SizedBox(
+              key: ValueKey(cartProduct.quantity),
+              width: 34,
+              height: 34,
+              child: Center(
+                child: Text(
+                  cartProduct.quantity.toString(),
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                    color: Colors.white,
+                    fontFamily: AppThemeData.bold,
+                    height: 1,
+                  ),
                 ),
               ),
-              child: const Icon(Icons.add, color: Colors.white, size: 14),
+            ),
+          ),
+          // Divider
+          Container(width: 1, height: 18, color: Colors.white.withValues(alpha: 0.3)),
+          // Plus button
+          Material(
+            color: Colors.transparent,
+            child: InkWell(
+              borderRadius: const BorderRadius.only(
+                topRight: Radius.circular(10),
+                bottomRight: Radius.circular(10),
+              ),
+              onTap: () => _incrementQuantity(cartProduct),
+              child: SizedBox(
+                width: 34,
+                height: 34,
+                child: const Icon(Icons.add_rounded,
+                    color: Colors.white, size: 15),
+              ),
             ),
           ),
         ],
@@ -2066,7 +2302,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
 
   // Different approach: Local state management with immediate UI updates
   Future<void> _decrementQuantity(CartProduct cartProduct) async {
-    if (!mounted) return;
+    if (!mounted || !_cartReady) return;
 
     print(
         'Decrementing quantity for product: ${cartProduct.id}, current quantity: ${cartProduct.quantity}');
@@ -2124,7 +2360,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
 
   // Different approach: Local state management with immediate UI updates
   Future<void> _incrementQuantity(CartProduct cartProduct) async {
-    if (!mounted) return;
+    if (!mounted || !_cartReady) return;
 
     print(
         'Incrementing quantity for product: ${cartProduct.id}, current quantity: ${cartProduct.quantity}');
@@ -2495,6 +2731,21 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
 
   // Method to actually add product to cart
   Future<void> _addProductToCart(ProductModel productModel) async {
+    if (!_cartReady) return;
+
+    // ── Service compatibility gate — hard-block before any cart work ──────────
+    if (productModel.deliveryOption || productModel.dineAwayTakeaway || productModel.dineIn) {
+      final isDineawayMode = foodType == 'Dineaway' || foodType == 'Takeaway';
+      if (!isDineawayMode && !productModel.deliveryOption) {
+        ShowToastDialog.showToast('Delivery order is not available.'.tr());
+        return;
+      }
+      if (isDineawayMode && !productModel.dineAwayTakeaway) {
+        ShowToastDialog.showToast('DineAway order is not available.'.tr());
+        return;
+      }
+    }
+
     try {
       // Check if cart contains products from a different vendor
       if (cartProducts.isNotEmpty) {
@@ -2589,6 +2840,20 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
       // Add product to cart
       bool success = await cartDatabase.addProduct(productModel, cartDatabase, true);
 
+      if (success) {
+        final sp = await SharedPreferences.getInstance();
+        await sp.setString(
+          'service_perm_${productModel.id}',
+          jsonEncode({
+            'delivery': productModel.deliveryOption,
+            'dineaway': productModel.takeaway,
+            'dineIn': productModel.dineIn,
+            'takeaway': productModel.dineAwayTakeaway,
+          }),
+        );
+        await sp.remove('dineaway_perm_${productModel.id}');
+      }
+
       if (!success) {
         // If addProduct returned false, it means there's a different vendor conflict
         ShowToastDialog.showToast(
@@ -2607,7 +2872,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
   }
 }
 
-class _AnimatedAddButton extends StatelessWidget {
+class _AnimatedAddButton extends StatefulWidget {
   final VoidCallback onTap;
   final bool hasOptions;
 
@@ -2616,39 +2881,81 @@ class _AnimatedAddButton extends StatelessWidget {
       : super(key: key);
 
   @override
+  State<_AnimatedAddButton> createState() => _AnimatedAddButtonState();
+}
+
+class _AnimatedAddButtonState extends State<_AnimatedAddButton>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _ctrl;
+  late Animation<double> _scale;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 100));
+    _scale = Tween<double>(begin: 1.0, end: 0.92).animate(
+        CurvedAnimation(parent: _ctrl, curve: Curves.easeOut));
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  void _onTap() {
+    _ctrl.forward().then((_) => _ctrl.reverse());
+    widget.onTap();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      key: const ValueKey('add_btn'),
-      onTap: onTap,
-      child: Container(
-        height: 30,
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-        decoration: BoxDecoration(
-          color: AppThemeData.primary500,
-          borderRadius: BorderRadius.circular(7),
-          boxShadow: [
-            BoxShadow(
-              color: AppThemeData.primary500.withOpacity(0.35),
-              blurRadius: 6,
-              offset: const Offset(0, 2),
+    return ScaleTransition(
+      scale: _scale,
+      child: GestureDetector(
+        key: const ValueKey('add_btn'),
+        onTap: _onTap,
+        child: Container(
+          height: 34,
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          decoration: BoxDecoration(
+            gradient: const LinearGradient(
+              colors: [AppThemeData.primary500, AppThemeData.primary600],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
             ),
-          ],
-        ),
-        child: const Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.add, color: Colors.white, size: 13),
-            SizedBox(width: 3),
-            Text(
-              "ADD",
-              style: TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.w800,
-                fontSize: 12,
-                letterSpacing: 0.5,
+            borderRadius: BorderRadius.circular(10),
+            boxShadow: [
+              BoxShadow(
+                color: AppThemeData.primary500.withValues(alpha: 0.35),
+                blurRadius: 8,
+                offset: const Offset(0, 3),
               ),
-            ),
-          ],
+            ],
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.add_rounded, color: Colors.white, size: 15),
+              const SizedBox(width: 4),
+              Text(
+                widget.hasOptions ? 'ADD'.tr() : 'ADD'.tr(),
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 13,
+                  fontFamily: AppThemeData.bold,
+                  letterSpacing: 0.4,
+                ),
+              ),
+              if (widget.hasOptions) ...[
+                const SizedBox(width: 3),
+                const Icon(Icons.keyboard_arrow_down_rounded,
+                    color: Colors.white, size: 14),
+              ],
+            ],
+          ),
         ),
       ),
     );

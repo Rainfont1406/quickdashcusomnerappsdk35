@@ -131,8 +131,8 @@ class _LoginScreenState extends State<LoginScreen> {
       ShowToastDialog.showToast('Please enter password'.tr);
       return false;
     }
-    if (password.length < 6) {
-      ShowToastDialog.showToast('Please enter minimum 6 digit password'.tr);
+    if (password.length < 8) {
+      ShowToastDialog.showToast('Password must be at least 8 characters'.tr);
       return false;
     }
     if (confirm.isEmpty) {
@@ -153,7 +153,7 @@ class _LoginScreenState extends State<LoginScreen> {
       final valid =
           await FireStoreUtils.checkReferralCodeValidOrNot(referral);
       if (valid != true) {
-        ShowToastDialog.showToast('Referral code is invalid. Please check and try again.');
+        ShowToastDialog.showToast('Referral code not found.');
         return;
       }
     }
@@ -162,7 +162,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
   Future<void> _doSignUp() async {
     if (mounted) setState(() => _isBusy = true);
-    ShowToastDialog.showLoader('Please wait'.tr);
+    ShowToastDialog.showLoader('Creating your account...');
     final nameParts = _splitFullName(_signupFullNameCtrl.text);
     try {
       // Pre-check: is this phone number already registered as a customer?
@@ -177,7 +177,7 @@ class _LoginScreenState extends State<LoginScreen> {
       });
       if (phoneConflict) {
         ShowToastDialog.showToast(
-            'An account already exists with this phone number. Please login to continue.');
+            'This number is already registered. Log in to continue.');
         return;
       }
 
@@ -217,7 +217,7 @@ class _LoginScreenState extends State<LoginScreen> {
       } catch (_) {}
 
       if (!mounted) return;
-      ShowToastDialog.showToast('Account created successfully! Welcome to QuickDash.');
+      ShowToastDialog.showToast('Welcome to QuickDash! Your account is ready.');
       if (userModel.shippingAddress != null &&
           userModel.shippingAddress!.isNotEmpty) {
         if (userModel.shippingAddress!
@@ -241,14 +241,14 @@ class _LoginScreenState extends State<LoginScreen> {
           break;
         case 'email-already-in-use':
           ShowToastDialog.showToast(
-              'An account already exists with this email. Please login to continue.');
+              'This email is already linked to an account.');
           break;
         case 'invalid-email':
           ShowToastDialog.showToast('Please enter a valid email address.');
           break;
         case 'network-request-failed':
           ShowToastDialog.showToast(
-              'Network error. Please check your internet connection and try again.');
+              'Unable to connect right now. Please try again.');
           break;
         default:
           ShowToastDialog.showToast(e.message ?? 'Signup failed. Please try again.');
@@ -277,7 +277,7 @@ class _LoginScreenState extends State<LoginScreen> {
     }
     if (_isBusy) return;
     if (mounted) setState(() => _isBusy = true);
-    ShowToastDialog.showLoader('Please wait'.tr);
+    ShowToastDialog.showLoader('Verifying your account...');
     try {
       final credential = await auth.FirebaseAuth.instance
           .signInWithEmailAndPassword(email: email, password: password);
@@ -304,7 +304,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
       if (userModel.active != true) {
         ShowToastDialog.showToast(
-            'Your account has been deactivated. Please contact support for assistance.');
+            'Your account is temporarily restricted. Please contact support.');
         await auth.FirebaseAuth.instance.signOut();
         return;
       }
@@ -351,7 +351,7 @@ class _LoginScreenState extends State<LoginScreen> {
           break;
         case 'network-request-failed':
           ShowToastDialog.showToast(
-              'Network error. Please check your internet connection and try again.');
+              'Unable to connect right now. Please try again.');
           break;
         default:
           ShowToastDialog.showToast(e.message ?? 'Login failed. Please try again.');
@@ -440,10 +440,17 @@ class _LoginScreenState extends State<LoginScreen> {
                             ),
                           ],
                         ),
-                        padding: const EdgeInsets.all(6),
-                        child: Image.asset(
-                          'assets/images/app_logo_new.png',
-                          fit: BoxFit.contain,
+                        child: Center(
+                          child: Text(
+                            'Q',
+                            style: TextStyle(
+                              fontSize: 22,
+                              fontFamily: AppThemeData.bold,
+                              color: AppThemeData.primary500,
+                              height: 1.0,
+                              letterSpacing: -0.5,
+                            ),
+                          ),
                         ),
                       ),
                       const SizedBox(width: 10),

@@ -11,9 +11,9 @@ import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
-import 'package:emartconsumer/ui/cartScreen/CartScreen.dart';
 import 'package:emartconsumer/ui/orderDetailsScreen/OrderDetailsScreen.dart';
 import 'package:emartconsumer/ui/orderRatingScreen/OrderRatingScreen.dart';
+import 'package:emartconsumer/ui/cartScreen/CartScreen.dart';
 import 'package:emartconsumer/ui/vendorProductsScreen/newVendorProductsScreen.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -60,6 +60,48 @@ class _OrdersScreenState extends State<OrdersScreen> {
     super.dispose();
   }
 
+  Future<void> _startReOrder(BuildContext context, OrderModel orderModel) async {
+    final existing = await cartDatabase.allCartProducts;
+
+    if (existing.isNotEmpty &&
+        existing.any((p) => p.vendorID != orderModel.vendorID)) {
+      if (!context.mounted) return;
+      final clear = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: Text('Replace Cart?'.tr(),
+              style: AppTypography.h6.copyWith(fontWeight: FontWeight.w700)),
+          content: Text(
+            'Your cart has items from another restaurant. Adding these items will clear your current cart.'
+                .tr(),
+            style: AppTypography.bodyMedium,
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: Text('Cancel'.tr()),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: Text('Clear & Add'.tr(),
+                  style: TextStyle(color: AppThemeData.primary500)),
+            ),
+          ],
+        ),
+      );
+      if (clear != true) return;
+      await cartDatabase.deleteAllProducts();
+    } else if (existing.isNotEmpty) {
+      // Same vendor — clear for a fresh re-order
+      await cartDatabase.deleteAllProducts();
+    }
+
+    if (!context.mounted) return;
+    push(context, CartScreen(reOrderModel: orderModel));
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -97,56 +139,6 @@ class _OrdersScreenState extends State<OrdersScreen> {
                 }
               }),
     );
-  }
-
-  Future<void> _handleReOrder(OrderModel orderModel) async {
-    final products = await cartDatabase.allCartProducts;
-
-    if (products.isNotEmpty) {
-      final hasDifferentVendor =
-          products.any((p) => p.vendorID != orderModel.vendorID);
-      if (hasDifferentVendor) {
-        final clear = await showDialog<bool>(
-          context: context,
-          builder: (ctx) => AlertDialog(
-            shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(16)),
-            title: Text(
-              'Replace Cart?'.tr(),
-              style: AppTypography.h6.copyWith(
-                  fontWeight: FontWeight.w700),
-            ),
-            content: Text(
-              'Your cart has items from another restaurant. Re-ordering will clear your current cart.'
-                  .tr(),
-              style: AppTypography.bodyMedium,
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(ctx, false),
-                child: Text('Cancel'.tr()),
-              ),
-              TextButton(
-                onPressed: () => Navigator.pop(ctx, true),
-                child: Text(
-                  'Clear & Re-Order'.tr(),
-                  style: TextStyle(color: AppThemeData.primary500),
-                ),
-              ),
-            ],
-          ),
-        );
-        if (clear != true) return;
-        await cartDatabase.deleteAllProducts();
-      }
-    }
-
-    for (final product in orderModel.products) {
-      await cartDatabase.reAddProduct(product);
-    }
-
-    if (!mounted) return;
-    push(context, const CartScreen());
   }
 
   Future<void> _handleRate(OrderModel orderModel) async {
@@ -241,6 +233,35 @@ class _OrdersScreenState extends State<OrdersScreen> {
 
   bool _isCompleted(String status) {
     return status == ORDER_STATUS_COMPLETED;
+  }
+
+  Widget _buildCustomChip(String label, {bool isVariant = false}) {
+    final dark = isDarkMode(context);
+    final bgColor = isVariant
+        ? AppThemeData.primary500.withValues(alpha: dark ? 0.18 : 0.10)
+        : (dark ? AppThemeData.neutral800 : AppThemeData.neutral100);
+    final borderColor = isVariant
+        ? AppThemeData.primary500.withValues(alpha: dark ? 0.40 : 0.30)
+        : (dark ? AppThemeData.neutral700 : AppThemeData.neutral200);
+    final textColor = isVariant
+        ? AppThemeData.primary500
+        : (dark ? AppThemeData.neutral300 : AppThemeData.neutral600);
+    return Container(
+      decoration: BoxDecoration(
+        color: bgColor,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: borderColor, width: 0.6),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      child: Text(
+        label,
+        style: AppTypography.caption.copyWith(
+          fontWeight: FontWeight.w600,
+          letterSpacing: 0.1,
+          color: textColor,
+        ),
+      ),
+    );
   }
 
   Widget buildOrderItem(OrderModel orderModel) {
@@ -394,10 +415,18 @@ class _OrdersScreenState extends State<OrdersScreen> {
                     children: orderModel.products.map((product) {
                       // Parse add-ons
                       List<String> addonList = [];
+                      String _cleanAddon(String s) {
+                        // Strip leading/trailing slashes left over from old data format
+                        s = s.replaceAll('"', '').trim();
+                        while (s.startsWith('/')) s = s.substring(1).trim();
+                        while (s.endsWith('/')) s = s.substring(0, s.length - 1).trim();
+                        return s;
+                      }
+
                       final dynamic rawExtras = product.extras;
                       if (rawExtras is List) {
                         addonList = rawExtras
-                            .map((e) => e.toString().replaceAll('"', '').trim())
+                            .map((e) => _cleanAddon(e.toString()))
                             .where((s) => s.isNotEmpty && s != 'null' && s != '[]')
                             .toList();
                       } else if (rawExtras is String &&
@@ -407,10 +436,12 @@ class _OrdersScreenState extends State<OrdersScreen> {
                             .replaceAll('[', '')
                             .replaceAll(']', '')
                             .replaceAll('"', '');
+                        // Support both comma-separated and slash-separated old formats
+                        final sep = cleaned.contains(',') ? ',' : '/';
                         addonList = cleaned
-                            .split(',')
-                            .map((s) => s.trim())
-                            .where((s) => s.isNotEmpty)
+                            .split(sep)
+                            .map((s) => _cleanAddon(s))
+                            .where((s) => s.isNotEmpty && s != 'null')
                             .toList();
                       }
 
@@ -480,25 +511,22 @@ class _OrdersScreenState extends State<OrdersScreen> {
                                 ),
                               ],
                             ),
-                            // Customization — variants + add-ons in one line
-                            Builder(builder: (context) {
-                              final List<String> customParts = [
-                                ...variantEntries.map((e) => '${e.key}: ${e.value}'),
-                                ...addonList,
-                              ];
-                              if (customParts.isEmpty) return const SizedBox.shrink();
-                              return Padding(
-                                padding: const EdgeInsets.only(top: 3, left: 38),
-                                child: Text(
-                                  customParts.join(' · '),
-                                  style: AppTypography.caption.copyWith(
-                                    color: AppThemeData.neutral500,
-                                  ),
-                                  maxLines: 2,
-                                  overflow: TextOverflow.ellipsis,
+                            // Customization chips — variants + add-ons
+                            if (variantEntries.isNotEmpty || addonList.isNotEmpty)
+                              Padding(
+                                padding: const EdgeInsets.only(top: 4, left: 38),
+                                child: Wrap(
+                                  spacing: 5,
+                                  runSpacing: 4,
+                                  children: [
+                                    ...variantEntries.map((e) => _buildCustomChip(
+                                          e.value.toString(),
+                                          isVariant: true,
+                                        )),
+                                    ...addonList.map((e) => _buildCustomChip(e)),
+                                  ],
                                 ),
-                              );
-                            }),
+                              ),
                           ],
                         ),
                       );
@@ -543,14 +571,47 @@ class _OrdersScreenState extends State<OrdersScreen> {
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
             child: Row(
               children: [
-                // Re-Order
+                // Re-Order — premium gradient button
                 Expanded(
-                  child: _ActionButton(
-                    label: 'Re-Order'.tr(),
-                    icon: Icons.replay_rounded,
-                    color: AppThemeData.primary500,
-                    filled: true,
-                    onTap: () => _handleReOrder(orderModel),
+                  child: GestureDetector(
+                    onTap: () => _startReOrder(context, orderModel),
+                    child: Container(
+                      height: 44,
+                      decoration: BoxDecoration(
+                        gradient: const LinearGradient(
+                          colors: [
+                            AppThemeData.primary500,
+                            AppThemeData.primary600,
+                          ],
+                        ),
+                        borderRadius: BorderRadius.circular(12),
+                        boxShadow: [
+                          BoxShadow(
+                            color: AppThemeData.primary500
+                                .withValues(alpha: 0.32),
+                            blurRadius: 12,
+                            offset: const Offset(0, 4),
+                          ),
+                        ],
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const Icon(Icons.replay_rounded,
+                              color: Colors.white, size: 16),
+                          const SizedBox(width: 6),
+                          Text(
+                            'Re-Order'.tr(),
+                            style: const TextStyle(
+                              fontFamily: AppThemeData.semiBold,
+                              fontSize: 13,
+                              color: Colors.white,
+                              letterSpacing: 0.1,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   ),
                 ),
                 // Rate — only visible once Completed / Delivered

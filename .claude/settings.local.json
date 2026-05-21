@@ -20,7 +20,17 @@
       "Bash(echo \"Total: $\\(find \"C:\\\\Users\\\\hp\\\\Downloads\\\\QuickDashCustomerApp\\\\QuickDashCustomerApp\\\\lib\\\\parcel_delivery\" -name \"*.dart\")",
       "Bash(echo \"Total: $\\(find \"C:\\\\Users\\\\hp\\\\Downloads\\\\QuickDashCustomerApp\\\\QuickDashCustomerApp\\\\lib\\\\rental_service\" -name \"*.dart\")",
       "Bash(echo \"Total: $\\(find \"C:\\\\Users\\\\hp\\\\Downloads\\\\QuickDashCustomerApp\\\\QuickDashCustomerApp\\\\lib\\\\onDemand_service\" -name \"*.dart\")",
-      "Bash(echo \"Total: $\\(find \"C:\\\\Users\\\\hp\\\\Downloads\\\\QuickDashCustomerApp\\\\QuickDashCustomerApp\\\\lib\\\\ecommarce_service\" -name \"*.dart\")"
+      "Bash(echo \"Total: $\\(find \"C:\\\\Users\\\\hp\\\\Downloads\\\\QuickDashCustomerApp\\\\QuickDashCustomerApp\\\\lib\\\\ecommarce_service\" -name \"*.dart\")",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\hp\\\\Downloads\\\\QuickDashCustomerApp\\\\QuickDashCustomerApp\\\\lib\" -Recurse -Directory)",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "Bash(Sort-Object)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\hp\\\\Downloads\\\\QuickDashCustomerApp\\\\QuickDashCustomerApp\\\\lib\\\\ui\\\\auth_screen\" -File -Recurse)",
+      "Bash(Select-Object FullName)",
+      "Bash(cat)",
+      "Read(//tmp/**)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\hp\\\\Downloads\\\\QuickDashCustomerApp\\\\QuickDashCustomerApp\\\\lib\\\\ui\" -Recurse -File -Filter \"*.dart\")",
+      "Bash(Sort-Object FullName)",
+      "Bash(Get-ChildItem -Path lib -Recurse -Filter \"*.dart\")"
     ],
     "deny": [],
     "ask": []

@@ -28,11 +28,14 @@ import '../../constants/typography.dart';
 import '../../model/DeliveryChargeModel.dart';
 import '../payment/PaymentScreen.dart';
 import 'package:emartconsumer/model/ItemAttributes.dart';
+import 'package:emartconsumer/ui/cartScreen/cart_skeleton.dart';
+import 'package:emartconsumer/model/OrderModel.dart';
 
 class CartScreen extends StatefulWidget {
   final bool fromStoreSelection;
+  final OrderModel? reOrderModel;
 
-  const CartScreen({Key? key, this.fromStoreSelection = false})
+  const CartScreen({Key? key, this.fromStoreSelection = false, this.reOrderModel})
       : super(key: key);
 
   @override
@@ -68,6 +71,10 @@ class _CartScreenState extends State<CartScreen> {
   // Dineaway section variables
   String? selectedDineawayType; // "Takeaway" or "Dining"
   bool isDineawaySelected = false;
+  bool _allowDelivery = true;
+  bool _allowDineaway = true;
+  bool _allowDineIn = true;
+  bool _allowDineAwayTakeaway = true;
   bool isTipSelected = false,
       isTipSelected1 = false,
       isTipSelected2 = false,
@@ -91,6 +98,13 @@ class _CartScreenState extends State<CartScreen> {
   // Performance optimization: Cache product models
   final Map<String, ProductModel> _productCache = {};
 
+  // Cart skeleton: shows until first validation completes (or empty-cart confirmed)
+  bool _isCartInitialized = false;
+
+  // Re-order flow: true while background validation + cart population is in progress
+  bool _reOrderPending = false;
+  bool _reOrderStarted = false;
+
   // Cart validation state
   bool _isValidating = false;
   bool _canCheckout = true;
@@ -104,6 +118,7 @@ class _CartScreenState extends State<CartScreen> {
   void initState() {
     super.initState();
     addressModel = MyAppState.selectedPosotion;
+    _reOrderPending = widget.reOrderModel != null;
 
     coupon = _fireStoreUtils.getAllCoupons();
     getFoodType();
@@ -235,6 +250,148 @@ class _CartScreenState extends State<CartScreen> {
     });
   }
 
+  String _lastPermCartHash = '';
+
+  Future<void> _computeServicePermissions(List<CartProduct> products) async {
+    if (products.isEmpty) {
+      if (mounted) setState(() {
+        _allowDelivery = true;
+        _allowDineaway = true;
+        _allowDineIn = true;
+        _allowDineAwayTakeaway = true;
+      });
+      return;
+    }
+    final sp = await SharedPreferences.getInstance();
+    bool allowDelivery = true;
+    bool allowDineaway = true;
+    bool allowDineIn = true;
+    bool allowTakeaway = true;
+    bool anyConstrained = false;
+
+    for (final cp in products) {
+      final productId = cp.id.split('~').first;
+      // Try new schema first, fall back to old dineaway-only schema
+      final raw = sp.getString('service_perm_$productId') ?? sp.getString('dineaway_perm_$productId');
+      if (raw == null) continue;
+      try {
+        final map = jsonDecode(raw) as Map<String, dynamic>;
+        final hasFullSchema = map.containsKey('delivery') || map.containsKey('dineaway');
+
+        if (hasFullSchema) {
+          final delivery = map['delivery'] as bool? ?? true;
+          final dineaway = map['dineaway'] as bool? ?? false;
+          // Both false = legacy unconfigured product — skip to avoid false restrictions
+          if (!delivery && !dineaway) continue;
+          anyConstrained = true;
+          if (!delivery) allowDelivery = false;
+          if (!dineaway) allowDineaway = false;
+          // Only constrain DineAway sub-types if the product supports DineAway
+          if (dineaway) {
+            final dineIn = map['dineIn'] as bool? ?? false;
+            final takeaway = map['takeaway'] as bool? ?? false;
+            // Only restrict if at least one sub-type is explicitly configured
+            if (dineIn || takeaway) {
+              if (!dineIn) allowDineIn = false;
+              if (!takeaway) allowTakeaway = false;
+            }
+          }
+        } else {
+          // Old dineaway_perm schema: only dineIn/takeaway sub-option data
+          final dineIn = map['dineIn'] as bool? ?? false;
+          final takeaway = map['takeaway'] as bool? ?? false;
+          if (!dineIn && !takeaway) continue;
+          anyConstrained = true;
+          if (!dineIn) allowDineIn = false;
+          if (!takeaway) allowTakeaway = false;
+        }
+      } catch (_) {}
+    }
+
+    if (!anyConstrained) return;
+    if (!mounted) return;
+    setState(() {
+      _allowDelivery = allowDelivery;
+      _allowDineaway = allowDineaway;
+      _allowDineIn = allowDineIn;
+      _allowDineAwayTakeaway = allowTakeaway;
+      if (selectedDineawayType == 'Dining' && !allowDineIn) { selectedDineawayType = null; isDineawaySelected = false; }
+      if (selectedDineawayType == 'Takeaway' && !allowTakeaway) { selectedDineawayType = null; isDineawaySelected = false; }
+    });
+  }
+
+  // ── Re-order: validate products in parallel, populate cart ───────────────────
+  Future<void> _populateFromReOrder() async {
+    final orderModel = widget.reOrderModel!;
+
+    // Parallel product validation
+    final freshList = await Future.wait(
+      orderModel.products.map((cp) async {
+        try {
+          return await _fireStoreUtils.getProductByID(cp.id.split('~').first);
+        } catch (_) {
+          return null;
+        }
+      }),
+    );
+
+    int skipped = 0;
+    for (var i = 0; i < orderModel.products.length; i++) {
+      final cp = orderModel.products[i];
+      final fresh = freshList[i] as ProductModel?;
+
+      if (fresh == null || !fresh.publish) {
+        skipped++;
+        continue;
+      }
+
+      // Mirror the price computation used by _validateCart so prices match
+      final freshPrice = productCommissionPrice(
+        fresh.disPrice != null &&
+                fresh.disPrice!.isNotEmpty &&
+                (double.tryParse(fresh.disPrice!) ?? 0) != 0
+            ? fresh.disPrice!
+            : fresh.price,
+      );
+
+      CartProduct cartProduct = cp;
+      final freshDouble = double.tryParse(freshPrice) ?? 0.0;
+      final origDouble = double.tryParse(cp.price) ?? 0.0;
+      if ((freshDouble - origDouble).abs() > 0.001) {
+        cartProduct = CartProduct(
+          id: cp.id,
+          category_id: cp.category_id,
+          name: cp.name,
+          photo: cp.photo,
+          price: freshPrice,
+          discountPrice: fresh.disPrice ?? '',
+          vendorID: cp.vendorID,
+          quantity: cp.quantity,
+          extras_price: cp.extras_price,
+          extras: cp.extras,
+          variant_info: cp.variant_info,
+        );
+      }
+
+      try {
+        await cartDatabase.reAddProduct(cartProduct);
+      } catch (_) {}
+    }
+
+    if (!mounted) return;
+    setState(() => _reOrderPending = false);
+
+    if (skipped > 0) {
+      _showTopNotification(
+        message: skipped == 1
+            ? 'An item from your previous order is no longer available.'.tr()
+            : '$skipped items from your previous order are no longer available.'.tr(),
+        color: AppThemeData.warning500,
+        icon: Icons.info_outline_rounded,
+      );
+    }
+  }
+
   Future<void> getDeliveyData() async {
     isDeliverFound = true;
     await _fireStoreUtils
@@ -270,101 +427,188 @@ class _CartScreenState extends State<CartScreen> {
       _canCheckout = true;
     });
 
-    // Check restaurant open/closed
+    // Vendor status check (data already available from getDeliveyData)
     if (vendorModel != null && !vendorModel!.reststatus) {
       setState(() {
-        _cartGlobalWarning = "Restaurant is currently closed. You cannot place orders right now.".tr();
+        _cartGlobalWarning =
+            "Restaurant is currently closed. You cannot place orders right now."
+                .tr();
         _canCheckout = false;
       });
     }
 
+    // ── Fetch all products in parallel ────────────────────────────────────────
+    // Snapshot the list so mutations during async work don't cause issues.
+    final cartSnapshot = List<CartProduct>.from(cartProducts);
+    final freshProducts = await Future.wait<ProductModel?>(
+      cartSnapshot.map((cp) async {
+        try {
+          return await _fireStoreUtils.getProductByID(cp.id.split('~').first);
+        } catch (_) {
+          return null; // deleted or LateInitializationError
+        }
+      }),
+    );
+
+    // ── Process results (no more async Firestore calls inside this loop) ──────
     final List<String> idsToRemove = [];
     final List<Map<String, String>> priceChanges = [];
-    for (final cartProduct in List<CartProduct>.from(cartProducts)) {
-      final pid = cartProduct.id.split('~').first;
-      try {
-        final product = await _fireStoreUtils.getProductByID(pid);
+    final List<MapEntry<CartProduct, String>> priceUpdates = [];
 
-        if (!product.publish) {
-          idsToRemove.add(cartProduct.id);
+    bool _freshAllowDelivery = true;
+    bool _freshAllowDineaway = true;
+    bool _freshAllowDineIn = true;
+    bool _freshAllowTakeaway = true;
+    bool _anyServiceConfigured = false;
+
+    for (var i = 0; i < cartSnapshot.length; i++) {
+      final cartProduct = cartSnapshot[i];
+      final product = freshProducts[i];
+
+      if (product == null || !product.publish) {
+        idsToRemove.add(cartProduct.id);
+        continue;
+      }
+
+      // ── Aggregate permission flags ──────────────────────────────────────────
+      if (product.deliveryOption || product.takeaway) {
+        _anyServiceConfigured = true;
+        if (!product.deliveryOption) _freshAllowDelivery = false;
+        if (!product.takeaway) _freshAllowDineaway = false;
+        if (product.takeaway && (product.dineIn || product.dineAwayTakeaway)) {
+          if (!product.dineIn) _freshAllowDineIn = false;
+          if (!product.dineAwayTakeaway) _freshAllowTakeaway = false;
+        }
+      }
+
+      // ── Service type compatibility ──────────────────────────────────────────
+      if (product.deliveryOption || product.takeaway) {
+        final isDineaway = selctedOrderTypeValue == 'Dineaway';
+        bool serviceBlocked = false;
+        String serviceMsg = '';
+        if (!isDineaway && !product.deliveryOption) {
+          serviceMsg = 'Delivery order is not available for this item.'.tr();
+          serviceBlocked = true;
+        } else if (isDineaway && !product.takeaway) {
+          serviceMsg = 'DineAway order is not available for this item.'.tr();
+          serviceBlocked = true;
+        } else if (isDineaway &&
+            product.takeaway &&
+            (product.dineIn || product.dineAwayTakeaway)) {
+          if (selectedDineawayType == 'Takeaway' && !product.dineAwayTakeaway) {
+            serviceMsg = 'TakeAway order is not available for this item.'.tr();
+            serviceBlocked = true;
+          } else if (selectedDineawayType == 'Dining' && !product.dineIn) {
+            serviceMsg = 'Dine-In order is not available for this item.'.tr();
+            serviceBlocked = true;
+          }
+        }
+        if (serviceBlocked) {
+          if (mounted)
+            setState(() {
+              _itemIssues[cartProduct.id] = serviceMsg;
+              _itemBlocking[cartProduct.id] = true;
+              _canCheckout = false;
+            });
           continue;
         }
+      }
 
-        // Out of stock (quantity 0; -1 = unlimited)
-        if (product.quantity == 0) {
+      // ── Out of stock ────────────────────────────────────────────────────────
+      if (product.quantity == 0) {
+        if (mounted)
           setState(() {
-            _itemIssues[cartProduct.id] = "Out of stock — remove to proceed".tr();
+            _itemIssues[cartProduct.id] =
+                "Out of stock — remove to proceed".tr();
             _itemBlocking[cartProduct.id] = true;
             _canCheckout = false;
           });
-          continue;
-        }
+        continue;
+      }
 
-        // Price change — auto-update cart
-        final freshPrice = productCommissionPrice(
-          product.disPrice != null &&
-                  product.disPrice!.isNotEmpty &&
-                  double.parse(product.disPrice!) != 0
-              ? product.disPrice!
-              : product.price,
-        );
-        if (freshPrice != cartProduct.price) {
-          priceChanges.add({
-            'name': cartProduct.name,
-            'old': cartProduct.price,
-            'new': freshPrice,
-          });
-          await cartDatabase.updateProduct(CartProduct(
-            id: cartProduct.id,
-            category_id: cartProduct.category_id,
-            name: cartProduct.name,
-            photo: cartProduct.photo,
-            price: freshPrice,
-            vendorID: cartProduct.vendorID,
-            quantity: cartProduct.quantity,
-            extras: cartProduct.extras,
-            extras_price: cartProduct.extras_price,
-            variant_info: cartProduct.variant_info,
-            discountPrice: cartProduct.discountPrice,
-          ));
-        }
+      // ── Price change — collect for batched DB write ─────────────────────────
+      final freshPrice = productCommissionPrice(
+        product.disPrice != null &&
+                product.disPrice!.isNotEmpty &&
+                double.parse(product.disPrice!) != 0
+            ? product.disPrice!
+            : product.price,
+      );
+      final freshPriceDouble = double.tryParse(freshPrice) ?? 0.0;
+      final cartPriceDouble = double.tryParse(cartProduct.price) ?? 0.0;
+      if ((freshPriceDouble - cartPriceDouble).abs() > 0.001) {
+        priceChanges.add({
+          'name': cartProduct.name,
+          'old': cartProduct.price,
+          'new': freshPrice,
+        });
+        priceUpdates.add(MapEntry(cartProduct, freshPrice));
+      }
 
-        // Variant removed check
-        if (cartProduct.variant_info != null &&
-            product.itemAttributes != null &&
-            product.itemAttributes!.variants != null) {
-          VariantInfo? variantInfo;
-          try {
-            final decoded = jsonDecode(cartProduct.variant_info.toString());
-            if (decoded is Map<String, dynamic>) {
-              variantInfo = VariantInfo.fromJson(decoded);
-            }
-          } catch (_) {}
-          if (variantInfo != null) {
-            final variantExists = product.itemAttributes!.variants!.any(
-              (v) => v.variant_sku == variantInfo!.variant_sku,
-            );
-            if (!variantExists) {
-              setState(() {
-                _itemIssues[cartProduct.id] =
-                    "Selected variant no longer available".tr();
-                _itemBlocking[cartProduct.id] = true;
-                _canCheckout = false;
-              });
-            }
+      // ── Variant removed ─────────────────────────────────────────────────────
+      if (cartProduct.variant_info != null &&
+          product.itemAttributes != null &&
+          product.itemAttributes!.variants != null) {
+        VariantInfo? variantInfo;
+        try {
+          final decoded = jsonDecode(cartProduct.variant_info.toString());
+          if (decoded is Map<String, dynamic>) {
+            variantInfo = VariantInfo.fromJson(decoded);
+          }
+        } catch (_) {}
+        if (variantInfo != null) {
+          final variantExists = product.itemAttributes!.variants!.any(
+            (v) => v.variant_sku == variantInfo!.variant_sku,
+          );
+          if (!variantExists && mounted) {
+            setState(() {
+              _itemIssues[cartProduct.id] =
+                  "Selected variant no longer available".tr();
+              _itemBlocking[cartProduct.id] = true;
+              _canCheckout = false;
+            });
           }
         }
-
-      } catch (_) {
-        // LateInitializationError (product deleted) or any parse error
-        idsToRemove.add(cartProduct.id);
       }
     }
 
-    for (final id in idsToRemove) {
-      await cartDatabase.removeProduct(id);
+    // ── Refresh top-level permission flags ────────────────────────────────────
+    if (_anyServiceConfigured && mounted) {
+      setState(() {
+        _allowDelivery = _freshAllowDelivery;
+        _allowDineaway = _freshAllowDineaway;
+        _allowDineIn = _freshAllowDineIn;
+        _allowDineAwayTakeaway = _freshAllowTakeaway;
+        if (selectedDineawayType == 'Dining' && !_freshAllowDineIn) {
+          selectedDineawayType = null;
+          isDineawaySelected = false;
+        }
+        if (selectedDineawayType == 'Takeaway' && !_freshAllowTakeaway) {
+          selectedDineawayType = null;
+          isDineawaySelected = false;
+        }
+      });
     }
 
+    // ── Batched DB writes (parallel — each targets a different row) ───────────
+    await Future.wait([
+      ...idsToRemove.map((id) => cartDatabase.removeProduct(id)),
+      ...priceUpdates.map((u) => cartDatabase.updateProduct(CartProduct(
+            id: u.key.id,
+            category_id: u.key.category_id,
+            name: u.key.name,
+            photo: u.key.photo,
+            price: u.value,
+            vendorID: u.key.vendorID,
+            quantity: u.key.quantity,
+            extras: u.key.extras,
+            extras_price: u.key.extras_price,
+            variant_info: u.key.variant_info,
+            discountPrice: u.key.discountPrice,
+          ))),
+    ]);
+
+    // ── Notifications ─────────────────────────────────────────────────────────
     if (idsToRemove.isNotEmpty && mounted) {
       _showTopNotification(
         message: "Some items were removed — no longer available.".tr(),
@@ -372,7 +616,6 @@ class _CartScreenState extends State<CartScreen> {
         icon: Icons.remove_shopping_cart_outlined,
       );
     }
-
     if (priceChanges.isNotEmpty && mounted) {
       final String message = priceChanges.length == 1
           ? "${'Price updated from'.tr()} ${amountShow(amount: priceChanges.first['old']!)} ${'to'.tr()} ${amountShow(amount: priceChanges.first['new']!)}"
@@ -384,7 +627,11 @@ class _CartScreenState extends State<CartScreen> {
       );
     }
 
-    if (mounted) setState(() => _isValidating = false);
+    if (mounted)
+      setState(() {
+        _isValidating = false;
+        _isCartInitialized = true; // Skeleton → real cart
+      });
   }
 
   getDeliveryCharges(num km) async {
@@ -461,7 +708,14 @@ class _CartScreenState extends State<CartScreen> {
     _cartStream ??= cartDatabase.watchProducts;
     cartFuture = cartDatabase.allCartProducts;
     getPrefData();
-    //setPrefData();
+
+    // Kick off re-order population once cartDatabase is available
+    if (widget.reOrderModel != null && !_reOrderStarted) {
+      _reOrderStarted = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _populateFromReOrder();
+      });
+    }
   }
 
   @override
@@ -474,12 +728,30 @@ class _CartScreenState extends State<CartScreen> {
           stream: _cartStream ?? cartDatabase.watchProducts,
           initialData: const [],
           builder: (context, snapshot) {
-            if (snapshot.connectionState == ConnectionState.waiting) {
-              return Center(
-                child: CircularProgressIndicator.adaptive(
-                  valueColor: AlwaysStoppedAnimation(AppThemeData.primary500),
-                ),
-              );
+            // ── Skeleton phase: show until first validation completes ──────────
+            if (!_isCartInitialized) {
+              final data = snapshot.data;
+              if (data != null) {
+                // Only treat as empty once the stream has emitted real data.
+                // initialData: const [] triggers connectionState == waiting on the
+                // very first build, which would instantly skip validation before
+                // the stream has a chance to deliver the actual cart contents.
+                if (data.isEmpty &&
+                    !_reOrderPending &&
+                    snapshot.connectionState != ConnectionState.waiting) {
+                  // Real empty cart confirmed — skip validation, show real UI immediately
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    if (mounted) setState(() => _isCartInitialized = true);
+                  });
+                } else if (data.isNotEmpty && !isDeliverFound) {
+                  // Has items — kick off vendor/validation pipeline
+                  cartProducts = data;
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    if (mounted && !isDeliverFound) getDeliveyData();
+                  });
+                }
+              }
+              return const CartSkeletonLoader();
             }
 
             if (!snapshot.hasData || (snapshot.data?.isEmpty ?? true)) {
@@ -502,6 +774,10 @@ class _CartScreenState extends State<CartScreen> {
                       vendorModel = null;
                       selectedDineawayType = null;
                       isDineawaySelected = false;
+                      _allowDelivery = true;
+                      _allowDineaway = true;
+                      _allowDineIn = true;
+                      _allowDineAwayTakeaway = true;
                     });
                   }
                 });
@@ -514,6 +790,12 @@ class _CartScreenState extends State<CartScreen> {
               );
             } else {
               cartProducts = snapshot.data!;
+              // Recompute dineaway permissions whenever cart composition changes
+              final cartHash = cartProducts.map((p) => p.id).join(',');
+              if (_lastPermCartHash != cartHash) {
+                _lastPermCartHash = cartHash;
+                _computeServicePermissions(cartProducts);
+              }
               if (!isDeliverFound) {
                 getDeliveyData();
               }
@@ -541,6 +823,12 @@ class _CartScreenState extends State<CartScreen> {
                             // ── Global items container ──
                             _buildItemsContainer(),
                             const SizedBox(height: 14),
+
+                            // ── Service restriction banner ──
+                            if (_serviceRestrictionMessage != null) ...[
+                              _buildServiceRestrictionBanner(_serviceRestrictionMessage!),
+                              const SizedBox(height: 12),
+                            ],
 
                             // ── Coupon ──
                             _sectionCard(
@@ -630,7 +918,7 @@ class _CartScreenState extends State<CartScreen> {
                                           backgroundColor: Colors.transparent,
                                           enableDrag: true,
                                           builder: (BuildContext ctx) =>
-                                              sheet(),
+                                              sheet(ctx),
                                         );
                                       },
                                       child: Container(
@@ -738,6 +1026,18 @@ class _CartScreenState extends State<CartScreen> {
                             );
                             return;
                           }
+                          // Service restriction — block checkout with specific message
+                          final serviceMsg = _serviceRestrictionMessage;
+                          if (serviceMsg != null) {
+                            _showTopNotification(
+                              message: serviceMsg,
+                              color: AppThemeData.error500,
+                              icon: Icons.block_rounded,
+                              duration: const Duration(seconds: 4),
+                            );
+                            return;
+                          }
+
                           if (selctedOrderTypeValue == "Dineaway" &&
                               (!isDineawaySelected || selectedDineawayType == null)) {
                             _showTopNotification(
@@ -1835,6 +2135,76 @@ class _CartScreenState extends State<CartScreen> {
   }
 
   // Modern Dineaway Section
+  String? get _serviceRestrictionMessage {
+    if (selctedOrderTypeValue == 'Delivery' && !_allowDelivery) {
+      return 'Delivery order is not available.'.tr();
+    }
+    if (selctedOrderTypeValue == 'Dineaway') {
+      if (!_allowDineaway) return 'DineAway order is not available.'.tr();
+      if (selectedDineawayType == 'Takeaway' && !_allowDineAwayTakeaway) {
+        return 'TakeAway order is not available.'.tr();
+      }
+      if (selectedDineawayType == 'Dining' && !_allowDineIn) {
+        return 'Dine-In order is not available.'.tr();
+      }
+    }
+    return null;
+  }
+
+  Widget _buildServiceRestrictionBanner(String message) {
+    final isDark = isDarkMode(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      decoration: BoxDecoration(
+        color: isDark
+            ? AppThemeData.error500.withValues(alpha: 0.12)
+            : AppThemeData.error500.withValues(alpha: 0.07),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: AppThemeData.error500.withValues(alpha: 0.30),
+          width: 1.5,
+        ),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: AppThemeData.error500.withValues(alpha: 0.14),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Icon(Icons.block_rounded, color: AppThemeData.error500, size: 18),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  message,
+                  style: AppTypography.labelMedium.copyWith(
+                    color: AppThemeData.error500,
+                    fontWeight: FontWeight.w700,
+                    height: 1.4,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  'One or more items in your cart cannot be ordered with this service type.'.tr(),
+                  style: AppTypography.caption.copyWith(
+                    color: isDark ? AppThemeData.darkTextTertiary : AppThemeData.neutral500,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _modernDineawaySection() {
     return _sectionCard(
       child: Padding(
@@ -1879,6 +2249,7 @@ class _CartScreenState extends State<CartScreen> {
                     "Pack the food for takeout",
                     Icons.shopping_bag_rounded,
                     selectedDineawayType == "Takeaway",
+                    enabled: _allowDineAwayTakeaway,
                   ),
                 ),
                 const SizedBox(width: 12),
@@ -1888,9 +2259,17 @@ class _CartScreenState extends State<CartScreen> {
                     "Eat inside the restaurant",
                     Icons.restaurant_rounded,
                     selectedDineawayType == "Dining",
+                    enabled: _allowDineIn,
                   ),
                 ),
               ],
+            ),
+            const SizedBox(height: 12),
+            _dineawayOption(
+              "Bill Pay",
+              "Pay your bill at the restaurant",
+              Icons.receipt_long_rounded,
+              selectedDineawayType == "Bill Pay",
             ),
           ],
         ),
@@ -1898,64 +2277,89 @@ class _CartScreenState extends State<CartScreen> {
     );
   }
 
-  Widget _dineawayOption(String title, String subtitle, IconData icon, bool isSelected) {
+  Widget _dineawayOption(String title, String subtitle, IconData icon, bool isSelected, {bool enabled = true}) {
+    final isDark = isDarkMode(context);
     return GestureDetector(
-      onTap: () {
-        setState(() {
-          selectedDineawayType = title;
-          isDineawaySelected = true;
-        });
-      },
+      onTap: enabled
+          ? () {
+              setState(() {
+                selectedDineawayType = title;
+                isDineawaySelected = true;
+              });
+            }
+          : null,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
         padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
-          color: isSelected
-              ? AppThemeData.primary500.withValues(alpha: 0.10)
-              : (isDarkMode(context)
-                  ? AppThemeData.darkBgPrimary
-                  : AppThemeData.neutral50),
+          color: !enabled
+              ? (isDark ? AppThemeData.darkBgPrimary.withValues(alpha: 0.5) : AppThemeData.neutral100)
+              : isSelected
+                  ? AppThemeData.primary500.withValues(alpha: 0.10)
+                  : (isDark ? AppThemeData.darkBgPrimary : AppThemeData.neutral50),
           borderRadius: BorderRadius.circular(14),
           border: Border.all(
-            color: isSelected
-                ? AppThemeData.primary500
-                : (isDarkMode(context)
-                    ? AppThemeData.darkBorderSecondary
-                    : AppThemeData.neutral200),
-            width: isSelected ? 2 : 1,
+            color: !enabled
+                ? (isDark ? AppThemeData.darkBorderSecondary.withValues(alpha: 0.4) : AppThemeData.neutral200.withValues(alpha: 0.6))
+                : isSelected
+                    ? AppThemeData.primary500
+                    : (isDark ? AppThemeData.darkBorderSecondary : AppThemeData.neutral200),
+            width: isSelected && enabled ? 2 : 1,
           ),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Icon(
-              icon,
-              color: isSelected
-                  ? AppThemeData.primary500
-                  : (isDarkMode(context)
-                      ? AppThemeData.darkTextSecondary
-                      : AppThemeData.neutral500),
-              size: 26,
+            Row(
+              children: [
+                Icon(
+                  icon,
+                  color: !enabled
+                      ? (isDark ? AppThemeData.neutral600 : AppThemeData.neutral300)
+                      : isSelected
+                          ? AppThemeData.primary500
+                          : (isDark ? AppThemeData.darkTextSecondary : AppThemeData.neutral500),
+                  size: 26,
+                ),
+                if (!enabled) ...[
+                  const Spacer(),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: isDark ? AppThemeData.neutral700 : AppThemeData.neutral200,
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Text(
+                      'N/A'.tr(),
+                      style: AppTypography.labelSmall.copyWith(
+                        color: isDark ? AppThemeData.neutral500 : AppThemeData.neutral400,
+                        fontSize: 10,
+                      ),
+                    ),
+                  ),
+                ],
+              ],
             ),
             const SizedBox(height: 8),
             Text(
               title.tr(),
               style: AppTypography.labelMedium.copyWith(
                 fontWeight: FontWeight.w700,
-                color: isSelected
-                    ? AppThemeData.primary500
-                    : (isDarkMode(context)
-                        ? AppThemeData.darkTextPrimary
-                        : AppThemeData.neutral900),
+                color: !enabled
+                    ? (isDark ? AppThemeData.neutral600 : AppThemeData.neutral400)
+                    : isSelected
+                        ? AppThemeData.primary500
+                        : (isDark ? AppThemeData.darkTextPrimary : AppThemeData.neutral900),
               ),
             ),
             const SizedBox(height: 2),
             Text(
-              subtitle,
+              !enabled ? 'Not available for this order'.tr() : subtitle,
               style: AppTypography.bodySmall.copyWith(
-                color: isDarkMode(context)
-                    ? AppThemeData.darkTextTertiary
-                    : AppThemeData.neutral500,
+                color: !enabled
+                    ? (isDark ? AppThemeData.neutral700 : AppThemeData.neutral300)
+                    : (isDark ? AppThemeData.darkTextTertiary : AppThemeData.neutral500),
+                fontStyle: !enabled ? FontStyle.italic : FontStyle.normal,
               ),
             ),
           ],
@@ -2403,7 +2807,7 @@ class _CartScreenState extends State<CartScreen> {
         context: context,
         backgroundColor: Colors.transparent,
         enableDrag: true,
-        builder: (_) => Notesheet(),
+        builder: (sheetCtx) => Notesheet(sheetCtx),
       ),
       borderRadius: const BorderRadius.only(
         bottomLeft: Radius.circular(20),
@@ -2654,9 +3058,10 @@ class _CartScreenState extends State<CartScreen> {
                         if (hasVariants)
                           ...variantInfo!.variant_options!.entries.map(
                             (e) => _buildChip(
-                              '${e.key}: ${e.value}',
+                              e.value.toString(),
                               e.key.hashCode,
                               isDark: dark,
+                              isVariant: true,
                             ),
                           ),
                         if (hasAddons)
@@ -3174,15 +3579,19 @@ class _CartScreenState extends State<CartScreen> {
     return active;
   }
 
-  sheet() {
+  sheet(BuildContext sheetCtx) {
     final dark = isDarkMode(context);
-    return Container(
-      constraints:
-          BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.85),
-      decoration: BoxDecoration(
-        color: dark ? AppThemeData.darkBgSecondary : Colors.white,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
-      ),
+    final keyboardH = MediaQuery.of(sheetCtx).viewInsets.bottom;
+    return Padding(
+      padding: EdgeInsets.only(bottom: keyboardH),
+      child: Container(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.of(context).size.height * 0.85,
+        ),
+        decoration: BoxDecoration(
+          color: dark ? AppThemeData.darkBgSecondary : Colors.white,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+        ),
       child: FutureBuilder<List<OfferModel>>(
         future: coupon,
         initialData: const [],
@@ -3541,7 +3950,8 @@ class _CartScreenState extends State<CartScreen> {
           );
         },
       ),
-    );
+    ),
+  );
   }
 
   Widget _couponCard(OfferModel offer,
@@ -3985,153 +4395,159 @@ class _CartScreenState extends State<CartScreen> {
     ));
   }
 
-  Notesheet() {
+  Notesheet(BuildContext sheetCtx) {
     final dark = isDarkMode(context);
-    return Container(
-      decoration: BoxDecoration(
-        color: dark ? AppThemeData.darkBgSecondary : Colors.white,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
-      ),
+    return Padding(
+      // Lifts the entire sheet above the software keyboard
       padding: EdgeInsets.only(
-        bottom: MediaQuery.of(context).viewInsets.bottom,
+        bottom: MediaQuery.of(sheetCtx).viewInsets.bottom,
       ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // Handle bar
-          Padding(
-            padding: const EdgeInsets.only(top: 12),
-            child: Center(
-              child: Container(
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: dark
-                      ? AppThemeData.darkBorderPrimary
-                      : AppThemeData.neutral300,
-                  borderRadius: BorderRadius.circular(2),
+      child: Container(
+        decoration: BoxDecoration(
+          color: dark ? AppThemeData.darkBgSecondary : Colors.white,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Handle bar — always visible at top of sheet
+            Padding(
+              padding: const EdgeInsets.only(top: 12),
+              child: Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: dark
+                        ? AppThemeData.darkBorderPrimary
+                        : AppThemeData.neutral300,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
                 ),
               ),
             ),
-          ),
 
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 20, 20, 24),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Header
-                Row(
+            // Scrollable content — prevents overflow on small devices
+            Flexible(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(20, 20, 20, 24),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    // Header
+                    Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(9),
+                          decoration: BoxDecoration(
+                            color: dark
+                                ? const Color(0xFF2A2218)
+                                : const Color(0xFFFFF8EC),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: const Icon(Icons.edit_note_rounded,
+                              color: Color(0xFFE89B2F), size: 22),
+                        ),
+                        const SizedBox(width: 12),
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              "Order Note".tr(),
+                              style: AppTypography.h6.copyWith(
+                                fontWeight: FontWeight.w700,
+                                color: dark
+                                    ? AppThemeData.darkTextPrimary
+                                    : AppThemeData.neutral900,
+                              ),
+                            ),
+                            Text(
+                              "Visible only to the restaurant".tr(),
+                              style: AppTypography.caption.copyWith(
+                                color: dark
+                                    ? AppThemeData.darkTextTertiary
+                                    : AppThemeData.neutral400,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 20),
+
+                    // Text field
                     Container(
-                      padding: const EdgeInsets.all(9),
                       decoration: BoxDecoration(
                         color: dark
-                            ? const Color(0xFF2A2218)
-                            : const Color(0xFFFFF8EC),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: const Icon(Icons.edit_note_rounded,
-                          color: Color(0xFFE89B2F), size: 22),
-                    ),
-                    const SizedBox(width: 12),
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          "Order Note".tr(),
-                          style: AppTypography.h6.copyWith(
-                            fontWeight: FontWeight.w700,
-                            color: dark
-                                ? AppThemeData.darkTextPrimary
-                                : AppThemeData.neutral900,
-                          ),
+                            ? AppThemeData.darkBgPrimary
+                            : AppThemeData.neutral50,
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color: dark
+                              ? AppThemeData.darkBorderSecondary
+                              : AppThemeData.neutral200,
                         ),
-                        Text(
-                          "Visible only to the restaurant".tr(),
-                          style: AppTypography.caption.copyWith(
+                      ),
+                      child: TextField(
+                        controller: noteController,
+                        maxLines: 4,
+                        maxLength: 200,
+                        style: AppTypography.bodyMedium.copyWith(
+                          color: dark ? Colors.white : AppThemeData.neutral900,
+                          height: 1.6,
+                        ),
+                        decoration: InputDecoration(
+                          hintText:
+                              "e.g. No onions, extra spicy, ring the bell...".tr(),
+                          hintStyle: AppTypography.bodyMedium.copyWith(
+                            color: dark
+                                ? AppThemeData.darkTextTertiary
+                                : AppThemeData.neutral400,
+                          ),
+                          border: InputBorder.none,
+                          contentPadding: const EdgeInsets.all(16),
+                          counterStyle: AppTypography.caption.copyWith(
                             color: dark
                                 ? AppThemeData.darkTextTertiary
                                 : AppThemeData.neutral400,
                           ),
                         ),
-                      ],
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+
+                    // Save button
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        onPressed: () {
+                          setState(() {});
+                          Navigator.pop(context);
+                        },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: AppThemeData.primary500,
+                          foregroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          padding: const EdgeInsets.symmetric(vertical: 15),
+                          elevation: 0,
+                        ),
+                        child: Text(
+                          "Save Note".tr(),
+                          style: AppTypography.labelLarge.copyWith(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
                     ),
                   ],
                 ),
-                const SizedBox(height: 20),
-
-                // Text field
-                Container(
-                  decoration: BoxDecoration(
-                    color: dark
-                        ? AppThemeData.darkBgPrimary
-                        : AppThemeData.neutral50,
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(
-                      color: dark
-                          ? AppThemeData.darkBorderSecondary
-                          : AppThemeData.neutral200,
-                    ),
-                  ),
-                  child: TextField(
-                    controller: noteController,
-                    maxLines: 4,
-                    maxLength: 200,
-                    style: AppTypography.bodyMedium.copyWith(
-                      color: dark ? Colors.white : AppThemeData.neutral900,
-                      height: 1.6,
-                    ),
-                    decoration: InputDecoration(
-                      hintText:
-                          "e.g. No onions, extra spicy, ring the bell...".tr(),
-                      hintStyle: AppTypography.bodyMedium.copyWith(
-                        color: dark
-                            ? AppThemeData.darkTextTertiary
-                            : AppThemeData.neutral400,
-                      ),
-                      border: InputBorder.none,
-                      contentPadding: const EdgeInsets.all(16),
-                      counterStyle: AppTypography.caption.copyWith(
-                        color: dark
-                            ? AppThemeData.darkTextTertiary
-                            : AppThemeData.neutral400,
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 16),
-
-                // Save button
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton(
-                    onPressed: () {
-                      setState(() {});
-                      Navigator.pop(context);
-                    },
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: AppThemeData.primary500,
-                      foregroundColor: Colors.white,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14),
-                      ),
-                      padding: const EdgeInsets.symmetric(vertical: 15),
-                      elevation: 0,
-                    ),
-                    child: Text(
-                      "Save Note".tr(),
-                      style: AppTypography.labelLarge.copyWith(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -4352,15 +4768,21 @@ class _CartScreenState extends State<CartScreen> {
 }
 
 Widget _buildChip(String label, int attributesOptionIndex,
-    {bool isDark = false}) {
+    {bool isDark = false, bool isVariant = false}) {
+  final bgColor = isVariant
+      ? AppThemeData.primary500.withValues(alpha: isDark ? 0.18 : 0.10)
+      : (isDark ? AppThemeData.darkBgTertiary : AppThemeData.neutral100);
+  final borderColor = isVariant
+      ? AppThemeData.primary500.withValues(alpha: isDark ? 0.40 : 0.30)
+      : (isDark ? AppThemeData.darkBorderSecondary : AppThemeData.neutral200);
+  final textColor = isVariant
+      ? AppThemeData.primary500
+      : (isDark ? AppThemeData.darkTextSecondary : AppThemeData.neutral600);
   return Container(
     decoration: BoxDecoration(
-      color: isDark ? AppThemeData.darkBgTertiary : AppThemeData.neutral100,
+      color: bgColor,
       borderRadius: BorderRadius.circular(6),
-      border: Border.all(
-        color: isDark ? AppThemeData.darkBorderSecondary : AppThemeData.neutral200,
-        width: 0.6,
-      ),
+      border: Border.all(color: borderColor, width: 0.6),
     ),
     padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
     child: Text(
@@ -4369,7 +4791,7 @@ Widget _buildChip(String label, int attributesOptionIndex,
         fontSize: 11,
         fontWeight: FontWeight.w600,
         letterSpacing: 0.1,
-        color: isDark ? AppThemeData.darkTextSecondary : AppThemeData.neutral600,
+        color: textColor,
       ),
     ),
   );

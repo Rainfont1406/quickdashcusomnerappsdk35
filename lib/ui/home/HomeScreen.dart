@@ -25,14 +25,12 @@ import 'package:emartconsumer/ui/container/ContainerScreen.dart';
 import 'package:emartconsumer/ui/cuisinesScreen/CuisinesScreen.dart';
 import 'package:emartconsumer/ui/deliveryAddressScreen/DeliveryAddressScreen.dart';
 import 'package:emartconsumer/ui/home/story_view.dart';
-import 'package:emartconsumer/ui/home/view_all_new_arrival_store_screen.dart';
-import 'package:emartconsumer/ui/home/view_all_popular_food_near_by_screen.dart';
-import 'package:emartconsumer/ui/home/view_all_restaurant.dart';
 import 'package:emartconsumer/ui/mapView/MapViewScreen.dart';
 import 'package:emartconsumer/ui/productDetailsScreen/ProductDetailsScreen.dart';
 import 'package:emartconsumer/ui/searchScreen/SearchScreen.dart';
 import 'package:emartconsumer/ui/vendorProductsScreen/newVendorProductsScreen.dart';
 import 'package:emartconsumer/widget/delivery_type_selector.dart';
+import 'package:emartconsumer/ui/home/home_skeleton.dart';
 
 import 'package:emartconsumer/utils/network_image_widget.dart';
 import 'package:emartconsumer/widget/place_picker_osm.dart';
@@ -151,19 +149,16 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   getPermission() async {
-    setState(() {
-      isLoading = false;
-    });
+    // Keep skeleton visible while requesting permission; getData() will hide it
     loc.PermissionStatus _permissionGranted = await location.hasPermission();
     if (_permissionGranted == PermissionStatus.denied) {
       _permissionGranted = await location.requestPermission();
       if (_permissionGranted != PermissionStatus.granted) {
         getData();
+        return;
       }
     }
-    setState(() {
-      isLoading = false;
-    });
+    getData();
   }
 
   loc.Location location = loc.Location();
@@ -230,7 +225,7 @@ class _HomeScreenState extends State<HomeScreen> {
       backgroundColor:
       isDarkMode(context) ? AppThemeData.surfaceDark : AppThemeData.surface,
       body: isLoading == true
-          ? const Center(child: CircularProgressIndicator())
+          ? const HomeSkeletonLoader()
           : Padding(
         padding: EdgeInsets.only(
             top: MediaQuery.of(context).viewPadding.top),
@@ -783,11 +778,7 @@ class _HomeScreenState extends State<HomeScreen> {
                           crossAxisAlignment:
                           CrossAxisAlignment.start,
                           children: [
-                            titleView("Top Selling", () {
-                              push(
-                                  context,
-                                  const ViewAllPopularFoodNearByScreen());
-                            }),
+                            _sectionTitle("Top Selling"),
                             const SizedBox(height: 10),
                             TopSellingView(
                               vendors: vendors,
@@ -799,27 +790,27 @@ class _HomeScreenState extends State<HomeScreen> {
                     else
                       const SizedBox(),
 
-                    if (isDelivery &&
-                        recommendedProducts.isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 16),
-                        child: Column(
-                          crossAxisAlignment:
-                          CrossAxisAlignment.start,
-                          children: [
-                            titleView("Recommend for you", () {}),
-                            const SizedBox(height: 10),
-                            RecommendForYouView(
-                              vendors: vendors,
-                              recommendedProducts:
-                              recommendedProducts,
-                            ),
-                          ],
-                        ),
-                      )
-                    else
-                      const SizedBox(),
+                    // if (isDelivery &&
+                    //     recommendedProducts.isNotEmpty)
+                    //   Padding(
+                    //     padding: const EdgeInsets.symmetric(
+                    //         horizontal: 16),
+                    //     child: Column(
+                    //       crossAxisAlignment:
+                    //       CrossAxisAlignment.start,
+                    //       children: [
+                    //         titleView("Recommend for you", () {}),
+                    //         const SizedBox(height: 10),
+                    //         RecommendForYouView(
+                    //           vendors: vendors,
+                    //           recommendedProducts:
+                    //           recommendedProducts,
+                    //         ),
+                    //       ],
+                    //     ),
+                    //   )
+                    // else
+                    //   const SizedBox(),
                     ///
 
                     Padding(
@@ -830,14 +821,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         crossAxisAlignment:
                         CrossAxisAlignment.start,
                         children: [
-                          titleView("New Arrivals", () {
-                            push(
-                                context,
-                                ViewAllNewArrivalStoreScreen(
-                                  vendorList:
-                                  newArrivalRestaurantList,
-                                ));
-                          }),
+                          _sectionTitle("New Arrivals"),
                           const SizedBox(height: 10),
                           NewArrival(
                               newArrivalRestaurantList:
@@ -862,12 +846,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         crossAxisAlignment:
                         CrossAxisAlignment.start,
                         children: [
-                          titleView(
-                              "${vendors.length} Restaurants Around You",
-                                  () {
-                                push(context,
-                                    const ViewAllRestaurant());
-                              }),
+                          _sectionTitle("${vendors.length} Restaurants Around You"),
                           const SizedBox(height: 10),
                           AllStore(allStoreList: vendors)
                         ],
@@ -1045,6 +1024,18 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         )
       ],
+    );
+  }
+
+  Widget _sectionTitle(String name) {
+    return Text(
+      name.tr(),
+      textAlign: TextAlign.start,
+      style: TextStyle(
+        fontSize: 18,
+        fontFamily: AppThemeData.bold,
+        color: isDarkMode(context) ? AppThemeData.grey50 : AppThemeData.grey900,
+      ),
     );
   }
 
@@ -2672,20 +2663,29 @@ class TopSellingView extends StatelessWidget {
             orderType = prefs.getString('foodType') ?? 'Delivery'.tr();
           });
 
+          final bool _hHasRestrictions = productModel.deliveryOption ||
+              productModel.dineAwayTakeaway || productModel.dineIn;
+          final bool _hIsDineaway = orderType == 'Takeaway'.tr() ||
+              orderType == 'Dineaway'.tr();
+
           String unavailabilityMessage = '';
-          if (orderType == 'Takeaway'.tr() && !productModel.takeaway) {
-            unavailabilityMessage = 'Not available for Takeaway';
-          } else if (orderType == 'Delivery'.tr() &&
-              !productModel.deliveryOption) {
-            unavailabilityMessage = 'Not available for Delivery';
+          if (_hHasRestrictions) {
+            if (_hIsDineaway && !productModel.dineAwayTakeaway) {
+              unavailabilityMessage = 'Not available for DineAway/Takeaway';
+            } else if (orderType == 'Delivery'.tr() &&
+                !productModel.deliveryOption) {
+              unavailabilityMessage = 'Not available for Delivery';
+            }
           }
 
           bool showItem = true;
-          if (orderType == 'Takeaway'.tr() && !productModel.takeaway) {
-            showItem = false;
-          } else if (orderType == 'Delivery'.tr() &&
-              !productModel.deliveryOption) {
-            showItem = false;
+          if (_hHasRestrictions) {
+            if (_hIsDineaway && !productModel.dineAwayTakeaway) {
+              showItem = false;
+            } else if (orderType == 'Delivery'.tr() &&
+                !productModel.deliveryOption) {
+              showItem = false;
+            }
           }
 
           if (!showItem) return const SizedBox.shrink();

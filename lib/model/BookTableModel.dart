@@ -16,9 +16,20 @@ class BookTableModel {
 
   String status;
   String id, guestEmail, guestFirstName, guestLastName, guestPhone;
-  String? occasion, specialRequest,section_id;
+  String? occasion, specialRequest, section_id;
   bool firstVisit;
   int totalGuest;
+
+  // ── New booking fields ──────────────────────────────────────────
+  String bookingType;       // 'flexible' | 'slot_based'
+  String slotId;            // for slot-based bookings
+  String selectedTime;      // selected time (flexible) or slot start time
+  String selectedEndTime;   // slot end time
+  String bookingDate;       // human-readable date string
+  String pricingModel;      // 'free' | 'per_person' | 'table_charge' | 'cover_charge'
+  num bookingCharge;        // per-unit charge
+  num totalCharge;          // totalGuest * bookingCharge or flat charge
+  String approvalMode;      // 'auto' | 'manual'
 
   BookTableModel(
       {author,
@@ -37,7 +48,16 @@ class BookTableModel {
       this.occasion,
       this.specialRequest,
       this.firstVisit = false,
-      this.totalGuest = 0})
+      this.totalGuest = 0,
+      this.bookingType = 'flexible',
+      this.slotId = '',
+      this.selectedTime = '',
+      this.selectedEndTime = '',
+      this.bookingDate = '',
+      this.pricingModel = 'free',
+      this.bookingCharge = 0,
+      this.totalCharge = 0,
+      this.approvalMode = 'auto'})
       : author = author ?? User(),
         createdAt = createdAt ?? Timestamp.now(),
         date = date ?? Timestamp.now(),
@@ -71,7 +91,16 @@ class BookTableModel {
         occasion: (parsedJson["occasion"] != null && parsedJson["occasion"].toString().isNotEmpty) ? parsedJson["occasion"] : "",
         specialRequest: (parsedJson["specialRequest"] != null && parsedJson["specialRequest"].toString().isNotEmpty) ? parsedJson["specialRequest"] : "",
         firstVisit: parsedJson["firstVisit"] != null ? parsedJson["firstVisit"] : false,
-        totalGuest: guestVal);
+        totalGuest: guestVal,
+        bookingType: parsedJson['bookingType'] as String? ?? 'flexible',
+        slotId: parsedJson['slotId'] as String? ?? '',
+        selectedTime: parsedJson['selectedTime'] as String? ?? '',
+        selectedEndTime: parsedJson['selectedEndTime'] as String? ?? '',
+        bookingDate: parsedJson['bookingDate'] as String? ?? '',
+        pricingModel: parsedJson['pricingModel'] as String? ?? 'free',
+        bookingCharge: parsedJson['bookingCharge'] is num ? parsedJson['bookingCharge'] as num : 0,
+        totalCharge: parsedJson['totalCharge'] is num ? parsedJson['totalCharge'] as num : 0,
+        approvalMode: parsedJson['approvalMode'] as String? ?? 'auto');
   }
 
   Map<String, dynamic> toJson() {
@@ -92,7 +121,16 @@ class BookTableModel {
       'occasion': occasion,
       'specialRequest': specialRequest,
       'firstVisit': firstVisit,
-      'totalGuest': totalGuest
+      'totalGuest': totalGuest,
+      'bookingType': bookingType,
+      'slotId': slotId,
+      'selectedTime': selectedTime,
+      'selectedEndTime': selectedEndTime,
+      'bookingDate': bookingDate,
+      'pricingModel': pricingModel,
+      'bookingCharge': bookingCharge,
+      'totalCharge': totalCharge,
+      'approvalMode': approvalMode,
     };
   }
 }

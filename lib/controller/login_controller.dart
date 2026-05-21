@@ -20,53 +20,37 @@ class LoginController extends GetxController {
 
   RxBool passwordVisible = true.obs;
 
-  @override
-  void onInit() {
-    // TODO: implement onInit
-    super.onInit();
-  }
-
   loginWithEmailAndPassword(BuildContext context) async {
-    print("=== LOGIN FUNCTION CALLED ===");
     ShowToastDialog.showLoader("Please wait".tr);
-    print("=== LOADER SHOWN ===");
     try {
-      print("=== Step 1: Starting login ===");
-      print("Email: ${emailEditingController.value.text.trim()}");
-
       final credential =
           await auth.FirebaseAuth.instance.signInWithEmailAndPassword(
         email: emailEditingController.value.text.trim(),
         password: passwordEditingController.value.text.trim(),
       );
-      print("=== Step 2: Auth successful, user: ${credential.user?.uid} ===");
 
       if (credential.user == null) {
-        ShowToastDialog.showToast("Login failed, please try again.");
+        ShowToastDialog.showToast("Login failed. Please try again.");
         ShowToastDialog.closeLoader();
         return;
       }
 
-      print("=== Step 3: Fetching user profile ===");
       User? userModel =
           await FireStoreUtils.getUserProfile(credential.user!.uid);
-      print("=== Step 4: User profile: ${userModel != null ? 'Found' : 'Not found'} ===");
 
       if (userModel == null) {
-        ShowToastDialog.showToast("No user profile found for this account.");
+        ShowToastDialog.showToast(
+            "No account found. Please sign up to create an account.");
         await auth.FirebaseAuth.instance.signOut();
         ShowToastDialog.closeLoader();
-        pushAndRemoveUntil(context, LoginScreen());
+        pushAndRemoveUntil(context, const LoginScreen());
         return;
       }
 
-      print("=== Step 5: User role: ${userModel.role}, active: ${userModel.active} ===");
       if (userModel.role == USER_ROLE_CUSTOMER) {
         if (userModel.active == true) {
-          print("=== Step 6: User is active, updating FCM token ===");
           userModel.fcmToken = await NotificationService.getToken();
           await FireStoreUtils.updateCurrentUser(userModel);
-          print("=== Step 7: Checking shipping address ===");
           if (userModel.shippingAddress != null &&
               userModel.shippingAddress!.isNotEmpty) {
             if (userModel.shippingAddress!
@@ -78,41 +62,52 @@ class LoginController extends GetxController {
             } else {
               MyAppState.selectedPosotion = userModel.shippingAddress!.first;
             }
-            print("=== Step 8: Navigating to ServiceListScreen ===");
             pushAndRemoveUntil(context, ServiceListScreen());
           } else {
-            print("=== Step 8: Navigating to LocationPermissionScreen ===");
             pushAndRemoveUntil(context, LocationPermissionScreen());
           }
         } else {
           ShowToastDialog.showToast(
-              "This user is disable please contact to administrator");
+              "Your account is temporarily restricted. Please contact support.");
           await auth.FirebaseAuth.instance.signOut();
           ShowToastDialog.closeLoader();
-          pushAndRemoveUntil(context, LoginScreen());
+          pushAndRemoveUntil(context, const LoginScreen());
         }
       } else {
-        print("=== Step 6: Invalid role, signing out ===");
+        ShowToastDialog.showToast(
+            "This account is not registered as a customer. Please use the correct QuickDash app.");
         await auth.FirebaseAuth.instance.signOut();
         ShowToastDialog.closeLoader();
-        pushAndRemoveUntil(context, LoginScreen());
+        pushAndRemoveUntil(context, const LoginScreen());
       }
     } on auth.FirebaseAuthException catch (e) {
-      print("=== FirebaseAuthException: ${e.code} - ${e.message} ===");
-      if (e.code == 'user-not-found') {
-        ShowToastDialog.showToast("No user found for that email.");
-      } else if (e.code == 'wrong-password') {
-        ShowToastDialog.showToast("Wrong password provided for that user.");
-      } else if (e.code == 'invalid-email') {
-        ShowToastDialog.showToast("Invalid Email.");
-      } else {
-        ShowToastDialog.showToast("${e.message}");
+      switch (e.code) {
+        case 'user-not-found':
+          ShowToastDialog.showToast(
+              "No account found with this email. Please sign up first.");
+          break;
+        case 'wrong-password':
+        case 'invalid-credential':
+          ShowToastDialog.showToast(
+              "Incorrect email or password. Please try again.");
+          break;
+        case 'invalid-email':
+          ShowToastDialog.showToast("Please enter a valid email address.");
+          break;
+        case 'too-many-requests':
+          ShowToastDialog.showToast(
+              "Too many failed attempts. Please try again later or reset your password.");
+          break;
+        case 'network-request-failed':
+          ShowToastDialog.showToast(
+              "Unable to connect right now. Please try again.");
+          break;
+        default:
+          ShowToastDialog.showToast("Login failed. Please try again.");
       }
-    } catch (e) {
-      print("=== Exception: $e ===");
-      ShowToastDialog.showToast(e.toString());
+    } catch (_) {
+      ShowToastDialog.showToast("Something went wrong. Please try again.");
     } finally {
-      print("=== Closing loader ===");
       ShowToastDialog.closeLoader();
     }
   }

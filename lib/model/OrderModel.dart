@@ -48,6 +48,7 @@ class OrderModel {
   String courierTrackingId;
 
   String? estimatedTimeToPrepare;
+  Timestamp? acceptedAt;
   Timestamp? scheduleTime;
   String? orderType; // "Takeaway" or "Dining" for Dineaway feature
 
@@ -79,6 +80,7 @@ class OrderModel {
     this.courierTrackingId = '',
     this.specialDiscount,
     this.estimatedTimeToPrepare,
+    this.acceptedAt,
     this.taxModel,
     this.scheduleTime,
     this.orderType,
@@ -138,6 +140,7 @@ class OrderModel {
       courierTrackingId: parsedJson["courierTrackingId"] ?? '',
       specialDiscount: parsedJson["specialDiscount"] ?? {},
       estimatedTimeToPrepare: parsedJson["estimatedTimeToPrepare"] ?? '',
+      acceptedAt: parsedJson["acceptedAt"],
       taxModel: taxList,
       scheduleTime: parsedJson["scheduleTime"],
       orderType: parsedJson["orderType"],
@@ -174,6 +177,7 @@ class OrderModel {
       "courierCompanyName": courierCompanyName,
       "courierTrackingId": courierTrackingId,
       "estimatedTimeToPrepare": this.estimatedTimeToPrepare,
+      "acceptedAt": this.acceptedAt,
       "scheduleTime": this.scheduleTime,
       "orderType": this.orderType,
     };

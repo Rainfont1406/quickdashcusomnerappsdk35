@@ -2061,7 +2061,7 @@ class PaymentScreenState extends State<PaymentScreen> {
         authorID: MyAppState.currentUser!.userID,
         createdAt: Timestamp.now(),
         products: tempProduc,
-        status: ORDER_STATUS_PLACED,
+        status: widget.orderType == "Bill Pay" ? ORDER_STATUS_COMPLETED : ORDER_STATUS_PLACED,
         vendor: vendorModel,
         payment_method: paymentType,
         notes: widget.notes,

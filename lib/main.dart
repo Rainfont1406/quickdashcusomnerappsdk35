@@ -272,9 +272,22 @@ class OnBoarding extends StatefulWidget {
   }
 }
 
-class OnBoardingState extends State<OnBoarding> {
-  late Future<List<CurrencyModel>> futureCurrency;
+class OnBoardingState extends State<OnBoarding> with TickerProviderStateMixin {
 
+  // ── Animation controllers ──────────────────────────────────────────────
+  late final AnimationController _logoCtrl;
+  late final AnimationController _contentCtrl;
+
+  late final Animation<double> _logoOpacity;
+  late final Animation<double> _logoScale;
+  late final Animation<double> _titleOpacity;
+  late final Animation<Offset> _titleSlide;
+  late final Animation<double> _taglineOpacity;
+  late final Animation<Offset> _taglineSlide;
+  late final Animation<double> _sublineOpacity;
+  late final Animation<double> _loadingOpacity;
+
+  // ── Firebase routing ───────────────────────────────────────────────────
   Future hasFinishedOnBoarding() async {
     SharedPreferences prefs = await SharedPreferences.getInstance();
     bool finishedOnBoarding = (prefs.getBool(FINISHED_ON_BOARDING) ?? false);
@@ -377,143 +390,261 @@ class OnBoardingState extends State<OnBoarding> {
   @override
   void initState() {
     super.initState();
-
+    _initAnimations();
     hasFinishedOnBoarding();
-    // futureCurrency= FireStoreUtils().getCurrency();
+  }
+
+  void _initAnimations() {
+    // Logo: scale-in + fade-in
+    _logoCtrl = AnimationController(
+      duration: const Duration(milliseconds: 650),
+      vsync: this,
+    );
+    _logoOpacity = CurvedAnimation(parent: _logoCtrl, curve: Curves.easeOut);
+    _logoScale = Tween<double>(begin: 0.72, end: 1.0).animate(
+      CurvedAnimation(parent: _logoCtrl, curve: Curves.easeOutBack),
+    );
+
+    // Staggered text content
+    _contentCtrl = AnimationController(
+      duration: const Duration(milliseconds: 900),
+      vsync: this,
+    );
+    _titleOpacity = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(parent: _contentCtrl,
+          curve: const Interval(0.0, 0.55, curve: Curves.easeOut)),
+    );
+    _titleSlide = Tween<Offset>(
+            begin: const Offset(0, 0.35), end: Offset.zero)
+        .animate(CurvedAnimation(parent: _contentCtrl,
+            curve: const Interval(0.0, 0.6, curve: Curves.easeOut)));
+    _taglineOpacity = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(parent: _contentCtrl,
+          curve: const Interval(0.2, 0.75, curve: Curves.easeOut)),
+    );
+    _taglineSlide = Tween<Offset>(
+            begin: const Offset(0, 0.4), end: Offset.zero)
+        .animate(CurvedAnimation(parent: _contentCtrl,
+            curve: const Interval(0.25, 0.8, curve: Curves.easeOut)));
+    _sublineOpacity = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(parent: _contentCtrl,
+          curve: const Interval(0.4, 0.9, curve: Curves.easeOut)),
+    );
+    _loadingOpacity = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(parent: _contentCtrl,
+          curve: const Interval(0.65, 1.0, curve: Curves.easeOut)),
+    );
+
+    _logoCtrl.forward();
+    Future.delayed(const Duration(milliseconds: 320), () {
+      if (mounted) _contentCtrl.forward();
+    });
   }
 
   @override
+  void dispose() {
+    _logoCtrl.dispose();
+    _contentCtrl.dispose();
+    super.dispose();
+  }
+
+  // ── Logo mark: blue rounded container with white "Q" ─────────────────
+
+  Widget _buildLogoMark() {
+    return Container(
+      width: 116,
+      height: 116,
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [AppThemeData.primary400, AppThemeData.primary600],
+        ),
+        borderRadius: BorderRadius.circular(32),
+        boxShadow: [
+          BoxShadow(
+            color: AppThemeData.primary500.withValues(alpha: 0.28),
+            blurRadius: 40,
+            offset: const Offset(0, 16),
+            spreadRadius: -4,
+          ),
+          BoxShadow(
+            color: AppThemeData.primary500.withValues(alpha: 0.12),
+            blurRadius: 80,
+            offset: const Offset(0, 32),
+            spreadRadius: -8,
+          ),
+        ],
+      ),
+      child: const Center(
+        child: Text(
+          'Q',
+          style: TextStyle(
+            fontSize: 66,
+            fontFamily: AppThemeData.bold,
+            color: Colors.white,
+            height: 1.0,
+            letterSpacing: -3.0,
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ── Subtle blue-tinted decorative circle (for white bg) ───────────────
+
+  Widget _bgCircle(double size, double opacity) => Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: AppThemeData.primary100.withValues(alpha: opacity),
+        ),
+      );
+
+  // ── Outlined service pill (blue border + fill on white bg) ────────────
+
+  Widget _servicePill(String label) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          color: AppThemeData.primary50,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: AppThemeData.primary200,
+            width: 1.2,
+          ),
+        ),
+        child: Text(
+          label,
+          style: const TextStyle(
+            color: AppThemeData.primary500,
+            fontSize: 11.5,
+            fontFamily: AppThemeData.semiBold,
+            letterSpacing: 0.3,
+            height: 1.2,
+          ),
+        ),
+      );
+
+  @override
   Widget build(BuildContext context) {
+    // ── White background — clean, premium, brand-first ────────────────
+    const Color bg = Color(0xFFFAFAFF); // pure white with the faintest cool tint
+    const Color brand = AppThemeData.primary500;
+
     return Scaffold(
+      backgroundColor: bg,
       body: Container(
         width: double.infinity,
         height: double.infinity,
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [AppThemeData.primary500, AppThemeData.primary400],
-          ),
-        ),
+        color: bg,
         child: Stack(
           children: [
-            // Decorative background circles
-            Positioned(
-              top: -70,
-              right: -70,
-              child: Container(
-                width: 240,
-                height: 240,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: Colors.white.withOpacity(0.06),
-                ),
-              ),
-            ),
-            Positioned(
-              top: 60,
-              right: 30,
-              child: Container(
-                width: 90,
-                height: 90,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: Colors.white.withOpacity(0.05),
-                ),
-              ),
-            ),
-            Positioned(
-              bottom: -90,
-              left: -90,
-              child: Container(
-                width: 300,
-                height: 300,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: Colors.white.withOpacity(0.06),
-                ),
-              ),
-            ),
-            Positioned(
-              bottom: 110,
-              left: 24,
-              child: Container(
-                width: 70,
-                height: 70,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: Colors.white.withOpacity(0.05),
-                ),
-              ),
-            ),
-            // Main content
+            // ── Very subtle blue tint circles for depth ───────────────
+            Positioned(top: -80, right: -80,   child: _bgCircle(260, 0.55)),
+            Positioned(top: 70,  right: 20,    child: _bgCircle(100, 0.40)),
+            Positioned(bottom: -100, left: -100, child: _bgCircle(320, 0.50)),
+            Positioned(bottom: 120, left: 20,  child: _bgCircle(80,  0.35)),
+
+            // ── Main content ──────────────────────────────────────────
             SafeArea(
               child: Column(
                 children: [
                   const Spacer(flex: 3),
-                  // App logo
-                  Container(
-                    width: 110,
-                    height: 110,
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(28),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withOpacity(0.2),
-                          blurRadius: 32,
-                          offset: const Offset(0, 12),
-                        ),
-                      ],
-                    ),
-                    padding: const EdgeInsets.all(18),
-                    child: Image.asset(
-                      'assets/images/app_logo_new.png',
-                      fit: BoxFit.contain,
+
+                  // ── Logo mark ───────────────────────────────────────
+                  FadeTransition(
+                    opacity: _logoOpacity,
+                    child: ScaleTransition(
+                      scale: _logoScale,
+                      child: _buildLogoMark(),
                     ),
                   ),
+
                   const SizedBox(height: 28),
-                  // App name
-                  const Text(
-                    'QuickDash',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 38,
-                      fontFamily: AppThemeData.bold,
-                      letterSpacing: 0.5,
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  // Tagline
-                  Text(
-                    'Food  ·  Delivery  ·  Services',
-                    style: TextStyle(
-                      color: Colors.white.withOpacity(0.72),
-                      fontSize: 13,
-                      fontFamily: AppThemeData.regular,
-                      letterSpacing: 1.8,
-                    ),
-                  ),
-                  const Spacer(flex: 3),
-                  // Loading spinner
-                  SizedBox(
-                    width: 26,
-                    height: 26,
-                    child: CircularProgressIndicator(
-                      valueColor: AlwaysStoppedAnimation<Color>(
-                        Colors.white.withOpacity(0.85),
+
+                  // ── Brand name ──────────────────────────────────────
+                  FadeTransition(
+                    opacity: _titleOpacity,
+                    child: SlideTransition(
+                      position: _titleSlide,
+                      child: const Text(
+                        'QuickDash',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: brand,
+                          fontSize: 40,
+                          fontFamily: AppThemeData.bold,
+                          letterSpacing: 0.2,
+                          height: 1.1,
+                        ),
                       ),
-                      strokeWidth: 2.2,
                     ),
                   ),
-                  const SizedBox(height: 14),
-                  Text(
-                    'Getting things ready…',
-                    style: TextStyle(
-                      color: Colors.white.withOpacity(0.5),
-                      fontSize: 12,
-                      fontFamily: AppThemeData.regular,
-                      letterSpacing: 0.8,
+
+                  const SizedBox(height: 18),
+
+                  // ── Service pills row ───────────────────────────────
+                  FadeTransition(
+                    opacity: _taglineOpacity,
+                    child: SlideTransition(
+                      position: _taglineSlide,
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          _servicePill('Delivery'),
+                          const SizedBox(width: 8),
+                          _servicePill('Dine-In'),
+                          const SizedBox(width: 8),
+                          _servicePill('TakeAway'),
+                        ],
+                      ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 10),
+
+                  // ── Brand promise ───────────────────────────────────
+                  FadeTransition(
+                    opacity: _sublineOpacity,
+                    child: Text(
+                      'All in One with QuickDash',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: AppThemeData.primary300,
+                        fontSize: 13,
+                        fontFamily: AppThemeData.regular,
+                        letterSpacing: 0.4,
+                      ),
+                    ),
+                  ),
+
+                  const Spacer(flex: 3),
+
+                  // ── Loading indicator ───────────────────────────────
+                  FadeTransition(
+                    opacity: _loadingOpacity,
+                    child: const SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: CircularProgressIndicator(
+                        valueColor: AlwaysStoppedAnimation<Color>(brand),
+                        strokeWidth: 2.0,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  FadeTransition(
+                    opacity: _loadingOpacity,
+                    child: Text(
+                      'Getting things ready…',
+                      style: TextStyle(
+                        color: AppThemeData.primary300,
+                        fontSize: 12,
+                        fontFamily: AppThemeData.regular,
+                        letterSpacing: 0.6,
+                      ),
                     ),
                   ),
                   const SizedBox(height: 52),

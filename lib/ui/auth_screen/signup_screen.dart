@@ -53,11 +53,7 @@ class _SignupScreenState extends State<SignupScreen> {
 
   @override
   void initState() {
-    getArgument();
     super.initState();
-  }
-
-  getArgument() {
     type = widget.type ?? '';
     userModel = widget.userModel ?? User();
     if (type == "mobileNumber") {
@@ -68,7 +64,8 @@ class _SignupScreenState extends State<SignupScreen> {
         countryCodeEditingController.text = '+91';
       }
     }
-    _updatePhoneMaxLength();
+    phoneMaxLength =
+        CountryPhoneLength.getMaxLength(countryCodeEditingController.text);
   }
 
   void _updatePhoneMaxLength() {
@@ -128,8 +125,8 @@ class _SignupScreenState extends State<SignupScreen> {
       if (password.isEmpty) {
         ShowToastDialog.showToast("Please enter password".tr);
         return false;
-      } else if (password.length < 6) {
-        ShowToastDialog.showToast("Please enter minimum 6 digit password".tr);
+      } else if (password.length < 8) {
+        ShowToastDialog.showToast("Password must be at least 8 characters".tr);
         return false;
       } else if (confirmPassword.isEmpty) {
         ShowToastDialog.showToast("Please enter Confirm password".tr);
@@ -151,7 +148,7 @@ class _SignupScreenState extends State<SignupScreen> {
       final valid = await FireStoreUtils.checkReferralCodeValidOrNot(
           referralCodeEditingController.text.trim());
       if (valid != true) {
-        ShowToastDialog.showToast("Referral code is invalid. Please check and try again.");
+        ShowToastDialog.showToast('Referral code not found.');
         return;
       }
     }
@@ -160,7 +157,7 @@ class _SignupScreenState extends State<SignupScreen> {
 
   signUp(BuildContext context) async {
     if (mounted) setState(() => _isBusy = true);
-    ShowToastDialog.showLoader("Please wait".tr);
+    ShowToastDialog.showLoader('Creating your account...');
     final nameParts = _splitFullName(fullNameEditingController.text.toString());
     try {
       if (type == "mobileNumber") {
@@ -186,7 +183,7 @@ class _SignupScreenState extends State<SignupScreen> {
 
         await FireStoreUtils.updateCurrentUser(userModel);
         if (!mounted) return;
-        ShowToastDialog.showToast("Account created successfully! Welcome to QuickDash.");
+        ShowToastDialog.showToast('Welcome to QuickDash! Your account is ready.');
         if (userModel.shippingAddress != null &&
             userModel.shippingAddress!.isNotEmpty) {
           if (userModel.shippingAddress!
@@ -217,7 +214,7 @@ class _SignupScreenState extends State<SignupScreen> {
       });
       if (phoneConflict) {
         ShowToastDialog.showToast(
-            "An account already exists with this phone number. Please login to continue.");
+            'This number is already registered. Log in to continue.');
         return;
       }
 
@@ -257,7 +254,7 @@ class _SignupScreenState extends State<SignupScreen> {
       } catch (_) {}
 
       if (!mounted) return;
-      ShowToastDialog.showToast("Account created successfully! Welcome to QuickDash.");
+      ShowToastDialog.showToast('Welcome to QuickDash! Your account is ready.');
       if (userModel.shippingAddress != null &&
           userModel.shippingAddress!.isNotEmpty) {
         if (userModel.shippingAddress!
@@ -281,14 +278,14 @@ class _SignupScreenState extends State<SignupScreen> {
           break;
         case 'email-already-in-use':
           ShowToastDialog.showToast(
-              "An account already exists with this email. Please login to continue.");
+              'This email is already linked to an account.');
           break;
         case 'invalid-email':
           ShowToastDialog.showToast("Please enter a valid email address.");
           break;
         case 'network-request-failed':
           ShowToastDialog.showToast(
-              "Network error. Please check your internet connection and try again.");
+              'Unable to connect right now. Please try again.');
           break;
         default:
           ShowToastDialog.showToast(e.message ?? "Signup failed. Please try again.");
@@ -438,7 +435,7 @@ class _SignupScreenState extends State<SignupScreen> {
                     AuthOutlinedButton(
                       label: 'Continue with Mobile Number'.tr,
                       iconPath: 'assets/icons/ic_phone.svg',
-                      onTap: () => push(context, PhoneNumberScreen()),
+                      onTap: () => pushReplacement(context, PhoneNumberScreen()),
                     ),
                   ],
                 ),

@@ -75,13 +75,28 @@ class _ChatScreensState extends State<ChatScreens> {
     return Scaffold(
       backgroundColor: isDarkMode(context) ? AppThemeData.surfaceDark : AppThemeData.surface,
       appBar: AppBar(
-        centerTitle: true,
-        actionsIconTheme: IconThemeData(color: isDarkMode(context) ? Colors.grey.shade200 : Colors.white),
-        iconTheme: IconThemeData(color: isDarkMode(context) ? Colors.grey.shade200 : Colors.white),
+        centerTitle: false,
+        iconTheme: const IconThemeData(color: Colors.white),
         backgroundColor: AppThemeData.primary500,
-        title: Text(
-          widget.restaurantName.toString(),
-          style: TextStyle(color: isDarkMode(context) ? Colors.grey.shade200 : Colors.white, fontWeight: FontWeight.bold),
+        title: Row(
+          children: [
+            if (widget.restaurantProfileImage != null && widget.restaurantProfileImage!.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(right: 10),
+                child: CircleAvatar(
+                  radius: 18,
+                  backgroundColor: Colors.white.withValues(alpha: 0.3),
+                  backgroundImage: CachedNetworkImageProvider(widget.restaurantProfileImage!),
+                ),
+              ),
+            Flexible(
+              child: Text(
+                widget.restaurantName.toString(),
+                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
         ),
       ),
       body: Padding(
@@ -106,7 +121,18 @@ class _ChatScreensState extends State<ChatScreens> {
                     print(inboxModel.senderId == MyAppState.currentUser!.userID);
                     return chatItemView(inboxModel.senderId == MyAppState.currentUser!.userID, inboxModel);
                   },
-                  onEmpty: Center(child: Text("No Conversion found").tr()),
+                  onEmpty: Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.chat_bubble_outline_rounded, size: 72, color: AppThemeData.primary500.withValues(alpha: 0.35)),
+                        const SizedBox(height: 16),
+                        Text('No messages yet', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: AppThemeData.grey500)).tr(),
+                        const SizedBox(height: 6),
+                        Text('Send a message to start the conversation', style: TextStyle(fontSize: 13, color: AppThemeData.grey400)).tr(),
+                      ],
+                    ),
+                  ),
                   // orderBy is compulsory to enable pagination
                   query: FireStoreUtils.firestore
                       .collection(widget.chatType == "Driver"
@@ -126,13 +152,11 @@ class _ChatScreensState extends State<ChatScreens> {
                 ),
               ),
             ),
-            SizedBox(
-              width: double.infinity,
+            SafeArea(
+              top: false,
               child: Padding(
                 padding: const EdgeInsets.all(8.0),
-                child: SizedBox(
-                  height: 50,
-                  child: Row(
+                child: Row(
                     children: [
                       Container(
                         decoration: BoxDecoration(
@@ -201,7 +225,6 @@ class _ChatScreensState extends State<ChatScreens> {
                   ),
                 ),
               ),
-            ),
           ],
         ),
       ),
@@ -226,7 +249,7 @@ class _ChatScreensState extends State<ChatScreens> {
                           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                           child: Text(
                             data.message.toString(),
-                            style: TextStyle(color: data.senderId == MyAppState.currentUser!.userID ? Colors.white : Colors.black),
+                            style: const TextStyle(color: Colors.white),
                           ),
                         )
                       : data.messageType == "image"
@@ -296,7 +319,7 @@ class _ChatScreensState extends State<ChatScreens> {
                             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                             child: Text(
                               data.message.toString(),
-                              style: TextStyle(color: data.senderId == MyAppState.currentUser!.userID ? Colors.white : Colors.black),
+                              style: const TextStyle(color: Colors.black),
                             ),
                           )
                         : data.messageType == "image"
