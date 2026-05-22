@@ -2,17 +2,22 @@
 import 'package:flutter/material.dart';
 
 class AppColors {
-  // Brand Colors
-  static const Color primary50 = Color(0xFFEDEEF4);
-  static const Color primary100 = Color(0xFFD3D6E9);
-  static const Color primary200 = Color(0xFFA8ADD4);
-  static const Color primary300 = Color(0xFF7C84BF);
-  static const Color primary400 = Color(0xFF505BA9);
-  static const Color primary500 = Color(0xFF0C306E); // Main brand
-  static const Color primary600 = Color(0xFF0A2359); // Hover/active
-  static const Color primary700 = Color(0xFF081946);
-  static const Color primary800 = Color(0xFF060F34);
-  static const Color primary900 = Color(0xFF040622);
+  // Brand Colors — Purple
+  static const Color primary50 = Color(0xFFF5F3FF);
+  static const Color primary100 = Color(0xFFEDE9FE);
+  static const Color primary200 = Color(0xFFDDD6FE);
+  static const Color primary300 = Color(0xFFC4B5FD);
+  static const Color primary400 = Color(0xFFA78BFA);
+  static const Color primary500 = Color(0xFF7C3AED); // Main brand purple
+  static const Color primary600 = Color(0xFF6D28D9); // Hover/active
+  static const Color primary700 = Color(0xFF5B21B6);
+  static const Color primary800 = Color(0xFF4C1D95);
+  static const Color primary900 = Color(0xFF2E1065);
+
+  // Orange Accent — for offers, discounts, pricing & promotional CTAs
+  static const Color accent500 = Color(0xFFF97316); // Main orange accent
+  static const Color accent400 = Color(0xFFFB923C);
+  static const Color accent600 = Color(0xFFEA580C);
 
   // Neutral Colors
   static const Color neutral0 = Color(0xFFFFFFFF); // Pure white

@@ -131,6 +131,12 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
+  void _tryHideSkeleton() {
+    if (isLoading && _bannerReady && _firstVendorReceived && mounted) {
+      setState(() => isLoading = false);
+    }
+  }
+
   late Future<List<FavouriteModel>> lstFavourites;
   List<String> lstFav = [];
 
@@ -139,6 +145,11 @@ class _HomeScreenState extends State<HomeScreen> {
   String? selctedOrderTypeValue = "Delivery".tr();
 
   bool isLoading = true;
+  // Skeleton is hidden only when both banner data AND the first vendor batch
+  // have arrived. Setting either flag early (via stream or banner completion)
+  // is safe — _tryHideSkeleton checks both before acting.
+  bool _bannerReady = false;
+  bool _firstVendorReceived = false;
 
   getLocationData() async {
     try {
@@ -213,6 +224,9 @@ class _HomeScreenState extends State<HomeScreen> {
         storyEnable = value.data()!['isEnabled'];
       });
     });
+    // All banner/category data is ready — signal and try to dismiss skeleton.
+    _bannerReady = true;
+    _tryHideSkeleton();
   }
 
   @override
@@ -688,8 +702,15 @@ class _HomeScreenState extends State<HomeScreen> {
             // ═══════════════════════════════════════════════════
 
             Expanded(
-              child: SingleChildScrollView(
-                child: Column(
+              child: RefreshIndicator(
+                onRefresh: _onRefresh,
+                color: AppThemeData.primary500,
+                backgroundColor:
+                    isDarkMode(context) ? AppThemeData.surfaceDark : Colors.white,
+                displacement: 50,
+                child: SingleChildScrollView(
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  child: Column(
                   children: [
                     storyList.isEmpty || storyEnable == false
                         ? const SizedBox()
@@ -855,6 +876,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   ],
                 ),
               ),
+            ),
             )
           ],
         ),
@@ -1037,6 +1059,21 @@ class _HomeScreenState extends State<HomeScreen> {
         color: isDarkMode(context) ? AppThemeData.grey50 : AppThemeData.grey900,
       ),
     );
+  }
+
+  Future<void> _onRefresh() async {
+    // Pull-to-refresh: keep isLoading = false (no skeleton during refresh).
+    // Reset story state so they re-fetch from Firestore.
+    _storiesLoaded = false;
+    allStories.clear();
+    storyList.clear();
+    // Banners, coupons, categories: await so the indicator stays visible
+    // while the most prominent content reloads. _bannerReady / _firstVendorReceived
+    // don't need to be reset because isLoading stays false, so _tryHideSkeleton
+    // is already a no-op.
+    await getBanner();
+    // Restaurants arrive via stream — fire-and-forget; UI updates live.
+    getData();
   }
 
   @override
@@ -1304,6 +1341,16 @@ class _HomeScreenState extends State<HomeScreen> {
       popularRestaurantLst.addAll(temp0);
       popularRestaurantLst.addAll(temp0_);
 
+      // All synchronous vendor processing is done. Signal the first batch and
+      // try to dismiss the skeleton (needs _bannerReady too). For subsequent
+      // stream events (order-type change, Firestore push), just rebuild.
+      if (!_firstVendorReceived) {
+        _firstVendorReceived = true;
+        _tryHideSkeleton();
+      } else if (mounted) {
+        setState(() {});
+      }
+
       FireStoreUtils().getPublicCoupons().then((value) {
         offersList.clear();
         offerVendorList.clear();
@@ -1330,10 +1377,6 @@ class _HomeScreenState extends State<HomeScreen> {
           _filterStories();
         });
       }
-    });
-
-    setState(() {
-      isLoading = false;
     });
   }
 
@@ -1956,8 +1999,8 @@ class _StoryViewState extends State<StoryView> {
                                   decoration: BoxDecoration(
                                     gradient: const LinearGradient(
                                       colors: [
-                                        Color(0xFF22C55E),
-                                        Color(0xFF16A34A)
+                                        AppThemeData.accent500,
+                                        AppThemeData.accent600,
                                       ],
                                       begin: Alignment.topLeft,
                                       end: Alignment.bottomRight,
@@ -1965,7 +2008,7 @@ class _StoryViewState extends State<StoryView> {
                                     borderRadius: BorderRadius.circular(8),
                                     boxShadow: [
                                       BoxShadow(
-                                        color: const Color(0xFF22C55E)
+                                        color: AppThemeData.accent500
                                             .withValues(alpha: 0.35),
                                         blurRadius: 6,
                                         offset: const Offset(0, 2),
@@ -2664,14 +2707,14 @@ class TopSellingView extends StatelessWidget {
           });
 
           final bool _hHasRestrictions = productModel.deliveryOption ||
-              productModel.dineAwayTakeaway || productModel.dineIn;
+              productModel.takeaway || productModel.dineIn;
           final bool _hIsDineaway = orderType == 'Takeaway'.tr() ||
               orderType == 'Dineaway'.tr();
 
           String unavailabilityMessage = '';
           if (_hHasRestrictions) {
-            if (_hIsDineaway && !productModel.dineAwayTakeaway) {
-              unavailabilityMessage = 'Not available for DineAway/Takeaway';
+            if (_hIsDineaway && !productModel.dineAway) {
+              unavailabilityMessage = 'Not available for DineAway';
             } else if (orderType == 'Delivery'.tr() &&
                 !productModel.deliveryOption) {
               unavailabilityMessage = 'Not available for Delivery';
@@ -2680,7 +2723,7 @@ class TopSellingView extends StatelessWidget {
 
           bool showItem = true;
           if (_hHasRestrictions) {
-            if (_hIsDineaway && !productModel.dineAwayTakeaway) {
+            if (_hIsDineaway && !productModel.dineAway) {
               showItem = false;
             } else if (orderType == 'Delivery'.tr() &&
                 !productModel.deliveryOption) {
@@ -3463,28 +3506,21 @@ class _RecommendForYouViewState
                         borderRadius: BorderRadius.circular(6),
                         // antiAliasWithSaveLayer confines blur to badge region
                         clipBehavior: Clip.antiAliasWithSaveLayer,
-                        child: BackdropFilter(
-                          filter: ui.ImageFilter.blur(sigmaX: 8, sigmaY: 8),
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 6, vertical: 3),
-                            decoration: BoxDecoration(
-                              color: Colors.black.withValues(alpha: 0.52),
-                              borderRadius: BorderRadius.circular(6),
-                              border: Border.all(
-                                color: Colors.white.withValues(alpha: 0.18),
-                                width: 0.5,
-                              ),
-                            ),
-                            child: Text(
-                              '$offerPercent% OFF',
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 8,
-                                height: 1.2,
-                                fontFamily: AppThemeData.bold,
-                                letterSpacing: 0.3,
-                              ),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: AppThemeData.accent500,
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Text(
+                            '$offerPercent% OFF',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 8,
+                              height: 1.2,
+                              fontFamily: AppThemeData.bold,
+                              letterSpacing: 0.3,
                             ),
                           ),
                         ),
@@ -3571,7 +3607,9 @@ class _RecommendForYouViewState
                             fontSize: 12,
                             height: 1.2,
                             fontFamily: AppThemeData.bold,
-                            color: AppThemeData.primary500,
+                            color: offerPercent > 0
+                                ? AppThemeData.accent500
+                                : AppThemeData.primary500,
                           ),
                         ),
                         if (offerPercent > 0) ...[

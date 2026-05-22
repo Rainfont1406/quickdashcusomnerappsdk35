@@ -378,7 +378,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                               : 'Discount'.tr(),
                           value:
                               '- ${amountShow(amount: _discount.toStringAsFixed(2))}',
-                          valueColor: const Color(0xFF2E7D32),
+                          valueColor: AppThemeData.accent500,
                           dark: dark,
                         ),
                       Padding(

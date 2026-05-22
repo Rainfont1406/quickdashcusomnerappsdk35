@@ -40,6 +40,7 @@ import 'package:emartconsumer/model/inbox_model.dart';
 import 'package:emartconsumer/model/notification_model.dart';
 import 'package:emartconsumer/model/offer_model.dart';
 import 'package:emartconsumer/model/on_boarding_model.dart';
+import 'package:emartconsumer/model/PhonePaySettingData.dart';
 import 'package:emartconsumer/model/payment_model/mid_trans.dart';
 import 'package:emartconsumer/model/payment_model/orange_money.dart';
 import 'package:emartconsumer/model/payment_model/xendit.dart';
@@ -782,6 +783,17 @@ class FireStoreUtils {
       try {
         MidTrans payStackSettingData = MidTrans.fromJson(payStackData.data() ?? {});
         UserPreference.setMidTransData(payStackSettingData);
+      } catch (error) {
+        print(error.toString());
+      }
+    });
+  }
+
+  static getPhonePaySettingData() async {
+    firestore.collection(Setting).doc("phonepe_settings").get().then((data) {
+      try {
+        PhonePaySettingData settingData = PhonePaySettingData.fromJson(data.data() ?? {});
+        UserPreference.setPhonePayData(settingData);
       } catch (error) {
         print(error.toString());
       }

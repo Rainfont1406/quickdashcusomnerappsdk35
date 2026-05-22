@@ -4,6 +4,7 @@ import 'package:emartconsumer/model/FlutterWaveSettingDataModel.dart';
 import 'package:emartconsumer/model/MercadoPagoSettingsModel.dart';
 import 'package:emartconsumer/model/PayFastSettingData.dart';
 import 'package:emartconsumer/model/PayStackSettingsModel.dart';
+import 'package:emartconsumer/model/PhonePaySettingData.dart';
 import 'package:emartconsumer/model/payment_model/mid_trans.dart';
 import 'package:emartconsumer/model/payment_model/orange_money.dart';
 import 'package:emartconsumer/model/payment_model/xendit.dart';
@@ -189,6 +190,21 @@ class UserPreference {
   }
 
 
+
+  static String phonePaySettings = "phonePaySettings";
+
+  static setPhonePayData(PhonePaySettingData phonePaySettingData) async {
+    final jsonData = jsonEncode(phonePaySettingData);
+    await preferences.setString(phonePaySettings, jsonData);
+  }
+
+  static PhonePaySettingData getPhonePayData() {
+    final String? jsonData = preferences.getString(phonePaySettings);
+    if (jsonData != null) {
+      return PhonePaySettingData.fromJson(jsonDecode(jsonData));
+    }
+    return PhonePaySettingData();
+  }
 
   static const _paymentId = "paymentId";
 

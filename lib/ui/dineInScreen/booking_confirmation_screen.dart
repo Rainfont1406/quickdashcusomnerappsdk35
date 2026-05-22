@@ -25,7 +25,7 @@ class BookingConfirmationScreen extends StatelessWidget {
         flexibleSpace: Container(
           decoration: const BoxDecoration(
             gradient: LinearGradient(
-              colors: [Color(0xFFFF8A50), Color(0xFFFFB07F)],
+              colors: [AppThemeData.primary600, AppThemeData.primary400],
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
             ),
@@ -48,14 +48,14 @@ class BookingConfirmationScreen extends StatelessWidget {
               height: 100,
               decoration: BoxDecoration(
                 gradient: const LinearGradient(
-                  colors: [Color(0xFF4CAF50), Color(0xFF81C784)],
+                  colors: [AppThemeData.primary600, AppThemeData.primary400],
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
                 ),
                 shape: BoxShape.circle,
                 boxShadow: [
                   BoxShadow(
-                    color: const Color(0xFF4CAF50).withOpacity(0.35),
+                    color: AppThemeData.primary500.withOpacity(0.35),
                     blurRadius: 24,
                     offset: const Offset(0, 8),
                   ),
@@ -106,7 +106,7 @@ class BookingConfirmationScreen extends StatelessWidget {
                     padding: const EdgeInsets.all(16),
                     decoration: const BoxDecoration(
                       gradient: LinearGradient(
-                        colors: [Color(0xFFFF8A50), Color(0xFFFFB07F)],
+                        colors: [AppThemeData.primary600, AppThemeData.primary400],
                         begin: Alignment.centerLeft,
                         end: Alignment.centerRight,
                       ),
@@ -298,7 +298,7 @@ class BookingConfirmationScreen extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: 8),
       child: Row(
         children: [
-          Icon(icon, size: 18, color: const Color(0xFFFF8A50)),
+          Icon(icon, size: 18, color: AppThemeData.primary500),
           const SizedBox(width: 12),
           Text(
             label,

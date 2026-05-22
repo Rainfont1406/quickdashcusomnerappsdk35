@@ -345,6 +345,7 @@ class OnBoardingState extends State<OnBoarding> with TickerProviderStateMixin {
                 FireStoreUtils.getOrangeMoneySettingData();
                 FireStoreUtils.getXenditSettingData();
                 FireStoreUtils.getMidTransSettingData();
+                FireStoreUtils.getPhonePaySettingData();
 
                 MyAppState.currentUser!.fcmToken =
                     await FireStoreUtils.firebaseMessaging.getToken() ?? '';

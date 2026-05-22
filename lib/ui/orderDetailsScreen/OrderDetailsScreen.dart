@@ -419,7 +419,7 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
       badgeIcon = Icons.restaurant_rounded;
     } else if (order.orderType == "Takeaway") {
       orderTypeLabel = 'DineAway (Takeaway)';
-      badgeColor = const Color(0xFFD97706);
+      badgeColor = AppThemeData.accent500;
       badgeIcon = Icons.shopping_bag_outlined;
     } else if (order.orderType == "Bill Pay") {
       orderTypeLabel = 'DineAway (Bill Pay)';
@@ -431,7 +431,7 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
       badgeIcon = Icons.delivery_dining_rounded;
     } else {
       orderTypeLabel = 'Takeaway';
-      badgeColor = const Color(0xFFD97706);
+      badgeColor = AppThemeData.accent500;
       badgeIcon = Icons.shopping_bag_outlined;
     }
 

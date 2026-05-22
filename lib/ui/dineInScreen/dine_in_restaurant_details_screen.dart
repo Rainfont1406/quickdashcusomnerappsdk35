@@ -39,10 +39,16 @@ class _DineInRestaurantDetailsScreenState
   // Slot booking count cache: slotId → count
   Map<String, int> _slotBookingCounts = {};
   bool _loadingSlotCounts = false;
+  String? _slotLoadError;
 
-  static const Color _accent = Color(0xFFFF8A50);
-  static const LinearGradient _accentGrad = LinearGradient(
-    colors: [Color(0xFFFF8A50), Color(0xFFFFB07F)],
+  // Orange — used only for price/offer emphasis (rating, total, pricing chip)
+  static const Color _accent = AppThemeData.accent500;
+
+  // Purple — used for all interactive/brand elements (AppBar, selected states,
+  // action buttons, section icons, stepper controls)
+  static const Color _primary = AppThemeData.primary500;
+  static const LinearGradient _primaryGrad = LinearGradient(
+    colors: [AppThemeData.primary500, AppThemeData.primary400],
     begin: Alignment.topLeft,
     end: Alignment.bottomRight,
   );
@@ -59,30 +65,55 @@ class _DineInRestaurantDetailsScreenState
 
   // ── Slot Availability ──────────────────────────────────────────
   Future<void> _loadSlotCounts() async {
-    setState(() => _loadingSlotCounts = true);
-    final Map<String, int> counts = {};
-    for (final slot in widget.vendorModel.bookingSlots) {
-      counts[slot.id] = await FireStoreUtils.getSlotBookingCount(
-        vendorId: widget.vendorModel.id,
-        slotId: slot.id,
-        date: _selectedDate,
-      );
-    }
-    if (mounted) setState(() {
-      _slotBookingCounts = counts;
-      _loadingSlotCounts = false;
-      // Reset slot selection if it became unavailable
-      if (_selectedSlotId.isNotEmpty) {
-        final slot = widget.vendorModel.bookingSlots
-            .where((s) => s.id == _selectedSlotId)
-            .firstOrNull;
-        if (slot == null || !_isSlotAvailable(slot)) {
-          _selectedSlotId = '';
-          _selectedSlotStart = '';
-          _selectedSlotEnd = '';
-        }
-      }
+    if (!mounted) return;
+    setState(() {
+      _loadingSlotCounts = true;
+      _slotLoadError = null;
     });
+    try {
+      final slots = widget.vendorModel.bookingSlots;
+      // Fetch all slot counts in parallel — much faster than sequential awaits
+      // and a single failure won't silently block the rest.
+      final results = await Future.wait(
+        slots.map(
+          (slot) => FireStoreUtils.getSlotBookingCount(
+            vendorId: widget.vendorModel.id,
+            slotId: slot.id,
+            date: _selectedDate,
+          ).timeout(
+            const Duration(seconds: 15),
+            onTimeout: () => 0, // treat timeout as 0 bookings so slot stays selectable
+          ),
+        ),
+      );
+      if (!mounted) return;
+      final counts = <String, int>{};
+      for (var i = 0; i < slots.length; i++) {
+        counts[slots[i].id] = results[i];
+      }
+      setState(() {
+        _slotBookingCounts = counts;
+        _loadingSlotCounts = false;
+        _slotLoadError = null;
+        // Auto-deselect a slot that became unavailable
+        if (_selectedSlotId.isNotEmpty) {
+          final slot = widget.vendorModel.bookingSlots
+              .where((s) => s.id == _selectedSlotId)
+              .firstOrNull;
+          if (slot == null || !_isSlotAvailable(slot)) {
+            _selectedSlotId = '';
+            _selectedSlotStart = '';
+            _selectedSlotEnd = '';
+          }
+        }
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loadingSlotCounts = false;
+        _slotLoadError = 'Could not load time slots. Please check your connection and try again.'.tr();
+      });
+    }
   }
 
   bool _isSlotAvailable(BookingSlotModel slot) {
@@ -165,7 +196,7 @@ class _DineInRestaurantDetailsScreenState
     return SliverAppBar(
       expandedHeight: 240,
       pinned: true,
-      backgroundColor: _accent,
+      backgroundColor: _primary,
       foregroundColor: Colors.white,
       flexibleSpace: FlexibleSpaceBar(
         background: Stack(
@@ -189,7 +220,7 @@ class _DineInRestaurantDetailsScreenState
               child: Container(
                 decoration: BoxDecoration(
                   gradient: LinearGradient(
-                    colors: [Colors.transparent, Colors.black.withOpacity(0.6)],
+                    colors: [Colors.transparent, Colors.black.withValues(alpha: 0.6)],
                     begin: Alignment.topCenter,
                     end: Alignment.bottomCenter,
                   ),
@@ -241,16 +272,16 @@ class _DineInRestaurantDetailsScreenState
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                 decoration: BoxDecoration(
-                    color: const Color(0xFFFFF3E0), borderRadius: BorderRadius.circular(6)),
+                    color: AppThemeData.accent50, borderRadius: BorderRadius.circular(6)),
                 child: Row(
                   children: [
-                    const Icon(Icons.star_rounded, size: 14, color: Color(0xFFFF8A50)),
+                    const Icon(Icons.star_rounded, size: 14, color: AppThemeData.accent500),
                     const SizedBox(width: 3),
                     Text(rating.toStringAsFixed(1),
                         style: const TextStyle(
                             fontSize: 12,
                             fontWeight: FontWeight.w600,
-                            color: Color(0xFFE65100))),
+                            color: AppThemeData.accent600)),
                   ],
                 ),
               ),
@@ -266,7 +297,7 @@ class _DineInRestaurantDetailsScreenState
                       : 'Flexible Booking'.tr(),
                   vendor.bookingType == 'slot_based'
                       ? const Color(0xFF4CAF50)
-                      : const Color(0xFF2196F3)),
+                      : AppThemeData.primary500),
               const SizedBox(width: 8),
               if (vendor.bookingPricingModel != 'free')
                 _chip(_pricingLabel(vendor), _accent),
@@ -317,7 +348,7 @@ class _DineInRestaurantDetailsScreenState
                     width: 52,
                     margin: const EdgeInsets.only(right: 10),
                     decoration: BoxDecoration(
-                      gradient: isSelected ? _accentGrad : null,
+                      gradient: isSelected ? _primaryGrad : null,
                       color: isSelected ? null : (dark ? Colors.grey.shade800 : Colors.grey.shade100),
                       borderRadius: BorderRadius.circular(14),
                     ),
@@ -374,14 +405,37 @@ class _DineInRestaurantDetailsScreenState
               style: TextStyle(fontSize: 12, color: dark ? Colors.white54 : Colors.grey.shade500)),
           const SizedBox(height: 14),
           if (_loadingSlotCounts)
-            const Center(child: CircularProgressIndicator())
+            _SlotGridSkeleton(dark: dark)
+          else if (_slotLoadError != null)
+            _buildSlotError(dark)
           else if (enabledSlots.isEmpty)
             Center(
               child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Text('No slots available for this date'.tr(),
-                    style: TextStyle(
-                        color: dark ? Colors.white54 : Colors.grey.shade500, fontSize: 13)),
+                padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 12),
+                child: Column(
+                  children: [
+                    Icon(Icons.event_busy_rounded,
+                        size: 36,
+                        color: dark ? Colors.white30 : Colors.grey.shade400),
+                    const SizedBox(height: 10),
+                    Text(
+                      'No slots available for this date'.tr(),
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w500,
+                          color: dark ? Colors.white54 : Colors.grey.shade600),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Try selecting a different date'.tr(),
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                          fontSize: 12,
+                          color: dark ? Colors.white38 : Colors.grey.shade500),
+                    ),
+                  ],
+                ),
               ),
             )
           else
@@ -407,7 +461,7 @@ class _DineInRestaurantDetailsScreenState
                     width: (MediaQuery.of(context).size.width - 72) / 2,
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      gradient: selected ? _accentGrad : null,
+                      gradient: selected ? _primaryGrad : null,
                       color: selected
                           ? null
                           : available
@@ -485,7 +539,7 @@ class _DineInRestaurantDetailsScreenState
                 initialTime: TimeOfDay.fromDateTime(earliest),
                 builder: (context, child) => Theme(
                   data: ThemeData.light().copyWith(
-                      colorScheme: const ColorScheme.light(primary: _accent)),
+                      colorScheme: const ColorScheme.light(primary: _primary)),
                   child: child!,
                 ),
               );
@@ -495,18 +549,18 @@ class _DineInRestaurantDetailsScreenState
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
                 color: _selectedTime.isNotEmpty
-                    ? _accent.withOpacity(0.08)
+                    ? _primary.withValues(alpha: 0.08)
                     : (dark ? Colors.grey.shade800 : Colors.grey.shade100),
                 borderRadius: BorderRadius.circular(12),
                 border: Border.all(
-                  color: _selectedTime.isNotEmpty ? _accent : Colors.transparent,
+                  color: _selectedTime.isNotEmpty ? _primary : Colors.transparent,
                   width: 2,
                 ),
               ),
               child: Row(
                 children: [
                   Icon(Icons.access_time_rounded,
-                      color: _selectedTime.isNotEmpty ? _accent : Colors.grey.shade400, size: 22),
+                      color: _selectedTime.isNotEmpty ? _primary : Colors.grey.shade400, size: 22),
                   const SizedBox(width: 12),
                   Expanded(
                     child: Text(
@@ -515,7 +569,7 @@ class _DineInRestaurantDetailsScreenState
                         fontSize: 16,
                         fontWeight: _selectedTime.isNotEmpty ? FontWeight.w700 : FontWeight.normal,
                         color: _selectedTime.isNotEmpty
-                            ? _accent
+                            ? _primary
                             : (dark ? Colors.white38 : Colors.grey.shade400),
                       ),
                     ),
@@ -603,11 +657,11 @@ class _DineInRestaurantDetailsScreenState
         width: 48,
         height: 48,
         decoration: BoxDecoration(
-          gradient: enabled ? _accentGrad : null,
+          gradient: enabled ? _primaryGrad : null,
           color: enabled ? null : Colors.grey.shade300,
           shape: BoxShape.circle,
           boxShadow: enabled
-              ? [BoxShadow(color: _accent.withOpacity(0.3), blurRadius: 8, offset: const Offset(0, 3))]
+              ? [BoxShadow(color: _primary.withValues(alpha: 0.3), blurRadius: 8, offset: const Offset(0, 3))]
               : null,
         ),
         child: Icon(icon, color: enabled ? Colors.white : Colors.grey.shade500, size: 22),
@@ -733,7 +787,7 @@ class _DineInRestaurantDetailsScreenState
           color: dark ? const Color(0xff1a1a1a) : Colors.white,
           boxShadow: [
             BoxShadow(
-                color: Colors.black.withOpacity(0.1), blurRadius: 20, offset: const Offset(0, -4)),
+                color: Colors.black.withValues(alpha: 0.1), blurRadius: 20, offset: const Offset(0, -4)),
           ],
         ),
         child: SizedBox(
@@ -745,11 +799,11 @@ class _DineInRestaurantDetailsScreenState
               padding: EdgeInsets.zero,
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
               elevation: _canConfirm ? 6 : 0,
-              shadowColor: _accent.withOpacity(0.4),
+              shadowColor: _primary.withValues(alpha: 0.4),
             ),
             child: Ink(
               decoration: BoxDecoration(
-                gradient: _canConfirm ? _accentGrad : null,
+                gradient: _canConfirm ? _primaryGrad : null,
                 borderRadius: BorderRadius.circular(16),
               ),
               child: Container(
@@ -879,13 +933,82 @@ class _DineInRestaurantDetailsScreenState
     );
   }
 
+  // ─── Slot error state (retry button) ─────────────────────────
+  Widget _buildSlotError(bool dark) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: Column(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: AppThemeData.primary500.withValues(alpha: 0.10),
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(Icons.wifi_off_rounded,
+                size: 32, color: AppThemeData.primary500),
+          ),
+          const SizedBox(height: 10),
+          Text(
+            _slotLoadError ?? 'Failed to load slots'.tr(),
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 13,
+              color: dark ? Colors.white60 : Colors.grey.shade600,
+              height: 1.4,
+            ),
+          ),
+          const SizedBox(height: 14),
+          GestureDetector(
+            onTap: _loadSlotCounts,
+            child: Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 22, vertical: 10),
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(
+                  colors: [AppThemeData.primary500, AppThemeData.primary400],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                borderRadius: BorderRadius.circular(24),
+                boxShadow: [
+                  BoxShadow(
+                    color: AppThemeData.primary500.withValues(alpha: 0.35),
+                    blurRadius: 10,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.refresh_rounded,
+                      size: 16, color: Colors.white),
+                  const SizedBox(width: 6),
+                  Text(
+                    'Retry'.tr(),
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      color: Colors.white,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   // ─── Shared helpers ───────────────────────────────────────────
   BoxDecoration _cardDeco(bool dark) => BoxDecoration(
         color: dark ? const Color(0xff1e1e1e) : Colors.white,
         borderRadius: BorderRadius.circular(16),
         boxShadow: [
           BoxShadow(
-              color: Colors.black.withOpacity(dark ? 0.25 : 0.06),
+              color: Colors.black.withValues(alpha: dark ? 0.25 : 0.06),
               blurRadius: 10,
               offset: const Offset(0, 3)),
         ],
@@ -895,7 +1018,7 @@ class _DineInRestaurantDetailsScreenState
         children: [
           Container(
             padding: const EdgeInsets.all(6),
-            decoration: BoxDecoration(gradient: _accentGrad, borderRadius: BorderRadius.circular(8)),
+            decoration: BoxDecoration(gradient: _primaryGrad, borderRadius: BorderRadius.circular(8)),
             child: Icon(icon, size: 15, color: Colors.white),
           ),
           const SizedBox(width: 10),
@@ -910,10 +1033,10 @@ class _DineInRestaurantDetailsScreenState
   Widget _chip(String text, Color color) => Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
         decoration: BoxDecoration(
-            color: color.withOpacity(0.12), borderRadius: BorderRadius.circular(20)),
+            color: color.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(20)),
         child: Text(text,
             style: TextStyle(
-                fontSize: 11, fontWeight: FontWeight.w600, color: color.withOpacity(0.9))),
+                fontSize: 11, fontWeight: FontWeight.w600, color: color.withValues(alpha: 0.9))),
       );
 
   String _pricingLabel(VendorModel vendor) {
@@ -993,7 +1116,7 @@ class _BookingSkeletonLoaderState extends State<_BookingSkeletonLoader>
             const SizedBox(height: 16),
             Text(
               'Validating & Confirming Booking...'.tr(),
-              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: Color(0xFFFF8A50)),
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: AppThemeData.primary500),
             ),
           ],
         ),
@@ -1012,6 +1135,77 @@ class _BookingSkeletonLoaderState extends State<_BookingSkeletonLoader>
           borderRadius: BorderRadius.circular(8),
         ),
       ),
+    );
+  }
+}
+
+// ─── Slot Grid Shimmer Skeleton ─────────────────────────────────────────
+// Shown while slot counts are being fetched from Firestore.
+class _SlotGridSkeleton extends StatefulWidget {
+  final bool dark;
+  const _SlotGridSkeleton({required this.dark});
+
+  @override
+  State<_SlotGridSkeleton> createState() => _SlotGridSkeletonState();
+}
+
+class _SlotGridSkeletonState extends State<_SlotGridSkeleton>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1200),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  Widget _box(double w, double h, double t) {
+    final base = widget.dark ? const Color(0xFF2C2C2C) : const Color(0xFFECECEC);
+    final hi = widget.dark ? const Color(0xFF424242) : const Color(0xFFF8F8F8);
+    return Container(
+      width: w,
+      height: h,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        gradient: LinearGradient(
+          colors: [base, hi, base],
+          stops: const [0.0, 0.5, 1.0],
+          begin: Alignment(-2.0 + 2.6 * t, 0),
+          end: Alignment(-0.4 + 2.6 * t, 0),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _ctrl,
+      builder: (context, _) {
+        final t = _ctrl.value;
+        final w = (MediaQuery.of(context).size.width - 72) / 2;
+        return Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          children: List.generate(4, (i) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _box(w, 80, t),
+              ],
+            );
+          }),
+        );
+      },
     );
   }
 }

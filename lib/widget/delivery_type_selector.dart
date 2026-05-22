@@ -8,12 +8,16 @@ class DeliveryTypeSelector extends StatefulWidget {
   final String selectedValue;
   final Function(String) onValueChanged;
   final bool isDarkMode;
+  final bool allowDelivery;
+  final bool allowDineaway;
 
   const DeliveryTypeSelector({
     Key? key,
     required this.selectedValue,
     required this.onValueChanged,
     required this.isDarkMode,
+    this.allowDelivery = true,
+    this.allowDineaway = true,
   }) : super(key: key);
 
   @override
@@ -41,6 +45,8 @@ class _DeliveryTypeSelectorState extends State<DeliveryTypeSelector> {
       builder: (sheetCtx) => _SectionSelectorSheet(
         selectedValue: widget.selectedValue,
         isDarkMode: widget.isDarkMode,
+        allowDelivery: widget.allowDelivery,
+        allowDineaway: widget.allowDineaway,
         onSelect: (newValue) async {
           // Same section — nothing to do
           if (newValue == widget.selectedValue) return;
@@ -61,6 +67,101 @@ class _DeliveryTypeSelectorState extends State<DeliveryTypeSelector> {
             widget.onValueChanged(newValue);
           }
         },
+        onUnavailableTap: (unavailableValue) {
+          _showUnavailableDialog(rootCtx, unavailableValue);
+        },
+      ),
+    );
+  }
+
+  void _showUnavailableDialog(BuildContext ctx, String value) {
+    final isDark = widget.isDarkMode;
+    final isDelivery = value == 'Delivery'.tr();
+    showDialog(
+      context: ctx,
+      barrierDismissible: true,
+      builder: (dialogCtx) => Dialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        backgroundColor: isDark ? AppThemeData.darkBgSecondary : Colors.white,
+        insetPadding: const EdgeInsets.symmetric(horizontal: 24),
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 64,
+                height: 64,
+                decoration: BoxDecoration(
+                  color: AppThemeData.error500.withValues(alpha: 0.12),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  isDelivery
+                      ? Icons.delivery_dining_rounded
+                      : Icons.restaurant_menu_rounded,
+                  color: AppThemeData.error500,
+                  size: 28,
+                ),
+              ),
+              const SizedBox(height: 16),
+              Text(
+                isDelivery
+                    ? 'Delivery Unavailable'.tr()
+                    : 'DineAway Unavailable'.tr(),
+                style: TextStyle(
+                  fontSize: 17,
+                  fontFamily: AppThemeData.bold,
+                  fontWeight: FontWeight.w700,
+                  color: isDark
+                      ? AppThemeData.darkTextPrimary
+                      : AppThemeData.neutral900,
+                ),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                isDelivery
+                    ? 'One or more items in your cart are not available for Delivery. Please remove those items or choose DineAway.'
+                        .tr()
+                    : 'One or more items in your cart are not available for DineAway. Please remove those items or choose Delivery.'
+                        .tr(),
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 14,
+                  fontFamily: AppThemeData.regular,
+                  color: isDark
+                      ? AppThemeData.darkTextSecondary
+                      : AppThemeData.neutral600,
+                  height: 1.5,
+                ),
+              ),
+              const SizedBox(height: 24),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () => Navigator.of(dialogCtx).pop(),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppThemeData.primary500,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    elevation: 0,
+                  ),
+                  child: Text(
+                    'Got It'.tr(),
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontFamily: AppThemeData.semiBold,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -155,11 +256,17 @@ class _SectionSelectorSheet extends StatelessWidget {
   final String selectedValue;
   final bool isDarkMode;
   final Future<void> Function(String) onSelect;
+  final bool allowDelivery;
+  final bool allowDineaway;
+  final void Function(String) onUnavailableTap;
 
   const _SectionSelectorSheet({
     required this.selectedValue,
     required this.isDarkMode,
     required this.onSelect,
+    required this.allowDelivery,
+    required this.allowDineaway,
+    required this.onUnavailableTap,
   });
 
   @override
@@ -250,99 +357,156 @@ class _SectionSelectorSheet extends StatelessWidget {
                 final subtitle = opt['subtitle'] as String;
                 final icon = opt['icon'] as IconData;
                 final isSelected = selectedValue == val;
+                final isDeliveryOption = val == 'Delivery'.tr();
+                final isAllowed =
+                    isDeliveryOption ? allowDelivery : allowDineaway;
 
                 return GestureDetector(
                   onTap: () {
                     Navigator.of(context).pop();
-                    onSelect(val);
+                    if (!isAllowed) {
+                      onUnavailableTap(val);
+                    } else {
+                      onSelect(val);
+                    }
                   },
-                  child: Container(
-                    margin: const EdgeInsets.only(bottom: 12),
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: isSelected
-                          ? AppThemeData.primary500.withValues(alpha: 0.08)
-                          : (dark
-                              ? AppThemeData.darkBgTertiary
-                              : AppThemeData.neutral50),
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(
-                        color: isSelected
-                            ? AppThemeData.primary500
-                            : (dark
-                                ? AppThemeData.darkBorderSecondary
-                                : AppThemeData.neutral200),
-                        width: isSelected ? 1.5 : 1,
-                      ),
-                    ),
-                    child: Row(
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.all(10),
-                          decoration: BoxDecoration(
-                            color: isSelected
-                                ? AppThemeData.primary500
+                  child: Opacity(
+                    opacity: isAllowed ? 1.0 : 0.55,
+                    child: Container(
+                      margin: const EdgeInsets.only(bottom: 12),
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: !isAllowed
+                            ? (dark
+                                ? AppThemeData.darkBgPrimary
+                                : AppThemeData.neutral100)
+                            : isSelected
+                                ? AppThemeData.primary500.withValues(alpha: 0.08)
                                 : (dark
-                                    ? AppThemeData.darkBgSecondary
-                                    : AppThemeData.neutral100),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: Icon(
-                            icon,
-                            size: 22,
-                            color: isSelected
-                                ? Colors.white
-                                : (dark
-                                    ? AppThemeData.darkTextSecondary
-                                    : AppThemeData.neutral600),
-                          ),
+                                    ? AppThemeData.darkBgTertiary
+                                    : AppThemeData.neutral50),
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(
+                          color: !isAllowed
+                              ? (dark
+                                  ? AppThemeData.darkBorderSecondary
+                                  : AppThemeData.neutral200)
+                              : isSelected
+                                  ? AppThemeData.primary500
+                                  : (dark
+                                      ? AppThemeData.darkBorderSecondary
+                                      : AppThemeData.neutral200),
+                          width: isSelected && isAllowed ? 1.5 : 1,
                         ),
-                        const SizedBox(width: 14),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                label,
-                                style: TextStyle(
-                                  fontSize: 15,
-                                  fontFamily: AppThemeData.semiBold,
-                                  fontWeight: FontWeight.w600,
-                                  color: isSelected
+                      ),
+                      child: Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.all(10),
+                            decoration: BoxDecoration(
+                              color: !isAllowed
+                                  ? (dark
+                                      ? AppThemeData.darkBgTertiary
+                                      : AppThemeData.neutral200)
+                                  : isSelected
                                       ? AppThemeData.primary500
                                       : (dark
-                                          ? AppThemeData.darkTextPrimary
-                                          : AppThemeData.neutral900),
+                                          ? AppThemeData.darkBgSecondary
+                                          : AppThemeData.neutral100),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Icon(
+                              icon,
+                              size: 22,
+                              color: !isAllowed
+                                  ? (dark
+                                      ? AppThemeData.neutral600
+                                      : AppThemeData.neutral400)
+                                  : isSelected
+                                      ? Colors.white
+                                      : (dark
+                                          ? AppThemeData.darkTextSecondary
+                                          : AppThemeData.neutral600),
+                            ),
+                          ),
+                          const SizedBox(width: 14),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  label,
+                                  style: TextStyle(
+                                    fontSize: 15,
+                                    fontFamily: AppThemeData.semiBold,
+                                    fontWeight: FontWeight.w600,
+                                    color: !isAllowed
+                                        ? (dark
+                                            ? AppThemeData.darkTextTertiary
+                                            : AppThemeData.neutral400)
+                                        : isSelected
+                                            ? AppThemeData.primary500
+                                            : (dark
+                                                ? AppThemeData.darkTextPrimary
+                                                : AppThemeData.neutral900),
+                                  ),
                                 ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  !isAllowed
+                                      ? 'Not available for cart items'.tr()
+                                      : subtitle,
+                                  style: TextStyle(
+                                    fontSize: 13,
+                                    fontFamily: AppThemeData.regular,
+                                    fontStyle: !isAllowed
+                                        ? FontStyle.italic
+                                        : FontStyle.normal,
+                                    color: !isAllowed
+                                        ? AppThemeData.error500
+                                            .withValues(alpha: 0.75)
+                                        : (dark
+                                            ? AppThemeData.darkTextTertiary
+                                            : AppThemeData.neutral500),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          if (!isAllowed)
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: AppThemeData.error500
+                                    .withValues(alpha: 0.12),
+                                borderRadius: BorderRadius.circular(6),
                               ),
-                              const SizedBox(height: 2),
-                              Text(
-                                subtitle,
+                              child: Text(
+                                'N/A'.tr(),
                                 style: TextStyle(
-                                  fontSize: 13,
-                                  fontFamily: AppThemeData.regular,
-                                  color: dark
-                                      ? AppThemeData.darkTextTertiary
-                                      : AppThemeData.neutral500,
+                                  fontSize: 11,
+                                  fontFamily: AppThemeData.semiBold,
+                                  fontWeight: FontWeight.w600,
+                                  color: AppThemeData.error500,
                                 ),
                               ),
-                            ],
-                          ),
-                        ),
-                        if (isSelected)
-                          Container(
-                            padding: const EdgeInsets.all(3),
-                            decoration: const BoxDecoration(
-                              color: AppThemeData.primary500,
-                              shape: BoxShape.circle,
+                            )
+                          else if (isSelected)
+                            Container(
+                              padding: const EdgeInsets.all(3),
+                              decoration: const BoxDecoration(
+                                color: AppThemeData.primary500,
+                                shape: BoxShape.circle,
+                              ),
+                              child: const Icon(
+                                Icons.check,
+                                size: 14,
+                                color: Colors.white,
+                              ),
                             ),
-                            child: const Icon(
-                              Icons.check,
-                              size: 14,
-                              color: Colors.white,
-                            ),
-                          ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 );

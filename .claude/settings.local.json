@@ -30,7 +30,10 @@
       "Read(//tmp/**)",
       "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\hp\\\\Downloads\\\\QuickDashCustomerApp\\\\QuickDashCustomerApp\\\\lib\\\\ui\" -Recurse -File -Filter \"*.dart\")",
       "Bash(Sort-Object FullName)",
-      "Bash(Get-ChildItem -Path lib -Recurse -Filter \"*.dart\")"
+      "Bash(Get-ChildItem -Path lib -Recurse -Filter \"*.dart\")",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\hp\\\\Downloads\\\\QuickdashMergeApps\\\\QuickDashCustomerApp\" -Recurse -Directory -ErrorAction SilentlyContinue)",
+      "Bash(xargs grep -l \"class DeliveryTypeSelector\")",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\hp\\\\Downloads\\\\QuickdashMergeApps\\\\QuickDashCustomerApp\" -Directory)"
     ],
     "deny": [],
     "ask": []

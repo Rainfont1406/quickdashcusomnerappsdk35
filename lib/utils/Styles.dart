@@ -20,10 +20,10 @@ class Styles {
       appBarTheme: isDarkTheme
           ? AppBarTheme(backgroundColor: AppThemeData.surfaceDark, centerTitle: true, iconTheme: IconThemeData(color: Colors.white), elevation: 0)
           : AppBarTheme(
-              titleTextStyle: TextStyle(color: AppThemeData.primary500),
-              backgroundColor: Colors.white,
+              titleTextStyle: TextStyle(color: Colors.white, fontFamily: AppThemeData.semiBold),
+              backgroundColor: AppThemeData.primary500,
               centerTitle: true,
-              iconTheme: IconThemeData(color: Colors.black),
+              iconTheme: IconThemeData(color: Colors.white),
               elevation: 0),
       textSelectionTheme: TextSelectionThemeData(selectionColor: isDarkTheme ? Colors.white : Colors.black),
       fontFamily: AppThemeData.regular,

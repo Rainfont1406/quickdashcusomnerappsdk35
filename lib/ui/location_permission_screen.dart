@@ -68,6 +68,7 @@ class _LocationPermissionScreenState extends State<LocationPermissionScreen> {
       await FireStoreUtils.getOrangeMoneySettingData();
       await FireStoreUtils.getXenditSettingData();
       await FireStoreUtils.getMidTransSettingData();
+      await FireStoreUtils.getPhonePaySettingData();
 
       SectionModel firstSection = sectionList[0];
       AppThemeData.primary300 = Color(int.parse(firstSection.color!.replaceFirst("#", "0xff")));

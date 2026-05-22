@@ -2175,7 +2175,7 @@ class _WalletCard extends StatelessWidget {
   }
 
   Widget _buildSkeleton(bool dark) {
-    final baseColor = dark ? const Color(0xFF1A1A2E) : const Color(0xFF0C306E);
+    final baseColor = dark ? const Color(0xFF1A0A2E) : AppColors.primary500;
     return Container(
       margin: const EdgeInsets.fromLTRB(16, 20, 16, 8),
       height: 168,
@@ -2201,13 +2201,13 @@ class _WalletCard extends StatelessWidget {
       margin: const EdgeInsets.fromLTRB(16, 20, 16, 8),
       decoration: BoxDecoration(
         gradient: const LinearGradient(
-          colors: [Color(0xFF0C306E), Color(0xFF1A4FA8)],
+          colors: [AppColors.primary600, AppColors.primary400],
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
         ),
         borderRadius: BorderRadius.circular(22),
         boxShadow: [
-          BoxShadow(color: const Color(0xFF0C306E).withValues(alpha: 0.38), blurRadius: 20, offset: const Offset(0, 8)),
+          BoxShadow(color: AppColors.primary500.withValues(alpha: 0.38), blurRadius: 20, offset: const Offset(0, 8)),
         ],
       ),
       child: Stack(

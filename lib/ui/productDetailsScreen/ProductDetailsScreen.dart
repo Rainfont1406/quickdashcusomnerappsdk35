@@ -389,19 +389,19 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
     // A product has explicit order-type restrictions only when at least one flag is set.
     // Legacy products (all flags false) are treated as unrestricted.
     final bool _hasRestrictions = widget.productModel.deliveryOption ||
-        widget.productModel.dineAwayTakeaway ||
+        widget.productModel.takeaway ||
         widget.productModel.dineIn;
     final bool _isDineaway = selectedOrderType == "Takeaway".tr() ||
         selectedOrderType == "Dineaway".tr();
 
     bool showAddButton = !_hasRestrictions ||
-        (_isDineaway && widget.productModel.dineAwayTakeaway) ||
+        (_isDineaway && widget.productModel.dineAway) ||
         (selectedOrderType == "Delivery".tr() && widget.productModel.deliveryOption);
 
     String unavailabilityMessage = "";
     if (_hasRestrictions) {
-      if (_isDineaway && !widget.productModel.dineAwayTakeaway) {
-        unavailabilityMessage = "This product is not available for DineAway/Takeaway";
+      if (_isDineaway && !widget.productModel.dineAway) {
+        unavailabilityMessage = "This product is not available for DineAway";
       } else if (selectedOrderType == "Delivery".tr() &&
           !widget.productModel.deliveryOption) {
         unavailabilityMessage = "This product is not available for Delivery";
@@ -598,7 +598,11 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                           fontSize: 24,
                                           letterSpacing: 0.5,
                                           fontFamily: AppThemeData.bold,
-                                          color: AppThemeData.primary500,
+                                          color: (widget.productModel.disPrice != null &&
+                                              widget.productModel.disPrice != "" &&
+                                              widget.productModel.disPrice != "0")
+                                              ? AppThemeData.accent500
+                                              : AppThemeData.primary500,
                                         ),
                                       ),
                                       if (widget.productModel.disPrice != null &&
@@ -623,7 +627,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                           return Container(
                                             padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
                                             decoration: BoxDecoration(
-                                              color: Colors.green.shade600,
+                                              color: AppThemeData.accent500,
                                               borderRadius: BorderRadius.circular(6),
                                             ),
                                             child: Text(
@@ -3863,7 +3867,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
   }
   addtocard(ProductModel productModel, bool isIncerementQuantity) async {
     // ── Service compatibility gate — hard-block before any cart work ──────────
-    if (productModel.deliveryOption || productModel.dineAwayTakeaway || productModel.dineIn) {
+    if (productModel.deliveryOption || productModel.takeaway || productModel.dineIn) {
       final orderType = selectedOrderType ?? 'Delivery';
       final isDineawayMode = orderType == 'Takeaway' || orderType == 'Dineaway';
       if (!isDineawayMode && !productModel.deliveryOption) {
@@ -3871,7 +3875,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
           SnackBar(content: Text('Delivery order is not available.'.tr())));
         return;
       }
-      if (isDineawayMode && !productModel.dineAwayTakeaway) {
+      if (isDineawayMode && !productModel.dineAway) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('DineAway order is not available.'.tr())));
         return;
@@ -4044,9 +4048,9 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
           'service_perm_${widget.productModel.id}',
           jsonEncode({
             'delivery': widget.productModel.deliveryOption,
-            'dineaway': widget.productModel.takeaway,
+            'dineaway': widget.productModel.dineAway,
             'dineIn': widget.productModel.dineIn,
-            'takeaway': widget.productModel.dineAwayTakeaway,
+            'takeaway': widget.productModel.takeaway,
           }),
         );
         // Remove old schema key if present

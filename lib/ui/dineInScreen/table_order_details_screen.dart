@@ -63,8 +63,8 @@ class _TableOrderDetailsScreenState extends State<TableOrderDetailsScreen> {
     return _StatusInfo(
       label: 'Awaiting Confirmation'.tr(),
       subtitle: 'The restaurant is reviewing your request. This may take a few minutes.'.tr(),
-      color: const Color(0xFFE65100),
-      bg: const Color(0xFFFFF3E0),
+      color: AppThemeData.accent600,
+      bg: AppThemeData.accent50,
       icon: Icons.hourglass_empty_rounded,
     );
   }

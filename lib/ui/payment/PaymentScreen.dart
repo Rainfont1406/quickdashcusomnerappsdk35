@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:crypto/crypto.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/main.dart';
@@ -11,6 +12,7 @@ import 'package:emartconsumer/model/CodModel.dart';
 import 'package:emartconsumer/model/FlutterWaveSettingDataModel.dart';
 import 'package:emartconsumer/model/PayFastSettingData.dart';
 import 'package:emartconsumer/model/PayStackSettingsModel.dart';
+import 'package:emartconsumer/model/PhonePaySettingData.dart';
 import 'package:emartconsumer/model/ProductModel.dart';
 import 'package:emartconsumer/model/createRazorPayOrderModel.dart';
 import 'package:emartconsumer/model/payStackURLModel.dart';
@@ -22,6 +24,7 @@ import 'package:emartconsumer/model/stripeSettingData.dart';
 import 'package:emartconsumer/model/topupTranHistory.dart';
 import 'package:emartconsumer/payment/midtrans_screen.dart';
 import 'package:emartconsumer/payment/orangePayScreen.dart';
+import 'package:emartconsumer/payment/phonePayScreen.dart';
 import 'package:emartconsumer/payment/xenditModel.dart';
 import 'package:emartconsumer/payment/xenditScreen.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
@@ -159,6 +162,7 @@ class PaymentScreenState extends State<PaymentScreen> {
   MidTrans? midTransModel;
   OrangeMoney? orangeMoneyModel;
   Xendit? xenditModel;
+  PhonePaySettingData? phonePayData;
 
   bool walletBalanceError = false;
 
@@ -193,6 +197,7 @@ class PaymentScreenState extends State<PaymentScreen> {
     midTransModel = await UserPreference.getMidTransData();
     orangeMoneyModel = await UserPreference.getOrangeData();
     xenditModel = await UserPreference.getXenditData();
+    phonePayData = UserPreference.getPhonePayData();
 
     ///set Refrence for FlutterWave
     setRef();
@@ -437,7 +442,36 @@ class PaymentScreenState extends State<PaymentScreen> {
                       stripe = false; payTm = false; mercadoPago = false; flutterWave = false;
                       razorPay = false; paypal = false; payFast = false; payStack = false;
                       orange = false; Midtrans = true; xendit = false; wallet = false;
-                      codPay = false; selectedRadioTile = v!;
+                      phonePay = false; codPay = false; selectedRadioTile = v!;
+                    }),
+                  ),
+                ),
+                Visibility(
+                  visible: phonePayData?.isEnabled ?? false,
+                  child: _pmCard(
+                    dark: isDarkMode(context), isSelected: phonePay, value: 'PhonePe',
+                    label: 'PhonePe'.tr(),
+                    logo: Container(
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF5F259F),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                      child: const Text(
+                        'PhonePe',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 9,
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: -0.3,
+                        ),
+                      ),
+                    ),
+                    onChanged: (v) => setState(() {
+                      stripe = false; payTm = false; mercadoPago = false; flutterWave = false;
+                      razorPay = false; paypal = false; payFast = false; payStack = false;
+                      orange = false; Midtrans = false; xendit = false; wallet = false;
+                      phonePay = true; codPay = false; selectedRadioTile = v!;
                     }),
                   ),
                 ),
@@ -615,7 +649,7 @@ class PaymentScreenState extends State<PaymentScreen> {
       onTap: () => setState(() {
         mercadoPago = false; payStack = false; flutterWave = false; razorPay = false;
         wallet = true; codPay = false; payTm = false; payFast = false; paypal = false;
-        stripe = false; xendit = false; orange = false; Midtrans = false;
+        stripe = false; xendit = false; orange = false; Midtrans = false; phonePay = false;
         selectedRadioTile = 'Wallet';
       }),
       child: AnimatedContainer(
@@ -721,7 +755,7 @@ class PaymentScreenState extends State<PaymentScreen> {
       onTap: () => setState(() {
         mercadoPago = false; payStack = false; flutterWave = false; razorPay = false;
         wallet = false; codPay = true; payTm = false; payFast = false; paypal = false;
-        stripe = false; xendit = false; orange = false; Midtrans = false;
+        stripe = false; xendit = false; orange = false; Midtrans = false; phonePay = false;
         selectedRadioTile = 'cod';
       }),
       child: AnimatedContainer(
@@ -955,6 +989,9 @@ class PaymentScreenState extends State<PaymentScreen> {
     } else if (xendit) {
       paymentType = 'xendit';
       xenditPayment(context, widget.total);
+    } else if (phonePay) {
+      paymentType = 'phonepe';
+      _phonePayMakePayment(context: context, amount: widget.total);
     } else {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text('Select Payment Method'.tr(), textAlign: TextAlign.center, style: const TextStyle(color: Colors.white)),
@@ -1051,6 +1088,7 @@ class PaymentScreenState extends State<PaymentScreen> {
   bool xendit = false;
   bool orange = false;
   bool Midtrans = false;
+  bool phonePay = false;
   bool isProcessingOrder = false;
   bool isOrderPlaced = false;
   bool _isPlacingOrder = false; // debounce for placeOrder()
@@ -2006,6 +2044,103 @@ class PaymentScreenState extends State<PaymentScreen> {
     } catch (e) {
       return XenditModel();
     }
+  }
+
+  // ── PhonePe Payment ──────────────────────────────────────────────────────────
+
+  Future<void> _phonePayMakePayment({
+    required BuildContext context,
+    required double amount,
+  }) async {
+    showLoadingAlert();
+    try {
+      final paymentUrl = await _createPhonePayOrder(amount: amount);
+      Navigator.pop(_scaffoldKey.currentContext!); // dismiss loading
+      if (paymentUrl == null || paymentUrl.isEmpty) {
+        ShowToastDialog.showToast(
+            'Something went wrong, please contact admin.'.tr());
+        setState(() => isProcessingOrder = false);
+        return;
+      }
+      final bool isDone = await Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => PhonePayScreen(
+            initialUrl: paymentUrl,
+            redirectUrl: phonePayData?.redirectUrl ?? '',
+          ),
+        ),
+      );
+      if (isDone) {
+        ShowToastDialog.showToast('Payment Successful!!'.tr());
+        final orderId = await generateOrderId();
+        if (widget.take_away!) {
+          placeOrder(_scaffoldKey.currentContext!, oid: orderId);
+        } else {
+          toCheckOutScreen(true, _scaffoldKey.currentContext!, oid: orderId);
+        }
+      } else {
+        setState(() => isProcessingOrder = false);
+        ShowToastDialog.showToast('Payment Unsuccessful!!'.tr());
+      }
+    } catch (e) {
+      Navigator.pop(_scaffoldKey.currentContext!);
+      setState(() => isProcessingOrder = false);
+      ShowToastDialog.showToast(
+          'Something went wrong, please contact admin.'.tr());
+    }
+  }
+
+  Future<String?> _createPhonePayOrder({required double amount}) async {
+    final merchantId = phonePayData?.merchantId ?? '';
+    final saltKey = phonePayData?.saltKey ?? '';
+    final saltIndex = phonePayData?.saltIndex ?? 1;
+    final isSandbox = phonePayData?.isSandbox ?? true;
+    final redirectUrl = phonePayData?.redirectUrl ?? '';
+    final callbackUrl = phonePayData?.callbackUrl ?? '';
+
+    final merchantTransactionId = 'MT${DateTime.now().millisecondsSinceEpoch}';
+    final amountInPaise = (amount * 100).toInt();
+
+    final payload = {
+      'merchantId': merchantId,
+      'merchantTransactionId': merchantTransactionId,
+      'merchantUserId': 'MUID_${MyAppState.currentUser!.userID}',
+      'amount': amountInPaise,
+      'redirectUrl': redirectUrl,
+      'redirectMode': 'REDIRECT',
+      'callbackUrl': callbackUrl,
+      'mobileNumber': MyAppState.currentUser!.phoneNumber ?? '',
+      'paymentInstrument': {'type': 'PAY_PAGE'},
+    };
+
+    final payloadJson = jsonEncode(payload);
+    final base64Payload = base64Encode(utf8.encode(payloadJson));
+    final checksumInput = base64Payload + '/pg/v1/pay' + saltKey;
+    final checksum =
+        '${sha256.convert(utf8.encode(checksumInput)).toString()}###$saltIndex';
+
+    final apiUrl = isSandbox
+        ? 'https://api-preprod.phonepe.com/apis/pg-sandbox/pg/v1/pay'
+        : 'https://api.phonepe.com/apis/hermes/pg/v1/pay';
+
+    final response = await http.post(
+      Uri.parse(apiUrl),
+      headers: {
+        'Content-Type': 'application/json',
+        'X-VERIFY': checksum,
+      },
+      body: jsonEncode({'request': base64Payload}),
+    );
+
+    if (response.statusCode == 200 || response.statusCode == 201) {
+      final data = jsonDecode(response.body);
+      if (data['success'] == true) {
+        return data['data']?['instrumentResponse']?['redirectInfo']?['url']
+            as String?;
+      }
+    }
+    return null;
   }
 
   placeOrder(BuildContext buildContext, {required String oid}) async {

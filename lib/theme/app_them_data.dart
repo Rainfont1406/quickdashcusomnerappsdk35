@@ -1,17 +1,26 @@
 import 'package:flutter/material.dart';
 
 class AppThemeData {
-  // New Primary Color Scale from UI Guidelines (Blue)
-  static const Color primary50 = Color(0xFFEDEEF4);
-  static const Color primary100 = Color(0xFFD3D6E9);
-  static const Color primary200 = Color(0xFFA8ADD4);
-  static Color primary300 = Color(0xFF7C84BF);
-  static const Color primary400 = Color(0xFF505BA9);
-  static const Color primary500 = Color(0xFF0C306E);
-  static const Color primary600 = Color(0xFF0A2359);
-  static const Color primary700 = Color(0xFF081946);
-  static const Color primary800 = Color(0xFF060F34);
-  static const Color primary900 = Color(0xFF040622);
+  // Primary Color Scale — Purple (QuickDash brand)
+  static const Color primary50 = Color(0xFFF5F3FF);
+  static const Color primary100 = Color(0xFFEDE9FE);
+  static const Color primary200 = Color(0xFFDDD6FE);
+  static Color primary300 = Color(0xFFC4B5FD); // mutable — overwritten from Firestore
+  static const Color primary400 = Color(0xFFA78BFA);
+  static const Color primary500 = Color(0xFF7C3AED); // main brand purple
+  static const Color primary600 = Color(0xFF6D28D9);
+  static const Color primary700 = Color(0xFF5B21B6);
+  static const Color primary800 = Color(0xFF4C1D95);
+  static const Color primary900 = Color(0xFF2E1065);
+
+  // Orange Accent Scale — for offers, discounts, pricing & promotional CTAs
+  static const Color accent50 = Color(0xFFFFF7ED);
+  static const Color accent100 = Color(0xFFFFEDD5);
+  static const Color accent200 = Color(0xFFFED7AA);
+  static const Color accent300 = Color(0xFFFDBA74);
+  static const Color accent400 = Color(0xFFFB923C);
+  static const Color accent500 = Color(0xFFF97316); // main orange accent
+  static const Color accent600 = Color(0xFFEA580C);
 
   // New Neutral Color Scale from UI Guidelines
   static const Color neutral0 = Color(0xFFFFFFFF);

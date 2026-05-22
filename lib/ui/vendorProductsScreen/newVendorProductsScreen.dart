@@ -96,18 +96,35 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
   List a = [];
   List<ProductModel> allProductList = [];
   List<ProductModel> productList = [];
+  List<ProductModel> _rawDineAwayProducts = [];
+  String _dineAwaySubMode = 'Takeaway'; // 'Takeaway' or 'Dining'
+
+  bool get _isDineAwayMode =>
+      foodType == 'Takeaway' ||
+      foodType == 'Dineaway' ||
+      foodType == 'Takeaway'.tr() ||
+      foodType == 'Dineaway'.tr();
+
+  void _applyDineAwaySubMode() {
+    if (_dineAwaySubMode == 'Takeaway') {
+      allProductList = _rawDineAwayProducts.where((p) => p.takeaway).toList();
+    } else {
+      allProductList = _rawDineAwayProducts.where((p) => p.dineIn).toList();
+    }
+    productList = List.from(allProductList);
+  }
 
   void getFoodType() async {
     SharedPreferences sp = await SharedPreferences.getInstance();
     foodType = sp.getString("foodType") ?? "Delivery".tr();
 
     print("------->${foodType}");
-    if (foodType == "Takeaway") {
+    if (_isDineAwayMode) {
       await fireStoreUtils
           .getVendorProductsTakeAWay(widget.vendorModel.id)
           .then((value) {
-        allProductList = value;
-        productList = value;
+        _rawDineAwayProducts = value.where((p) => p.takeaway || p.dineIn).toList();
+        _applyDineAwaySubMode();
         getVendorCategoryById();
         setState(() {});
       });
@@ -783,6 +800,12 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                     ],
                                   ),
 
+                            // DineAway Mode Selector
+                            if (_isDineAwayMode) ...[
+                              const SizedBox(height: 16),
+                              _buildDineAwayModeCard(context),
+                            ],
+
                             // Menu Section
                             const SizedBox(height: 16),
                             Container(
@@ -1174,6 +1197,174 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
           .toList();
     }
     setState(() {});
+  }
+
+  Widget _buildDineAwayModeCard(BuildContext context) {
+    final isDark = isDarkMode(context);
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(14),
+        color: isDark ? AppThemeData.darkBgTertiary : Colors.white,
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(isDark ? 0.2 : 0.06),
+            blurRadius: 10,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      ),
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                Icons.restaurant_menu_rounded,
+                size: 15,
+                color: AppThemeData.primary500,
+              ),
+              const SizedBox(width: 6),
+              Text(
+                'Order Mode'.tr(),
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  fontFamily: AppThemeData.semiBold,
+                  color: isDark ? AppThemeData.grey200 : AppThemeData.grey800,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: GestureDetector(
+                  onTap: () {
+                    if (_dineAwaySubMode != 'Takeaway') {
+                      setState(() {
+                        _dineAwaySubMode = 'Takeaway';
+                        isVag = false;
+                        isNonVag = false;
+                        _nutritionFilterType = null;
+                        _nutritionFilterLevel = null;
+                        allProductList = _rawDineAwayProducts
+                            .where((p) => p.takeaway)
+                            .toList();
+                        productList = List.from(allProductList);
+                      });
+                      getVendorCategoryById();
+                    }
+                  },
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 200),
+                    padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(24),
+                      color: _dineAwaySubMode == 'Takeaway'
+                          ? AppThemeData.primary500
+                          : isDark ? AppThemeData.grey800 : AppThemeData.grey100,
+                      border: Border.all(
+                        color: _dineAwaySubMode == 'Takeaway'
+                            ? AppThemeData.primary500
+                            : isDark ? AppThemeData.grey700 : AppThemeData.grey300,
+                        width: 1.5,
+                      ),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          Icons.takeout_dining_outlined,
+                          size: 16,
+                          color: _dineAwaySubMode == 'Takeaway'
+                              ? Colors.white
+                              : isDark ? AppThemeData.grey400 : AppThemeData.grey500,
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          'Takeaway'.tr(),
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w700,
+                            fontFamily: AppThemeData.semiBold,
+                            color: _dineAwaySubMode == 'Takeaway'
+                                ? Colors.white
+                                : isDark ? AppThemeData.grey300 : AppThemeData.grey700,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: GestureDetector(
+                  onTap: () {
+                    if (_dineAwaySubMode != 'DineIn') {
+                      setState(() {
+                        _dineAwaySubMode = 'Dining';
+                        isVag = false;
+                        isNonVag = false;
+                        _nutritionFilterType = null;
+                        _nutritionFilterLevel = null;
+                        allProductList = _rawDineAwayProducts
+                            .where((p) => p.dineIn)
+                            .toList();
+                        productList = List.from(allProductList);
+                      });
+                      getVendorCategoryById();
+                    }
+                  },
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 200),
+                    padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(24),
+                      color: _dineAwaySubMode == 'Dining'
+                          ? AppThemeData.primary500
+                          : isDark ? AppThemeData.grey800 : AppThemeData.grey100,
+                      border: Border.all(
+                        color: _dineAwaySubMode == 'Dining'
+                            ? AppThemeData.primary500
+                            : isDark ? AppThemeData.grey700 : AppThemeData.grey300,
+                        width: 1.5,
+                      ),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
+                          Icons.chair_outlined,
+                          size: 16,
+                          color: _dineAwaySubMode == 'Dining'
+                              ? Colors.white
+                              : isDark ? AppThemeData.grey400 : AppThemeData.grey500,
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          'Dining'.tr(),
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w700,
+                            fontFamily: AppThemeData.semiBold,
+                            color: _dineAwaySubMode == 'Dining'
+                                ? Colors.white
+                                : isDark ? AppThemeData.grey300 : AppThemeData.grey700,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _buildNutritionFilterSection(BuildContext context) {
@@ -1760,13 +1951,12 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                       }
 
                       final bool _pHasRestrictions = productModel.deliveryOption ||
-                          productModel.dineAwayTakeaway || productModel.dineIn;
-                      final bool _pIsDineaway = foodType == "Takeaway".tr() ||
-                          foodType == "Dineaway".tr();
+                          productModel.takeaway || productModel.dineIn;
 
                       bool showAddButton = !_pHasRestrictions ||
-                          (_pIsDineaway && productModel.dineAwayTakeaway) ||
-                          (foodType == "Delivery".tr() && productModel.deliveryOption);
+                          (_isDineAwayMode && _dineAwaySubMode == 'Takeaway' && productModel.takeaway) ||
+                          (_isDineAwayMode && _dineAwaySubMode == 'Dining' && productModel.dineIn) ||
+                          (!_isDineAwayMode && productModel.deliveryOption);
 
                       bool hasVariants = productModel.itemAttributes != null &&
                           productModel.itemAttributes!.attributes!.isNotEmpty;
@@ -1774,10 +1964,11 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
 
                       String unavailabilityMessage = "";
                       if (_pHasRestrictions) {
-                        if (_pIsDineaway && !productModel.dineAwayTakeaway) {
-                          unavailabilityMessage = "Not available for DineAway/Takeaway";
-                        } else if (foodType == "Delivery".tr() &&
-                            !productModel.deliveryOption) {
+                        if (_isDineAwayMode && _dineAwaySubMode == 'Takeaway' && !productModel.takeaway) {
+                          unavailabilityMessage = "Not available for Takeaway";
+                        } else if (_isDineAwayMode && _dineAwaySubMode == 'Dining' && !productModel.dineIn) {
+                          unavailabilityMessage = "Not available for Dining";
+                        } else if (!_isDineAwayMode && !productModel.deliveryOption) {
                           unavailabilityMessage = "Not available for Delivery";
                         }
                       }
@@ -1928,7 +2119,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                                           fontWeight:
                                                               FontWeight.bold,
                                                           color: AppThemeData
-                                                              .primary500,
+                                                              .accent500,
                                                         ),
                                                       ),
                                                       const SizedBox(width: 5),
@@ -1962,7 +2153,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                                         horizontal: 5,
                                                         vertical: 2),
                                                 decoration: BoxDecoration(
-                                                  color: AppThemeData.success400
+                                                  color: AppThemeData.accent500
                                                       .withOpacity(0.15),
                                                   borderRadius:
                                                       BorderRadius.circular(4),
@@ -1971,7 +2162,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                                   "${calculateDiscount(price, disPrice)}% OFF",
                                                   style: TextStyle(
                                                     color:
-                                                        AppThemeData.success400,
+                                                        AppThemeData.accent500,
                                                     fontSize: 10,
                                                     fontWeight: FontWeight.bold,
                                                   ),
@@ -2734,15 +2925,19 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
     if (!_cartReady) return;
 
     // ── Service compatibility gate — hard-block before any cart work ──────────
-    if (productModel.deliveryOption || productModel.dineAwayTakeaway || productModel.dineIn) {
-      final isDineawayMode = foodType == 'Dineaway' || foodType == 'Takeaway';
-      if (!isDineawayMode && !productModel.deliveryOption) {
+    if (productModel.deliveryOption || productModel.takeaway || productModel.dineIn) {
+      if (!_isDineAwayMode && !productModel.deliveryOption) {
         ShowToastDialog.showToast('Delivery order is not available.'.tr());
         return;
       }
-      if (isDineawayMode && !productModel.dineAwayTakeaway) {
-        ShowToastDialog.showToast('DineAway order is not available.'.tr());
-        return;
+      if (_isDineAwayMode) {
+        final allowed =
+            (_dineAwaySubMode == 'Takeaway' && productModel.takeaway) ||
+            (_dineAwaySubMode == 'Dining' && productModel.dineIn);
+        if (!allowed) {
+          ShowToastDialog.showToast('DineAway order is not available.'.tr());
+          return;
+        }
       }
     }
 
@@ -2846,9 +3041,9 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
           'service_perm_${productModel.id}',
           jsonEncode({
             'delivery': productModel.deliveryOption,
-            'dineaway': productModel.takeaway,
+            'dineaway': productModel.dineAway,
             'dineIn': productModel.dineIn,
-            'takeaway': productModel.dineAwayTakeaway,
+            'takeaway': productModel.takeaway,
           }),
         );
         await sp.remove('dineaway_perm_${productModel.id}');

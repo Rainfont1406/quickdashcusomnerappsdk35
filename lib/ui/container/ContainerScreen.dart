@@ -839,18 +839,12 @@ class _ContainerScreen extends State<ContainerScreen> {
                         ? true
                         : false,
                     backgroundColor: isDarkMode(context)
-                        ? _drawerSelection == DrawerSelection.Home
-                            ? Colors.black
-                            : Colors.black
-                        : _drawerSelection == DrawerSelection.Home
-                            ? Colors.black
-                            : Colors.white,
+                        ? Colors.black
+                        : AppThemeData.primary500,
                     leading: (_drawerSelection == DrawerSelection.Cart)
                         ? IconButton(
-                            icon: Icon(Icons.arrow_back,
-                                color: isDarkMode(context)
-                                    ? Colors.white
-                                    : Colors.black),
+                            icon: const Icon(Icons.arrow_back,
+                                color: Colors.white),
                             onPressed: () {
                               if (Navigator.of(context).canPop()) {
                                 Navigator.of(context).pop();
@@ -874,12 +868,10 @@ class _ContainerScreen extends State<ContainerScreen> {
                               },
                               child: ClipOval(
                                 child: Container(
-                                  color: isDarkMode(context)
-                                      ? AppThemeData.grey700
-                                      : AppThemeData.grey200,
-                                  child: Padding(
-                                    padding: const EdgeInsets.all(8.0),
-                                    child: Icon(Icons.menu),
+                                  color: Colors.white.withValues(alpha: 0.15),
+                                  child: const Padding(
+                                    padding: EdgeInsets.all(8.0),
+                                    child: Icon(Icons.menu, color: Colors.white),
                                   ),
                                 ),
                               ),
@@ -887,14 +879,9 @@ class _ContainerScreen extends State<ContainerScreen> {
                           ),
                     title: Text(
                       _appBarTitle,
-                      style: TextStyle(
+                      style: const TextStyle(
                           fontSize: 18,
-                          color: _drawerSelection == DrawerSelection.Wallet ||
-                                  _drawerSelection == DrawerSelection.Home
-                              ? Colors.white
-                              : isDarkMode(context)
-                                  ? Colors.white
-                                  : Colors.black,
+                          color: Colors.white,
                           fontWeight: FontWeight.normal),
                     ),
                     actions: _drawerSelection == DrawerSelection.Wallet ||
@@ -911,11 +898,7 @@ class _ContainerScreen extends State<ContainerScreen> {
                                       image: const AssetImage(
                                           "assets/images/qrscan.png"),
                                       width: 20,
-                                      color: isDarkMode(context) ||
-                                              _drawerSelection ==
-                                                  DrawerSelection.Home
-                                          ? Colors.white
-                                          : Colors.black,
+                                      color: Colors.white,
                                     ),
                                     onPressed: () {
                                       push(
@@ -931,11 +914,7 @@ class _ContainerScreen extends State<ContainerScreen> {
                                       image: const AssetImage(
                                           "assets/images/search.png"),
                                       width: 20,
-                                      color: isDarkMode(context) ||
-                                              _drawerSelection ==
-                                                  DrawerSelection.Home
-                                          ? Colors.white
-                                          : null,
+                                      color: Colors.white,
                                     ),
                                     onPressed: () {
                                       push(context, const SearchScreen());
@@ -950,11 +929,7 @@ class _ContainerScreen extends State<ContainerScreen> {
                                       image: const AssetImage(
                                           "assets/images/map.png"),
                                       width: 20,
-                                      color: isDarkMode(context) ||
-                                              _drawerSelection ==
-                                                  DrawerSelection.Home
-                                          ? Colors.white
-                                          : const Color(0xFF333333),
+                                      color: Colors.white,
                                     ),
                                     onPressed: () => push(
                                       context,
@@ -971,11 +946,7 @@ class _ContainerScreen extends State<ContainerScreen> {
                                       image: const AssetImage(
                                           "assets/images/search.png"),
                                       width: 20,
-                                      color: isDarkMode(context) ||
-                                              _drawerSelection ==
-                                                  DrawerSelection.Home
-                                          ? Colors.white
-                                          : null,
+                                      color: Colors.white,
                                     ),
                                     onPressed: () {
                                       push(context, const SearchScreen());
@@ -994,11 +965,7 @@ class _ContainerScreen extends State<ContainerScreen> {
                                             image: const AssetImage(
                                                 "assets/images/cart.png"),
                                             width: 20,
-                                            color: isDarkMode(context) ||
-                                                    _drawerSelection ==
-                                                        DrawerSelection.Home
-                                                ? Colors.white
-                                                : null,
+                                            color: Colors.white,
                                           ),
                                           StreamBuilder<List<CartProduct>>(
                                             stream: cartDatabase.watchProducts,
@@ -1018,10 +985,9 @@ class _ContainerScreen extends State<ContainerScreen> {
                                                   child: Container(
                                                     padding:
                                                         const EdgeInsets.all(4),
-                                                    decoration: BoxDecoration(
+                                                    decoration: const BoxDecoration(
                                                       shape: BoxShape.circle,
-                                                      color: AppThemeData
-                                                          .primary500,
+                                                      color: AppThemeData.accent500,
                                                     ),
                                                     constraints:
                                                         const BoxConstraints(

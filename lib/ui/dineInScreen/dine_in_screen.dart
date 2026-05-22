@@ -114,7 +114,7 @@ class _DineInScreenState extends State<DineInScreen> {
       ),
       decoration: const BoxDecoration(
         gradient: LinearGradient(
-          colors: [Color(0xFFFF8A50), Color(0xFFFFB07F)],
+          colors: [AppThemeData.primary600, AppThemeData.primary400],
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
         ),
@@ -245,7 +245,7 @@ class _DineInScreenState extends State<DineInScreen> {
                         decoration: BoxDecoration(
                           color: isSlotBased
                               ? const Color(0xFF4CAF50).withOpacity(0.12)
-                              : const Color(0xFF2196F3).withOpacity(0.12),
+                              : AppThemeData.primary500.withOpacity(0.12),
                           borderRadius: BorderRadius.circular(20),
                         ),
                         child: Text(
@@ -255,7 +255,7 @@ class _DineInScreenState extends State<DineInScreen> {
                             fontWeight: FontWeight.w600,
                             color: isSlotBased
                                 ? const Color(0xFF388E3C)
-                                : const Color(0xFF1565C0),
+                                : AppThemeData.primary600,
                           ),
                         ),
                       ),
@@ -300,19 +300,19 @@ class _DineInScreenState extends State<DineInScreen> {
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
                         decoration: BoxDecoration(
-                          color: const Color(0xFFFFF3E0),
+                          color: AppThemeData.accent50,
                           borderRadius: BorderRadius.circular(6),
                         ),
                         child: Row(
                           children: [
-                            const Icon(Icons.star_rounded, size: 13, color: Color(0xFFFF8A50)),
+                            const Icon(Icons.star_rounded, size: 13, color: AppThemeData.accent500),
                             const SizedBox(width: 3),
                             Text(
                               rating.toStringAsFixed(1),
                               style: const TextStyle(
                                 fontSize: 12,
                                 fontWeight: FontWeight.w600,
-                                color: Color(0xFFE65100),
+                                color: AppThemeData.accent600,
                               ),
                             ),
                           ],
@@ -341,7 +341,7 @@ class _DineInScreenState extends State<DineInScreen> {
                           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
                           decoration: BoxDecoration(
                             gradient: const LinearGradient(
-                              colors: [Color(0xFFFF8A50), Color(0xFFFFB07F)],
+                              colors: [AppThemeData.primary500, AppThemeData.primary400],
                               begin: Alignment.centerLeft,
                               end: Alignment.centerRight,
                             ),

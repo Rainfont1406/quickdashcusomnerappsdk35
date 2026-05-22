@@ -25,10 +25,10 @@ class ProductModel {
   bool veg;
   bool nonveg;
   String? disPrice = "0";
-  bool takeaway;
+  bool dineAway;       // combined flag: product is available in DineAway service
   bool deliveryOption;
-  bool dineIn;
-  bool dineAwayTakeaway;
+  bool dineIn;         // DineAway sub-option: dine-in
+  bool takeaway;       // DineAway sub-option: takeaway
   List<dynamic> addOnsTitle = [];
   List<dynamic> addOnsPrice = [];
   String? addon_name;
@@ -67,10 +67,10 @@ class ProductModel {
     this.addon_name,
     this.addon_price,
     this.disPrice,
-    this.takeaway = false,
+    this.dineAway = false,
     this.deliveryOption = false,
     this.dineIn = false,
-    this.dineAwayTakeaway = false,
+    this.takeaway = false,
     this.reviewsCount = 0,
     this.reviewsSum = 0,
     this.addOnsPrice = const [],
@@ -84,27 +84,9 @@ class ProductModel {
     this.productAttributes = const [],
     this.nutritionEnabled = false,
     this.nutritionInfo,
-    /*this.lstSizeCustom = const [],
-        this.lstAddOnsCustom = const []*/
   });
 
-  /*: this.geoFireData = geoFireData ??
-            GeoFireData(
-              geohash: "",
-              geoPoint: GeoPoint(0.0, 0.0),
-            );*/
-
   factory ProductModel.fromJson(Map<String, dynamic> parsedJson) {
-    /*  List<AddSizeDemo> lstSizeCustom = parsedJson.containsKey('lstSizeCustom')
-        ? List<AddSizeDemo>.from((parsedJson['lstSizeCustom'] as List<dynamic>)
-        .map((e) => AddSizeDemo.fromJson(e))).toList()
-        : [].cast<AddSizeDemo>();
-
-    List<AddAddonsDemo> lstAddOnsCustom = parsedJson.containsKey('lstAddOnsCustom')
-        ? List<AddAddonsDemo>.from((parsedJson['lstAddOnsCustom'] as List<dynamic>)
-        .map((e) => AddAddonsDemo.fromJson(e))).toList()
-        : [].cast<AddAddonsDemo>();*/
-
     return ProductModel(
       categoryID: parsedJson['categoryID'] ?? '',
       brandID: parsedJson['brandID'] ?? '',
@@ -133,15 +115,29 @@ class ProductModel {
         }
         return <String, dynamic>{};
       })(),
-      takeaway: parsedJson['takeawayOption'] ?? false,
+      // dineAway: true if product supports any DineAway mode (takeaway or dine-in)
+      dineAway: (() {
+        final dineAwayMap = parsedJson['DineAway'] as Map<String, dynamic>?;
+        if (dineAwayMap != null) {
+          return (dineAwayMap['takeaway'] as bool? ?? false) ||
+                 (dineAwayMap['dineIn'] as bool? ?? false);
+        }
+        return parsedJson['takeawayOption'] as bool? ?? false;
+      })(),
       deliveryOption: parsedJson['deliveryOption'] ?? false,
-      dineIn: parsedJson['dineIn'] ?? false,
-      dineAwayTakeaway: (() {
+      // dineIn: DineAway.dineIn sub-option
+      dineIn: (() {
+        final dineAwayMap = parsedJson['DineAway'] as Map<String, dynamic>?;
+        if (dineAwayMap != null) return dineAwayMap['dineIn'] as bool? ?? false;
+        return parsedJson['dineIn'] as bool? ?? false;
+      })(),
+      // takeaway: DineAway.takeaway sub-option
+      takeaway: (() {
+        final dineAwayMap = parsedJson['DineAway'] as Map<String, dynamic>?;
+        if (dineAwayMap != null) return dineAwayMap['takeaway'] as bool? ?? false;
         final stored = parsedJson['dineAwayTakeaway'] as bool?;
         if (stored != null) return stored;
-        final hadTakeaway = parsedJson['takeawayOption'] ?? false;
-        final hadDineIn = parsedJson['dineIn'] ?? false;
-        return hadTakeaway == true && hadDineIn == false;
+        return parsedJson['takeawayOption'] as bool? ?? false;
       })(),
       addOnsPrice: parsedJson['addOnsPrice'] ?? [],
       addOnsTitle: parsedJson['addOnsTitle'] ?? [],
@@ -165,8 +161,6 @@ class ProductModel {
       })(),
       addon_name: parsedJson["addon_name"] ?? "",
       addon_price: parsedJson["addon_price"] ?? "",
-      //lstSizeCustom: lstSizeCustom,//parse dJson['lstSizeCustom'] != null?parsedJson['lstSizeCustom']:<AddSizeDemo>[] ,
-      //lstAddOnsCustom: lstAddOnsCustom,//parsedJson['lstAddOnsCustom']!=null?parsedJson['lstAddOnsCustom']:<AddAddonsDemo>[],
       veg: parsedJson['veg'] ?? false,
       itemAttributes: (() {
         final raw = parsedJson['item_attribute'];
@@ -228,10 +222,11 @@ class ProductModel {
       'fats': fats,
       'veg': veg,
       'nonveg': nonveg,
-      'takeawayOption': takeaway,
+      'DineAway': {
+        'takeaway': takeaway,
+        'dineIn': dineIn,
+      },
       'deliveryOption': deliveryOption,
-      'dineIn': dineIn,
-      'dineAwayTakeaway': dineAwayTakeaway,
       'disPrice': disPrice,
       "addOnsTitle": addOnsTitle,
       "addOnsPrice": addOnsPrice,
@@ -248,8 +243,6 @@ class ProductModel {
       'product_attributes': productAttributes.map((e) => e.toJson()).toList(),
       'nutrition_enabled': nutritionEnabled,
       'nutrition_info': nutritionInfo?.toJson(),
-      //"lstAddOnsCustom":this.lstAddOnsCustom.map((e) => e.toJson()).toList(),
-      //"lstSizeCustom":this.lstSizeCustom.map((e) => e.toJson()).toList()
     };
   }
 }

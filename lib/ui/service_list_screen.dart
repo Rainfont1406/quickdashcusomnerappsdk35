@@ -60,6 +60,7 @@ class _ServiceListScreenState extends State<ServiceListScreen> {
       FireStoreUtils.getOrangeMoneySettingData();
       FireStoreUtils.getXenditSettingData();
       FireStoreUtils.getMidTransSettingData();
+      FireStoreUtils.getPhonePaySettingData();
 
       final currencyValue = await currencyFuture;
       currencyData = currencyValue ?? CurrencyModel(id: "", code: "USD", decimal: 2, isactive: true, name: "US Dollar", symbol: "\$", symbolatright: false);

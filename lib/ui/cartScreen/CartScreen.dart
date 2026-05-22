@@ -17,6 +17,7 @@ import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/deliveryAddressScreen/DeliveryAddressScreen.dart';
+import 'package:emartconsumer/widget/delivery_type_selector.dart';
 
 import 'package:emartconsumer/ui/productDetailsScreen/ProductDetailsScreen.dart';
 import 'package:emartconsumer/ui/vendorProductsScreen/newVendorProductsScreen.dart';
@@ -250,6 +251,111 @@ class _CartScreenState extends State<CartScreen> {
     });
   }
 
+  // ── Service type switcher (used by inline DeliveryTypeSelector in cart) ───────
+  Future<void> _onOrderTypeChanged(String newValue) async {
+    if (selctedOrderTypeValue == newValue) return;
+    final sp = await SharedPreferences.getInstance();
+    await sp.setString('foodType', newValue);
+    setState(() {
+      selctedOrderTypeValue = newValue;
+      selectedDineawayType = null;
+      isDineawaySelected = false;
+      deliveryCharges = '0.0';
+    });
+    if (newValue == 'Delivery' && vendorModel != null) {
+      final km = num.parse(getKm(
+        addressModel.location!,
+        UserLocation(
+          latitude: vendorModel!.latitude,
+          longitude: vendorModel!.longitude,
+        ),
+      ));
+      getDeliveryCharges(km);
+    }
+    _validateCart();
+  }
+
+  // ── Themed dialog for service-type mismatch / blocked options ────────────────
+  void _showServiceMismatchDialog(String title, String message) {
+    final isDark = isDarkMode(context);
+    showDialog(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) => Dialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        backgroundColor: isDark ? AppThemeData.darkBgSecondary : Colors.white,
+        insetPadding: const EdgeInsets.symmetric(horizontal: 24),
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 64,
+                height: 64,
+                decoration: BoxDecoration(
+                  color: AppThemeData.error500.withValues(alpha: 0.12),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(
+                  Icons.block_rounded,
+                  color: AppThemeData.error500,
+                  size: 30,
+                ),
+              ),
+              const SizedBox(height: 16),
+              Text(
+                title,
+                textAlign: TextAlign.center,
+                style: AppTypography.h6.copyWith(
+                  fontWeight: FontWeight.w700,
+                  color: isDark
+                      ? AppThemeData.darkTextPrimary
+                      : AppThemeData.neutral900,
+                ),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                message,
+                textAlign: TextAlign.center,
+                style: AppTypography.bodyMedium.copyWith(
+                  color: isDark
+                      ? AppThemeData.darkTextSecondary
+                      : AppThemeData.neutral600,
+                  height: 1.55,
+                ),
+              ),
+              const SizedBox(height: 24),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () => Navigator.of(ctx).pop(),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppThemeData.primary500,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    elevation: 0,
+                  ),
+                  child: Text(
+                    'Got It'.tr(),
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontFamily: AppThemeData.semiBold,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   String _lastPermCartHash = '';
 
   Future<void> _computeServicePermissions(List<CartProduct> products) async {
@@ -419,6 +525,9 @@ class _CartScreenState extends State<CartScreen> {
 
   Future<void> _validateCart() async {
     if (!mounted || cartProducts.isEmpty) return;
+    // Stamp the hash now so the StreamBuilder doesn't schedule a redundant
+    // re-validation when it rebuilds after _isCartInitialized becomes true.
+    _lastPermCartHash = cartProducts.map((p) => p.id).join(',');
     setState(() {
       _isValidating = true;
       _itemIssues = {};
@@ -471,31 +580,31 @@ class _CartScreenState extends State<CartScreen> {
       }
 
       // ── Aggregate permission flags ──────────────────────────────────────────
-      if (product.deliveryOption || product.takeaway) {
+      if (product.deliveryOption || product.dineAway) {
         _anyServiceConfigured = true;
         if (!product.deliveryOption) _freshAllowDelivery = false;
-        if (!product.takeaway) _freshAllowDineaway = false;
-        if (product.takeaway && (product.dineIn || product.dineAwayTakeaway)) {
+        if (!product.dineAway) _freshAllowDineaway = false;
+        if (product.dineAway && (product.dineIn || product.takeaway)) {
           if (!product.dineIn) _freshAllowDineIn = false;
-          if (!product.dineAwayTakeaway) _freshAllowTakeaway = false;
+          if (!product.takeaway) _freshAllowTakeaway = false;
         }
       }
 
       // ── Service type compatibility ──────────────────────────────────────────
-      if (product.deliveryOption || product.takeaway) {
+      if (product.deliveryOption || product.dineAway) {
         final isDineaway = selctedOrderTypeValue == 'Dineaway';
         bool serviceBlocked = false;
         String serviceMsg = '';
         if (!isDineaway && !product.deliveryOption) {
           serviceMsg = 'Delivery order is not available for this item.'.tr();
           serviceBlocked = true;
-        } else if (isDineaway && !product.takeaway) {
+        } else if (isDineaway && !product.dineAway) {
           serviceMsg = 'DineAway order is not available for this item.'.tr();
           serviceBlocked = true;
         } else if (isDineaway &&
-            product.takeaway &&
-            (product.dineIn || product.dineAwayTakeaway)) {
-          if (selectedDineawayType == 'Takeaway' && !product.dineAwayTakeaway) {
+            product.dineAway &&
+            (product.dineIn || product.takeaway)) {
+          if (selectedDineawayType == 'Takeaway' && !product.takeaway) {
             serviceMsg = 'TakeAway order is not available for this item.'.tr();
             serviceBlocked = true;
           } else if (selectedDineawayType == 'Dining' && !product.dineIn) {
@@ -790,11 +899,19 @@ class _CartScreenState extends State<CartScreen> {
               );
             } else {
               cartProducts = snapshot.data!;
-              // Recompute dineaway permissions whenever cart composition changes
+              // Recompute service permissions whenever cart composition changes
               final cartHash = cartProducts.map((p) => p.id).join(',');
               if (_lastPermCartHash != cartHash) {
                 _lastPermCartHash = cartHash;
-                _computeServicePermissions(cartProducts);
+                if (_isCartInitialized && !_isValidating) {
+                  // Cart items changed after initial load — re-validate from Firestore
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    if (mounted) _validateCart();
+                  });
+                } else {
+                  // Still initialising — use cached SharedPreferences permissions
+                  _computeServicePermissions(cartProducts);
+                }
               }
               if (!isDeliverFound) {
                 getDeliveyData();
@@ -867,7 +984,7 @@ class _CartScreenState extends State<CartScreen> {
                                                 .copyWith(
                                               fontWeight: FontWeight.w500,
                                               color: couponId.isNotEmpty
-                                                  ? AppThemeData.success400
+                                                  ? AppThemeData.accent500
                                                   : (isDarkMode(context)
                                                       ? AppThemeData
                                                           .darkTextTertiary
@@ -924,7 +1041,7 @@ class _CartScreenState extends State<CartScreen> {
                                       child: Container(
                                         decoration: BoxDecoration(
                                           color: couponId.isNotEmpty
-                                              ? AppThemeData.success500
+                                              ? AppThemeData.accent500
                                               : AppThemeData.primary500,
                                           borderRadius:
                                               BorderRadius.circular(10),
@@ -1026,14 +1143,12 @@ class _CartScreenState extends State<CartScreen> {
                             );
                             return;
                           }
-                          // Service restriction — block checkout with specific message
+                          // Service restriction — block checkout with themed dialog
                           final serviceMsg = _serviceRestrictionMessage;
                           if (serviceMsg != null) {
-                            _showTopNotification(
-                              message: serviceMsg,
-                              color: AppThemeData.error500,
-                              icon: Icons.block_rounded,
-                              duration: const Duration(seconds: 4),
+                            _showServiceMismatchDialog(
+                              'Order Cannot Be Placed'.tr(),
+                              serviceMsg,
                             );
                             return;
                           }
@@ -2022,7 +2137,7 @@ class _CartScreenState extends State<CartScreen> {
                       fontWeight: FontWeight.w800,
                       fontSize: 22,
                       letterSpacing: -0.5,
-                      color: AppThemeData.primary500,
+                      color: AppThemeData.accent500,
                     ),
                   ),
                 ],
@@ -2045,7 +2160,7 @@ class _CartScreenState extends State<CartScreen> {
                                 amountShow(amount: subTotal.toString()),
                                 labelColor, valueColor),
                             _billRow('Discount'.tr(), discountDisplay,
-                                labelColor, AppThemeData.success500),
+                                labelColor, AppThemeData.accent500),
                             if (vendorModel != null &&
                                 specialDiscountEnable &&
                                 vendorModel!.specialDiscountEnable &&
@@ -2054,7 +2169,7 @@ class _CartScreenState extends State<CartScreen> {
                                   'Special Discount'.tr(),
                                   '(-${amountShow(amount: specialDiscountAmount.toString())})',
                                   labelColor,
-                                  AppThemeData.success500),
+                                  AppThemeData.accent500),
                             if (selctedOrderTypeValue == 'Delivery')
                               _billRow(
                                   'Delivery Charges'.tr(),
@@ -2084,8 +2199,8 @@ class _CartScreenState extends State<CartScreen> {
                             _billRow(
                                 'Grand Total'.tr(),
                                 amountShow(amount: grandtotal.toString()),
-                                AppThemeData.primary500,
-                                AppThemeData.primary500,
+                                AppThemeData.accent500,
+                                AppThemeData.accent500,
                                 isBold: true),
                           ],
                         ),
@@ -2280,14 +2395,22 @@ class _CartScreenState extends State<CartScreen> {
   Widget _dineawayOption(String title, String subtitle, IconData icon, bool isSelected, {bool enabled = true}) {
     final isDark = isDarkMode(context);
     return GestureDetector(
-      onTap: enabled
-          ? () {
-              setState(() {
-                selectedDineawayType = title;
-                isDineawaySelected = true;
-              });
-            }
-          : null,
+      onTap: () {
+        if (!enabled) {
+          final isDineIn = title == 'Dining';
+          _showServiceMismatchDialog(
+            isDineIn ? 'Dine-In Unavailable'.tr() : 'Takeaway Unavailable'.tr(),
+            isDineIn
+                ? 'One or more items in your cart are not available for Dine-In. Please choose Takeaway or remove those items.'.tr()
+                : 'One or more items in your cart are not available for Takeaway. Please choose Dining or remove those items.'.tr(),
+          );
+          return;
+        }
+        setState(() {
+          selectedDineawayType = title;
+          isDineawaySelected = true;
+        });
+      },
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
         padding: const EdgeInsets.all(14),
@@ -2700,32 +2823,47 @@ class _CartScreenState extends State<CartScreen> {
         children: [
           // Header
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 18, 16, 6),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+            padding: const EdgeInsets.fromLTRB(16, 18, 12, 6),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                Text(
-                  "Your Order".tr(),
-                  style: AppTypography.h5.copyWith(
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: -0.3,
-                    color: dark
-                        ? AppThemeData.darkTextPrimary
-                        : AppThemeData.neutral900,
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        "Your Order".tr(),
+                        style: AppTypography.h5.copyWith(
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: -0.3,
+                          color: dark
+                              ? AppThemeData.darkTextPrimary
+                              : AppThemeData.neutral900,
+                        ),
+                      ),
+                      if (vendorModel != null) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          vendorModel!.title,
+                          style: AppTypography.labelSmall.copyWith(
+                            color: dark
+                                ? AppThemeData.darkTextTertiary
+                                : AppThemeData.neutral400,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ],
+                    ],
                   ),
                 ),
-                if (vendorModel != null) ...[
-                  const SizedBox(height: 2),
-                  Text(
-                    vendorModel!.title,
-                    style: AppTypography.labelSmall.copyWith(
-                      color: dark
-                          ? AppThemeData.darkTextTertiary
-                          : AppThemeData.neutral400,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ],
+                // Inline service-type switcher — respects per-item availability
+                DeliveryTypeSelector(
+                  selectedValue: selctedOrderTypeValue ?? 'Delivery',
+                  isDarkMode: dark,
+                  allowDelivery: _allowDelivery,
+                  allowDineaway: _allowDineaway,
+                  onValueChanged: _onOrderTypeChanged,
+                ),
               ],
             ),
           ),
