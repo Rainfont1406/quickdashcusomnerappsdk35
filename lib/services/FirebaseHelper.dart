@@ -78,7 +78,8 @@ class FireStoreUtils {
   static Reference storage = FirebaseStorage.instance.ref();
 
   static String getCurrentUid() {
-    return auth.FirebaseAuth.instance.currentUser!.uid;
+    if (MyAppState.currentUser != null) return MyAppState.currentUser!.userID;
+    return auth.FirebaseAuth.instance.currentUser?.uid ?? '';
   }
 
   static Future<bool> userExistOrNot(String uid) async {
@@ -679,7 +680,7 @@ class FireStoreUtils {
 
   static getRazorPay() async {
     // ignore: close_sinks
-    firestore.collection(Setting).doc(StripeSetting).get().then((user) {
+    firestore.collection(Setting).doc("razorpaySettings").get().then((user) {
       try {
         RazorPayModel userModel = RazorPayModel.fromJson(user.data() ?? {});
         UserPreference.setRazorPayData(userModel);
@@ -1041,7 +1042,11 @@ class FireStoreUtils {
       final List<VendorModel> vendors = [];
       for (var doc in snapshot.docs) {
         try {
-          vendors.add(VendorModel.fromJson(doc.data()));
+          final data = doc.data();
+          final storeStatus = data['store_status'] as String?;
+          if (storeStatus == null || storeStatus == 'approved') {
+            vendors.add(VendorModel.fromJson(data));
+          }
         } catch (e) {
           print('getVendors1 parse error: $e');
         }
@@ -1055,7 +1060,11 @@ class FireStoreUtils {
     QuerySnapshot<Map<String, dynamic>> vendorsQuery = await firestore.collection(VENDORS).where("section_id", isEqualTo: sectionConstantModel!.id).get();
     await Future.forEach(vendorsQuery.docs, (QueryDocumentSnapshot<Map<String, dynamic>> document) {
       try {
-        vendors.add(VendorModel.fromJson(document.data()));
+        final data = document.data();
+        final storeStatus = data['store_status'] as String?;
+        if (storeStatus == null || storeStatus == 'approved') {
+          vendors.add(VendorModel.fromJson(data));
+        }
       } catch (e) {
         print('FireStoreUtils.getVendors Parse error $e');
       }
@@ -1251,7 +1260,10 @@ class FireStoreUtils {
         for (var document in documentList) {
           try {
             final data = document.data() as Map<String, dynamic>;
-            vendors.add(VendorModel.fromJson(data));
+            final storeStatus = data['store_status'] as String?;
+            if (storeStatus == null || storeStatus == 'approved') {
+              vendors.add(VendorModel.fromJson(data));
+            }
           } catch (e) {
             print('getAllStores parse error: $e');
           }
@@ -1297,7 +1309,10 @@ class FireStoreUtils {
       for (var element in documentList) {
         try {
           final data = element.data() as Map<String, dynamic>;
-          vendors.add(VendorModel.fromJson(data));
+          final storeStatus = data['store_status'] as String?;
+          if (storeStatus == null || storeStatus == 'approved') {
+            vendors.add(VendorModel.fromJson(data));
+          }
         } catch (e) {
           print('getVendorsByCuisineID parse error: $e');
         }
@@ -1914,18 +1929,35 @@ class FireStoreUtils {
     required String slotId,
     required DateTime date,
   }) async {
+    // Use only equality filters (vendorID + slotId) to avoid the Firestore
+    // composite-index requirement that mixing equality + range filters triggers.
+    // The bookingDateKey equality path is preferred for new documents; for older
+    // documents that lack the field, we fall back to Timestamp comparison in Dart.
+    final dateKey =
+        '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
     final startOfDay = DateTime(date.year, date.month, date.day);
     final endOfDay = startOfDay.add(const Duration(days: 1));
+
     final snapshot = await firestore
         .collection(ORDERS_TABLE)
         .where('vendorID', isEqualTo: vendorId)
         .where('slotId', isEqualTo: slotId)
-        .where('date', isGreaterThanOrEqualTo: Timestamp.fromDate(startOfDay))
-        .where('date', isLessThan: Timestamp.fromDate(endOfDay))
         .get();
+
     return snapshot.docs.where((doc) {
-      final status = doc.data()['status'] as String? ?? '';
-      return status != 'Cancelled' && status != 'Rejected';
+      final data = doc.data();
+      final status = data['status'] as String? ?? '';
+      if (status == 'Cancelled' || status == 'Rejected') return false;
+
+      // Fast path: bookingDateKey stored as 'yyyy-MM-dd' string
+      final bdk = data['bookingDateKey'] as String?;
+      if (bdk != null) return bdk == dateKey;
+
+      // Legacy path: compare Timestamp stored in 'date' field
+      final dateVal = data['date'];
+      if (dateVal is! Timestamp) return false;
+      final docDate = dateVal.toDate();
+      return !docDate.isBefore(startOfDay) && docDate.isBefore(endOfDay);
     }).length;
   }
 
