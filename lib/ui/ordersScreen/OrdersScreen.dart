@@ -8,6 +8,7 @@ import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/OrderModel.dart';
 import 'package:emartconsumer/model/variant_info.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/app_dialog.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
@@ -66,32 +67,15 @@ class _OrdersScreenState extends State<OrdersScreen> {
     if (existing.isNotEmpty &&
         existing.any((p) => p.vendorID != orderModel.vendorID)) {
       if (!context.mounted) return;
-      final clear = await showDialog<bool>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          title: Text('Replace Cart?'.tr(),
-              style: AppTypography.h6.copyWith(fontWeight: FontWeight.w700)),
-          content: Text(
-            'Your cart has items from another restaurant. Adding these items will clear your current cart.'
-                .tr(),
-            style: AppTypography.bodyMedium,
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: Text('Cancel'.tr()),
-            ),
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: Text('Clear & Add'.tr(),
-                  style: TextStyle(color: AppThemeData.primary500)),
-            ),
-          ],
-        ),
+      final confirmed = await AppDialog.showConfirm(
+        context,
+        title: 'Replace Cart?'.tr(),
+        message: 'Your cart has items from another restaurant. Adding these items will clear your current cart.'.tr(),
+        confirmLabel: 'Clear & Add'.tr(),
+        cancelLabel: 'Cancel'.tr(),
+        destructive: true,
       );
-      if (clear != true) return;
+      if (!confirmed) return;
       await cartDatabase.deleteAllProducts();
     } else if (existing.isNotEmpty) {
       // Same vendor — clear for a fresh re-order

@@ -11,6 +11,7 @@ import 'package:emartconsumer/model/ReviewAttributeModel.dart';
 import 'package:emartconsumer/model/VendorCategoryModel.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/app_dialog.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
@@ -543,7 +544,7 @@ class _ReviewScreenState extends State<ReviewScreen> with TickerProviderStateMix
 
   savereview() async {
     if (comment.text == '' || ratings == 0) {
-      showAlertDialog(context, 'Please add All Field'.tr(), 'All Field Reqired '.tr(), true);
+      AppDialog.showWarning(context, message: 'Please fill in all fields before submitting your review.');
     } else if (_formKey.currentState?.validate() ?? false) {
        await showProgress("Please wait...".tr(), false);
       List<String> mediaFilesURLs = _mediaFiles.whereType<String>().toList().cast<String>();
@@ -604,40 +605,6 @@ class _ReviewScreenState extends State<ReviewScreen> with TickerProviderStateMix
     }
   }
 
-  showAlertDialog(BuildContext context, String title, String content, bool addOkButton) {
-    // set up the AlertDialog
-    Widget? okButton;
-    if (addOkButton) {
-      okButton = TextButton(
-        child: const Text('OK').tr(),
-        onPressed: () {
-          Navigator.pop(context);
-        },
-      );
-    }
-
-    if (Platform.isIOS) {
-      CupertinoAlertDialog alert = CupertinoAlertDialog(
-        title: Text(title),
-        content: Text(content),
-        actions: [if (okButton != null) okButton],
-      );
-      showCupertinoDialog(
-          context: context,
-          builder: (context) {
-            return alert;
-          });
-    } else {
-      AlertDialog alert = AlertDialog(title: Text(title), content: Text(content), actions: [if (okButton != null) okButton]);
-
-      showDialog(
-        context: context,
-        builder: (BuildContext context) {
-          return alert;
-        },
-      );
-    }
-  }
 
   _pickImage() {
     final action = CupertinoActionSheet(

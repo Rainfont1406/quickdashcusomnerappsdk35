@@ -4,6 +4,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/app_dialog.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
@@ -322,99 +323,22 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
   }
 
-  void _showDeleteAccountDialog(BuildContext context, bool dark) {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        backgroundColor: dark ? AppThemeData.darkBgSecondary : Colors.white,
-        contentPadding: const EdgeInsets.all(24),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 64,
-              height: 64,
-              decoration: BoxDecoration(
-                color: AppThemeData.error500.withValues(alpha: 0.1),
-                shape: BoxShape.circle,
-              ),
-              child: Icon(CupertinoIcons.delete_solid, color: AppThemeData.error500, size: 30),
-            ),
-            const SizedBox(height: 16),
-            Text(
-              'Delete Account?'.tr(),
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontFamily: AppThemeData.bold,
-                fontSize: 20,
-                color: dark ? AppThemeData.darkTextPrimary : AppThemeData.neutral900,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Are you sure you want to permanently delete your account? This action cannot be undone.'.tr(),
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontFamily: AppThemeData.regular,
-                fontSize: 14,
-                height: 1.5,
-                color: dark ? AppThemeData.darkTextSecondary : AppThemeData.neutral600,
-              ),
-            ),
-            const SizedBox(height: 24),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton(
-                    style: OutlinedButton.styleFrom(
-                      side: BorderSide(color: dark ? AppThemeData.darkBorderPrimary : AppThemeData.neutral300),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                    ),
-                    onPressed: () => Navigator.pop(ctx),
-                    child: Text(
-                      'Cancel'.tr(),
-                      style: TextStyle(
-                        fontFamily: AppThemeData.medium,
-                        color: dark ? AppThemeData.darkTextSecondary : AppThemeData.neutral600,
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: AppThemeData.error500,
-                      elevation: 0,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                    ),
-                    onPressed: () async {
-                      Navigator.pop(ctx);
-                      ShowToastDialog.showLoader('Please wait...'.tr());
-                      await FireStoreUtils.deleteUser();
-                      MyAppState.currentUser = null;
-                      ShowToastDialog.closeLoader();
-                      ShowToastDialog.showToast('Account deleted'.tr());
-                      pushAndRemoveUntil(context, const LoginScreen());
-                    },
-                    child: Text(
-                      'Delete'.tr(),
-                      style: const TextStyle(
-                        fontFamily: AppThemeData.medium,
-                        color: Colors.white,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
+  void _showDeleteAccountDialog(BuildContext context, bool dark) async {
+    final confirmed = await AppDialog.showConfirm(
+      context,
+      title: 'Delete Account?',
+      message: 'Are you sure you want to permanently delete your account? This action cannot be undone.',
+      confirmLabel: 'Delete',
+      cancelLabel: 'Cancel',
+      destructive: true,
     );
+    if (!confirmed) return;
+    ShowToastDialog.showLoader('Please wait...');
+    await FireStoreUtils.deleteUser();
+    MyAppState.currentUser = null;
+    ShowToastDialog.closeLoader();
+    ShowToastDialog.showToast('Account deleted successfully.');
+    if (context.mounted) pushAndRemoveUntil(context, const LoginScreen());
   }
 
   void _onCameraClick() {

@@ -2,7 +2,7 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:easy_localization/easy_localization.dart';
+import 'package:easy_localization/easy_localization.dart'; // also re-exports intl (NumberFormat, DateFormat)
 import 'package:emartconsumer/model/CurrencyModel.dart';
 import 'package:emartconsumer/model/SectionModel.dart';
 import 'package:emartconsumer/model/User.dart';
@@ -18,6 +18,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'model/TaxModel.dart';
 
 const FINISHED_ON_BOARDING = 'finishedOnBoarding';
+const PHONE_AUTH_USER_ID = 'phoneAuthUserId';
 const COUPON_BG_COLOR = 0xFFFCF8F3;
 const DARK_BG_COLOR = 0xff121212;
 const COUPON_DASH_COLOR = 0xFFCACFDA;
@@ -300,23 +301,28 @@ Uri createCoordinatesUrl(double latitude, double longitude, [String? label]) {
   return uri;
 }
 
-String amountShow({required String? amount}) {
-  int decimalPlaces = 2; // Default to 2 decimal places
-  if (currencyData != null) {
-    decimalPlaces = currencyData!.decimal > 0 ? currencyData!.decimal : 2; // Ensure at least 2 decimal places
-  }
+/// Formats a monetary amount with the active currency symbol, thousands
+/// separator, and decimal places from [currencyData].
+///
+/// Pass [decimals] to override the currency's decimal setting (e.g. 0 for
+/// whole-number booking charges).  Output examples (INR, decimal=2):
+///   amountShow(amount: '199')         → ₹199.00
+///   amountShow(amount: '1299.5')      → ₹1,299.50
+///   amountShow(amount: '100', decimals: 0) → ₹100
+String amountShow({required String? amount, int? decimals}) {
+  final double value = double.tryParse(amount?.toString() ?? '') ?? 0.0;
+  final int places = decimals ??
+      ((currencyData != null && currencyData!.decimal > 0)
+          ? currencyData!.decimal
+          : 2);
 
-  String formattedAmount = double.parse(amount.toString()).toStringAsFixed(decimalPlaces);
+  // '#,##0.00' adds thousands separator and fixed decimal places.
+  final String pattern =
+      places > 0 ? '#,##0.${'0' * places}' : '#,##0';
+  final String formatted = NumberFormat(pattern, 'en_US').format(value);
 
-  if (currencyData == null) {
-    return "₹ $formattedAmount";
-  } else {
-    if (currencyData!.symbolatright == true) {
-      return "$formattedAmount ${currencyData!.symbol.toString()}";
-    } else {
-      return "${currencyData!.symbol.toString()} $formattedAmount";
-    }
-  }
+  final String sym = currencyData?.symbol ?? '₹';
+  return '$sym$formatted';
 }
 
 String timestampToDateTime(Timestamp timestamp) {

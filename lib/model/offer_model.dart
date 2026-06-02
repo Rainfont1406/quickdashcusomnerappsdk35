@@ -8,12 +8,13 @@ class OfferModel {
   String? discountTypeOffer;
   Timestamp? expireOfferDate;
   bool? isEnableOffer;
+  bool? isPublic;
   String? imageOffer = "";
   String? storeId;
   String? parcelCategoryId;
   String? applicableAmount;
 
-  OfferModel({this.descriptionOffer, this.discountOffer, this.discountTypeOffer, this.expireOfferDate, this.imageOffer = "", this.isEnableOffer, this.offerCode, this.offerId, this.storeId,this.parcelCategoryId, this.applicableAmount});
+  OfferModel({this.descriptionOffer, this.discountOffer, this.discountTypeOffer, this.expireOfferDate, this.imageOffer = "", this.isEnableOffer, this.isPublic, this.offerCode, this.offerId, this.storeId, this.parcelCategoryId, this.applicableAmount});
 
   factory OfferModel.fromJson(Map<String, dynamic> parsedJson) {
     return OfferModel(
@@ -23,6 +24,7 @@ class OfferModel {
         expireOfferDate: parsedJson["expiresAt"],
         imageOffer: parsedJson["image"] ?? ((parsedJson["photo"] ?? "")),
         isEnableOffer: parsedJson["isEnabled"],
+        isPublic: parsedJson["isPublic"],
         offerCode: parsedJson["code"],
         offerId: parsedJson["id"],
         storeId: parsedJson["vendorID"],
@@ -38,6 +40,7 @@ class OfferModel {
       "expiresAt": expireOfferDate,
       "image": imageOffer,
       "isEnabled": isEnableOffer,
+      "isPublic": isPublic,
       "code": offerCode,
       "id": offerId,
       "vendorID": storeId,

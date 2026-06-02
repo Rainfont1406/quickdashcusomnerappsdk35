@@ -778,38 +778,55 @@ class _DeliveryAddressScreenState extends State<DeliveryAddressScreen> {
         centerTitle: false,
         actions: [
           Padding(
-            padding: const EdgeInsets.only(right: 12),
-            child: GestureDetector(
-              onTap: () async {
-                if (MyAppState.currentUser != null) {
-                  await Navigator.of(context)
-                      .push(MaterialPageRoute(builder: (_) => const AddAddressScreen()))
-                      .then((_) => getListAddress());
-                } else {
-                  Navigator.pop(context);
-                  push(context, LoginScreen());
-                }
-              },
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-                decoration: BoxDecoration(
-                  color: AppThemeData.primary500,
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(Icons.add_rounded, color: Colors.white, size: 16),
-                    const SizedBox(width: 4),
-                    Text(
-                      'Add'.tr(),
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontFamily: AppThemeData.semiBold,
-                        fontSize: 13,
-                      ),
+            padding: const EdgeInsets.only(right: 14),
+            child: Material(
+              color: Colors.transparent,
+              borderRadius: BorderRadius.circular(12),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(12),
+                onTap: () async {
+                  if (MyAppState.currentUser != null) {
+                    await Navigator.of(context)
+                        .push(MaterialPageRoute(builder: (_) => const AddAddressScreen()))
+                        .then((_) => getListAddress());
+                  } else {
+                    Navigator.pop(context);
+                    push(context, LoginScreen());
+                  }
+                },
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  decoration: BoxDecoration(
+                    gradient: const LinearGradient(
+                      colors: [AppThemeData.primary500, AppThemeData.primary600],
+                      begin: Alignment.centerLeft,
+                      end: Alignment.centerRight,
                     ),
-                  ],
+                    borderRadius: BorderRadius.circular(12),
+                    boxShadow: [
+                      BoxShadow(
+                        color: AppThemeData.primary500.withValues(alpha: 0.30),
+                        blurRadius: 8,
+                        offset: const Offset(0, 3),
+                      ),
+                    ],
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.add_rounded, color: Colors.white, size: 16),
+                      const SizedBox(width: 5),
+                      Text(
+                        'New Address'.tr(),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontFamily: AppThemeData.semiBold,
+                          fontSize: 13,
+                          letterSpacing: 0.1,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),

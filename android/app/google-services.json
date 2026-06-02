@@ -15,8 +15,20 @@
       },
       "oauth_client": [
         {
-          "client_id": "60208840695-cb7eehhqar5asm65o8bp267r9gt4r6jm.apps.googleusercontent.com",
-          "client_type": 3
+          "client_id": "60208840695-1d7tefbqt46vti585bi4pmicrvs0u0g0.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.quickdash.customer",
+            "certificate_hash": "0169297e29205adb897479e8b4be7d0b96288c15"
+          }
+        },
+        {
+          "client_id": "60208840695-9n4fv6eboeqkrgtait9d4k5pftrcrll4.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.quickdash.customer",
+            "certificate_hash": "fbbecbc469b9ba1595e1fc6f27ff6c2c5b2e65bb"
+          }
         }
       ],
       "api_key": [
@@ -28,8 +40,38 @@
         "appinvite_service": {
           "other_platform_oauth_client": [
             {
-              "client_id": "60208840695-cb7eehhqar5asm65o8bp267r9gt4r6jm.apps.googleusercontent.com",
-              "client_type": 3
+              "client_id": "60208840695-v9nctp1ie5i6fdolg89n25kfh3d4nsec.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.quickdash.customer"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:60208840695:android:85d3ad9a3de3587a7f78f2",
+        "android_client_info": {
+          "package_name": "com.quickdash.driver"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAHvg-SFs3KbZVU8FZhwLZZzZNHeUK_PQo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "60208840695-v9nctp1ie5i6fdolg89n25kfh3d4nsec.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.quickdash.customer"
+              }
             }
           ]
         }
@@ -58,10 +100,6 @@
             "package_name": "com.quickdash.hadeveloper",
             "certificate_hash": "6dce698e60c3cf14972281cb56d63e1b8877b17b"
           }
-        },
-        {
-          "client_id": "60208840695-cb7eehhqar5asm65o8bp267r9gt4r6jm.apps.googleusercontent.com",
-          "client_type": 3
         }
       ],
       "api_key": [
@@ -73,8 +111,47 @@
         "appinvite_service": {
           "other_platform_oauth_client": [
             {
-              "client_id": "60208840695-cb7eehhqar5asm65o8bp267r9gt4r6jm.apps.googleusercontent.com",
-              "client_type": 3
+              "client_id": "60208840695-v9nctp1ie5i6fdolg89n25kfh3d4nsec.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.quickdash.customer"
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:60208840695:android:b3df4ea8411993087f78f2",
+        "android_client_info": {
+          "package_name": "com.quickdash.vendor"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "60208840695-8kve7kq912nljebb419o3k93fbs1954k.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.quickdash.vendor",
+            "certificate_hash": "9749fd3d91ae115c6903da36420e7c288a4a1e41"
+          }
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAHvg-SFs3KbZVU8FZhwLZZzZNHeUK_PQo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "60208840695-v9nctp1ie5i6fdolg89n25kfh3d4nsec.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.quickdash.customer"
+              }
             }
           ]
         }
@@ -95,10 +172,6 @@
             "package_name": "com.quickdashvendor.hadeveloper",
             "certificate_hash": "847085a7c5586d40bdba8370dae0738cb193abd2"
           }
-        },
-        {
-          "client_id": "60208840695-cb7eehhqar5asm65o8bp267r9gt4r6jm.apps.googleusercontent.com",
-          "client_type": 3
         }
       ],
       "api_key": [
@@ -110,8 +183,11 @@
         "appinvite_service": {
           "other_platform_oauth_client": [
             {
-              "client_id": "60208840695-cb7eehhqar5asm65o8bp267r9gt4r6jm.apps.googleusercontent.com",
-              "client_type": 3
+              "client_id": "60208840695-v9nctp1ie5i6fdolg89n25kfh3d4nsec.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.quickdash.customer"
+              }
             }
           ]
         }

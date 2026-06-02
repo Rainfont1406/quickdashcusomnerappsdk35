@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'dart:developer';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/payment/xenditModel.dart';
-import 'package:emartconsumer/theme/app_them_data.dart';
+import 'package:emartconsumer/services/app_dialog.dart';
 import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
@@ -108,39 +108,17 @@ class _XenditScreenState extends State<XenditScreen> {
   }
 
   Future<void> _showMyDialog() async {
-    return showDialog<void>(
-      context: context,
-      barrierDismissible: true, // user must tap button!
-      builder: (BuildContext context) {
-        return AlertDialog(
-          title: Text('Cancel Payment'.tr()),
-          content: SingleChildScrollView(
-            child: Text("cancelPayment?".tr()),
-          ),
-          actions: <Widget>[
-            TextButton(
-              child: Text(
-                'Cancel'.tr(),
-                style: const TextStyle(color: AppThemeData.primary500),
-              ),
-              onPressed: () {
-                Navigator.of(context).pop(false);
-                Navigator.of(context).pop(false);
-              },
-            ),
-            TextButton(
-              child: Text(
-                'Continue'.tr(),
-                style: const TextStyle(color: Colors.green),
-              ),
-              onPressed: () {
-                Navigator.of(context).pop(false);
-              },
-            ),
-          ],
-        );
-      },
+    final confirmed = await AppDialog.showConfirm(
+      context,
+      title: 'Cancel Payment'.tr(),
+      message: 'cancelPayment?'.tr(),
+      confirmLabel: 'Cancel Payment'.tr(),
+      cancelLabel: 'Continue'.tr(),
+      destructive: true,
     );
+    if (confirmed) {
+      if (mounted) Navigator.of(context).pop(false);
+    }
   }
 
   Future<XenditModel> checkStatus({required String paymentId}) async {

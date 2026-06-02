@@ -4,7 +4,8 @@ import 'package:emartconsumer/theme/responsive.dart';
 import 'package:flutter/material.dart';
 
 class HomeSkeletonLoader extends StatefulWidget {
-  const HomeSkeletonLoader({super.key});
+  final String orderType;
+  const HomeSkeletonLoader({super.key, this.orderType = 'Delivery'});
 
   @override
   State<HomeSkeletonLoader> createState() => _HomeSkeletonLoaderState();
@@ -43,7 +44,7 @@ class _HomeSkeletonLoaderState extends State<HomeSkeletonLoader>
       color: dark ? AppThemeData.surfaceDark : AppThemeData.surface,
       child: AnimatedBuilder(
         animation: _anim,
-        builder: (context, _) => _buildBody(context, base, hi, _anim.value),
+        builder: (context, _) => _buildBody(context, base, hi, _anim.value, widget.orderType),
       ),
     );
   }
@@ -95,7 +96,8 @@ class _HomeSkeletonLoaderState extends State<HomeSkeletonLoader>
 
   // ── Full skeleton body ───────────────────────────────────────────────────────
 
-  Widget _buildBody(BuildContext context, Color base, Color hi, double t) {
+  Widget _buildBody(BuildContext context, Color base, Color hi, double t, String orderType) {
+    final bool isDineaway = orderType == 'Dineaway';
     return Padding(
       padding: EdgeInsets.only(top: MediaQuery.of(context).viewPadding.top),
       child: Stack(
@@ -111,21 +113,25 @@ class _HomeSkeletonLoaderState extends State<HomeSkeletonLoader>
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       const SizedBox(height: 16),
-                      _storiesRow(base, hi, t),
-                      const SizedBox(height: 20),
-                      _section(children: [
-                        _titleRow(base, hi, t),
-                        const SizedBox(height: 10),
-                        _categoryGrid(base, hi, t),
-                      ]),
+                      // Category section — Delivery only
+                      if (!isDineaway) ...[
+                        _section(children: [
+                          _titleRow(base, hi, t),
+                          const SizedBox(height: 10),
+                        ]),
+                        _categoryRow(base, hi, t),
+                      ],
                       const SizedBox(height: 32),
                       _section(children: [_bannerSkeleton(base, hi, t)]),
-                      const SizedBox(height: 28),
-                      _section(children: [
-                        _titleRow(base, hi, t),
-                        const SizedBox(height: 12),
-                      ]),
-                      _topSellingRow(context, base, hi, t),
+                      // Top Selling section — Delivery only
+                      if (!isDineaway) ...[
+                        const SizedBox(height: 28),
+                        _section(children: [
+                          _titleRow(base, hi, t),
+                          const SizedBox(height: 12),
+                        ]),
+                        _topSellingRow(context, base, hi, t),
+                      ],
                       const SizedBox(height: 28),
                       _section(children: [
                         _titleRow(base, hi, t),
@@ -154,7 +160,7 @@ class _HomeSkeletonLoaderState extends State<HomeSkeletonLoader>
             left: 0,
             right: 0,
             child: Center(
-              child: _fabSkeleton(base, hi, t),
+              child: _fabSkeleton(base, hi, t, isDineaway: isDineaway),
             ),
           ),
         ],
@@ -205,51 +211,28 @@ class _HomeSkeletonLoaderState extends State<HomeSkeletonLoader>
     );
   }
 
-  // ── Stories row ──────────────────────────────────────────────────────────────
+  // ── Category row ─────────────────────────────────────────────────────────────
 
-  Widget _storiesRow(Color base, Color hi, double t) {
+  Widget _categoryRow(Color base, Color hi, double t) {
     return SizedBox(
-      height: 92,
+      height: 90,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
         physics: const NeverScrollableScrollPhysics(),
         padding: const EdgeInsets.symmetric(horizontal: 16),
         itemCount: 6,
-        separatorBuilder: (_, __) => const SizedBox(width: 14),
+        separatorBuilder: (_, __) => const SizedBox(width: 16),
         itemBuilder: (_, __) => Column(
           mainAxisSize: MainAxisSize.min,
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            _box(64, 64, base: base, hi: hi, t: t, radius: 32),
-            const SizedBox(height: 7),
-            _box(44, 9, base: base, hi: hi, t: t, radius: 5),
+            _box(54, 54, base: base, hi: hi, t: t, radius: 27),
+            const SizedBox(height: 6),
+            _box(44, 10, base: base, hi: hi, t: t, radius: 5),
+            const SizedBox(height: 4),
+            _box(34, 10, base: base, hi: hi, t: t, radius: 5),
           ],
         ),
-      ),
-    );
-  }
-
-  // ── Category grid ────────────────────────────────────────────────────────────
-
-  Widget _categoryGrid(Color base, Color hi, double t) {
-    return GridView.builder(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      padding: EdgeInsets.zero,
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 4,
-        childAspectRatio: 0.72,
-        mainAxisSpacing: 10,
-        crossAxisSpacing: 8,
-      ),
-      itemCount: 8,
-      itemBuilder: (_, __) => Column(
-        mainAxisSize: MainAxisSize.min,
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          _box(54, 54, base: base, hi: hi, t: t, radius: 14),
-          const SizedBox(height: 7),
-          _box(42, 10, base: base, hi: hi, t: t, radius: 5),
-        ],
       ),
     );
   }
@@ -470,7 +453,7 @@ class _HomeSkeletonLoaderState extends State<HomeSkeletonLoader>
 
   // ── FAB skeleton ──────────────────────────────────────────────────────────────
 
-  Widget _fabSkeleton(Color base, Color hi, double t) {
+  Widget _fabSkeleton(Color base, Color hi, double t, {bool isDineaway = false}) {
     return Container(
       height: 54,
       padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -491,6 +474,13 @@ class _HomeSkeletonLoaderState extends State<HomeSkeletonLoader>
           _box(24, 24, base: hi, hi: base, t: t, radius: 6),
           const SizedBox(width: 10),
           _box(24, 24, base: hi, hi: base, t: t, radius: 6),
+          // Dineaway: add QR scanner icon slot before the type selector
+          if (isDineaway) ...[
+            const SizedBox(width: 16),
+            _box(1, 30, base: hi, hi: base, t: t, radius: 0),
+            const SizedBox(width: 16),
+            _box(24, 24, base: hi, hi: base, t: t, radius: 6),
+          ],
           const SizedBox(width: 16),
           _box(1, 30, base: hi, hi: base, t: t, radius: 0),
           const SizedBox(width: 16),

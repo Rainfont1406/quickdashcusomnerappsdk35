@@ -1,48 +1,56 @@
 import 'dart:async';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/User.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/helper.dart';
+import 'package:emartconsumer/services/msg91_service.dart';
 import 'package:emartconsumer/services/notification_service.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
-import 'package:emartconsumer/ui/auth_screen/auth_widgets.dart';
 import 'package:emartconsumer/ui/auth_screen/login_screen.dart';
 import 'package:emartconsumer/ui/auth_screen/signup_screen.dart';
 import 'package:emartconsumer/ui/location_permission_screen.dart';
 import 'package:emartconsumer/ui/service_list_screen.dart';
-import 'package:firebase_auth/firebase_auth.dart' as auth;
 import 'package:flutter/material.dart';
 import 'package:pin_code_fields/pin_code_fields.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sms_autofill/sms_autofill.dart';
+import 'package:uuid/uuid.dart';
 
 class OtpScreen extends StatefulWidget {
   final String? countryCode;
   final String? phoneNumber;
+  /// Kept for API compatibility — not used in the MSG91 flow.
   final String? verificationId;
+  final bool isSignup;
 
   const OtpScreen({
     super.key,
     this.countryCode,
     this.phoneNumber,
     this.verificationId,
+    this.isSignup = false,
   });
 
   @override
   State<OtpScreen> createState() => _OtpScreenState();
 }
 
-class _OtpScreenState extends State<OtpScreen> {
+/// [CodeAutoFill] mixin wires up the Android SMS Retriever API.
+/// [codeUpdated] is called whenever the platform delivers a matching SMS code;
+/// [code] is the extracted digit string at that point.
+class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
   final TextEditingController _otpController = TextEditingController();
 
   late String countryCode;
   late String phoneNumber;
-  late String verificationId;
-  int resendToken = 0;
 
-  Timer? _timer;
+  Timer? _countdownTimer;
+  Timer? _smsListenTimer;
   int _remainingTime = 30;
   bool _canResend = false;
   bool _isVerifying = false;
@@ -52,29 +60,30 @@ class _OtpScreenState extends State<OtpScreen> {
     super.initState();
     countryCode = widget.countryCode ?? '';
     phoneNumber = widget.phoneNumber ?? '';
-    verificationId = widget.verificationId ?? '';
-    _startTimer();
+    _startCountdown();
+    _startSmsRetriever();
   }
 
   @override
   void dispose() {
-    _timer?.cancel();
+    _countdownTimer?.cancel();
+    _smsListenTimer?.cancel();
+    cancel();             // cancel stream subscription (mixin)
+    unregisterListener(); // stop Android SMS Retriever (mixin)
     _otpController.dispose();
     super.dispose();
   }
 
-  void _startTimer() {
+  // ── Countdown timer ───────────────────────────────────────────────────
+  void _startCountdown() {
     _canResend = false;
     _remainingTime = 30;
-    _timer?.cancel();
-    _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (!mounted) {
-        timer.cancel();
-        return;
-      }
+    _countdownTimer?.cancel();
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!mounted) { t.cancel(); return; }
       if (_remainingTime == 0) {
         setState(() => _canResend = true);
-        timer.cancel();
+        t.cancel();
       } else {
         setState(() => _remainingTime--);
       }
@@ -84,176 +93,195 @@ class _OtpScreenState extends State<OtpScreen> {
   String get _formattedTime =>
       '0:${_remainingTime.toString().padLeft(2, '0')}';
 
+  // ── SMS Retriever API ─────────────────────────────────────────────────
+  void _startSmsRetriever() {
+    // Regex matches 4-to-6-digit blocks — works for MSG91's 4-digit OTPs
+    listenForCode(smsCodeRegexPattern: r'\d{4,6}');
+
+    // Auto-stop after 5 minutes to avoid stale listeners
+    _smsListenTimer?.cancel();
+    _smsListenTimer = Timer(const Duration(minutes: 5), () {
+      cancel();
+      unregisterListener();
+    });
+
+    // Log app hash so it can be added to the MSG91 SMS template
+    SmsAutoFill().getAppSignature.then((hash) {
+      if (hash.isNotEmpty) {
+        debugPrint('════════════════════════════════════════════════');
+        debugPrint('MSG91 app hash  : $hash');
+        debugPrint('Add to template : <#> Your OTP is {{otp}} $hash');
+        debugPrint('════════════════════════════════════════════════');
+      }
+    });
+  }
+
+  /// Called by [CodeAutoFill] mixin when the Android SMS Retriever delivers
+  /// a code. [code] (mixin field) contains the extracted digit string.
+  @override
+  void codeUpdated() {
+    if (!mounted || _isVerifying) return;
+    final raw = code ?? '';
+    final digits = raw.replaceAll(RegExp(r'\D'), '');
+    if (digits.length < 4) return;
+    final otp = digits.substring(0, 4);
+
+    // Stop listening — OTP received, no need to stay active
+    _smsListenTimer?.cancel();
+    cancel();
+    unregisterListener();
+
+    setState(() => _otpController.text = otp);
+
+    // Belt-and-suspenders: verify after short delay so the pin field renders
+    Future.delayed(const Duration(milliseconds: 600), () {
+      if (mounted && !_isVerifying) _verifyOtp();
+    });
+  }
+
+  // ── Resend via MSG91 ──────────────────────────────────────────────────
   Future<void> _resendOtp() async {
     if (!_canResend || _isVerifying) return;
     _otpController.clear();
-    _startTimer();
+    _startCountdown();
     ShowToastDialog.showLoader('Sending verification code...');
-    try {
-      await auth.FirebaseAuth.instance.verifyPhoneNumber(
-        phoneNumber: countryCode + phoneNumber,
-        verificationCompleted: (_) {},
-        verificationFailed: (auth.FirebaseAuthException e) {
-          ShowToastDialog.closeLoader();
-          if (e.code == 'too-many-requests') {
-            ShowToastDialog.showToast(
-                'Too many requests. Please wait before requesting a new OTP.');
-          } else if (e.code == 'invalid-phone-number') {
-            ShowToastDialog.showToast('Invalid phone number. Please go back and try again.');
-          } else {
-            ShowToastDialog.showToast(e.message ?? 'Failed to send OTP. Please try again.');
-          }
-        },
-        codeSent: (String vid, int? token) {
-          verificationId = vid;
-          if (token != null) resendToken = token;
-          ShowToastDialog.closeLoader();
-          ShowToastDialog.showToast('Verification code sent successfully.');
-        },
-        timeout: const Duration(seconds: 25),
-        forceResendingToken: resendToken,
-        codeAutoRetrievalTimeout: (_) {
-          ShowToastDialog.closeLoader();
-        },
-      );
-    } catch (_) {
-      ShowToastDialog.closeLoader();
-      ShowToastDialog.showToast('Failed to resend OTP. Please try again.');
+    final result = await Msg91Service.resendOtp(countryCode, phoneNumber);
+    ShowToastDialog.closeLoader();
+    ShowToastDialog.showToast(result.message);
+
+    if (result.success) {
+      // Re-arm the SMS listener for the newly sent OTP
+      await cancel();
+      await unregisterListener();
+      _startSmsRetriever();
     }
   }
 
+  // ── Verify via MSG91 → Firestore lookup ───────────────────────────────
   Future<void> _verifyOtp() async {
     if (_isVerifying) return;
-    if (_otpController.text.length != 6) {
-      ShowToastDialog.showToast('Please enter the complete 6-digit OTP.'.tr());
+    final otp = _otpController.text.trim();
+    if (otp.length != 4) {
+      ShowToastDialog.showToast('Please enter the complete 4-digit OTP.'.tr());
       return;
     }
 
     if (mounted) setState(() => _isVerifying = true);
     ShowToastDialog.showLoader('Verifying your account...');
+
     try {
-      final credential = auth.PhoneAuthProvider.credential(
-        verificationId: verificationId,
-        smsCode: _otpController.text,
-      );
+      // ── Step 1: verify OTP with MSG91 ──────────────────────────────
+      final verifyResult =
+          await Msg91Service.verifyOtp(countryCode, phoneNumber, otp);
 
-      final fcmTokenFuture = NotificationService.getToken();
-      final value = await auth.FirebaseAuth.instance
-          .signInWithCredential(credential);
-      final String fcmToken = await fcmTokenFuture;
+      if (!verifyResult.success) {
+        ShowToastDialog.closeLoader();
+        if (mounted) setState(() => _isVerifying = false);
+        ShowToastDialog.showToast(verifyResult.message.isNotEmpty
+            ? verifyResult.message
+            : 'Incorrect OTP. Please try again.');
+        return;
+      }
 
       if (!mounted) return;
 
-      if (value.additionalUserInfo?.isNewUser ?? false) {
-        User userModel = User()
-          ..userID = value.user!.uid
-          ..countryCode = countryCode
-          ..phoneNumber = phoneNumber
-          ..fcmToken = fcmToken;
-        ShowToastDialog.closeLoader();
-        push(context, SignupScreen(type: 'mobileNumber', userModel: userModel));
-        return;
-      }
+      // ── Step 2a: LOGIN flow ────────────────────────────────────────
+      if (!widget.isSignup) {
+        final snap = await FirebaseFirestore.instance
+            .collection(USERS)
+            .where('phoneNumber', isEqualTo: phoneNumber)
+            .where('countryCode', isEqualTo: countryCode)
+            .where('role', isEqualTo: USER_ROLE_CUSTOMER)
+            .get();
 
-      final bool userExists =
-          await FireStoreUtils.userExistOrNot(value.user!.uid) == true;
-
-      if (!userExists) {
-        User userModel = User()
-          ..userID = value.user!.uid
-          ..countryCode = countryCode
-          ..phoneNumber = phoneNumber
-          ..fcmToken = fcmToken;
-        ShowToastDialog.closeLoader();
         if (!mounted) return;
-        pushReplacement(context,
-            SignupScreen(userModel: userModel, type: 'mobileNumber'));
-        return;
-      }
 
-      User? userModel =
-          await FireStoreUtils.getUserProfile(value.user!.uid);
+        if (snap.docs.isEmpty) {
+          ShowToastDialog.closeLoader();
+          if (mounted) setState(() => _isVerifying = false);
+          ShowToastDialog.showToast(
+              'No account found with this number. Please sign up first.');
+          if (mounted) pushAndRemoveUntil(context, const LoginScreen());
+          return;
+        }
 
-      if (userModel == null) {
-        ShowToastDialog.showToast(
-            'No account found for this number. Please sign up.');
-        await auth.FirebaseAuth.instance.signOut();
-        ShowToastDialog.closeLoader();
+        final userModel = User.fromJson(snap.docs.first.data());
+
+        if (userModel.role != USER_ROLE_CUSTOMER) {
+          ShowToastDialog.closeLoader();
+          if (mounted) setState(() => _isVerifying = false);
+          ShowToastDialog.showToast(
+              'This account is not registered as a customer. Please use the correct QuickDash app.');
+          if (mounted) pushAndRemoveUntil(context, const LoginScreen());
+          return;
+        }
+
+        if (!userModel.active) {
+          ShowToastDialog.closeLoader();
+          if (mounted) setState(() => _isVerifying = false);
+          ShowToastDialog.showToast(
+              'Your account is temporarily restricted. Please contact support.');
+          if (mounted) pushAndRemoveUntil(context, const LoginScreen());
+          return;
+        }
+
+        userModel.fcmToken = await NotificationService.getToken();
+        await FireStoreUtils.updateCurrentUser(userModel);
+
+        // Persist phone user ID so the session survives app restarts
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(PHONE_AUTH_USER_ID, userModel.userID);
+
         if (!mounted) return;
-        pushAndRemoveUntil(context, const LoginScreen());
-        return;
-      }
-
-      if (userModel.role != USER_ROLE_CUSTOMER) {
-        ShowToastDialog.showToast(
-            'This account is not registered as a customer. Please use the correct QuickDash app.');
-        await auth.FirebaseAuth.instance.signOut();
         ShowToastDialog.closeLoader();
-        if (!mounted) return;
-        pushAndRemoveUntil(context, const LoginScreen());
-        return;
-      }
 
-      if (!userModel.active) {
-        ShowToastDialog.showToast(
-            'Your account is temporarily restricted. Please contact support.');
-        await auth.FirebaseAuth.instance.signOut();
-        ShowToastDialog.closeLoader();
-        if (!mounted) return;
-        pushAndRemoveUntil(context, const LoginScreen());
-        return;
-      }
-
-      userModel.fcmToken = fcmToken;
-      await FireStoreUtils.updateCurrentUser(userModel);
-
-      ShowToastDialog.closeLoader();
-      if (!mounted) return;
-
-      final addresses = userModel.shippingAddress;
-      if (addresses != null && addresses.isNotEmpty) {
-        final defaultAddr = addresses.where((e) => e.isDefault == true).isNotEmpty
-            ? addresses.where((e) => e.isDefault == true).single
-            : addresses.first;
-        if (defaultAddr.location != null) {
-          MyAppState.selectedPosotion = defaultAddr;
-          pushAndRemoveUntil(context, ServiceListScreen());
+        final addresses = userModel.shippingAddress;
+        if (addresses != null && addresses.isNotEmpty) {
+          final defaultAddr = addresses.firstWhere(
+            (e) => e.isDefault == true,
+            orElse: () => addresses.first,
+          );
+          if (defaultAddr.location != null) {
+            MyAppState.selectedPosotion = defaultAddr;
+            pushAndRemoveUntil(context, ServiceListScreen());
+          } else {
+            pushAndRemoveUntil(context, LocationPermissionScreen());
+          }
         } else {
           pushAndRemoveUntil(context, LocationPermissionScreen());
         }
-      } else {
-        pushAndRemoveUntil(context, LocationPermissionScreen());
+        return;
       }
-    } on auth.FirebaseAuthException catch (e) {
-      switch (e.code) {
-        case 'invalid-verification-code':
-          ShowToastDialog.showToast(
-              'Incorrect verification code. Please try again.');
-          break;
-        case 'session-expired':
-          ShowToastDialog.showToast(
-              'This verification code has expired. Request a new one.');
-          break;
-        case 'too-many-requests':
-          ShowToastDialog.showToast(
-              'Too many attempts. Please try again in a few minutes.');
-          break;
-        case 'network-request-failed':
-          ShowToastDialog.showToast(
-              'Unable to connect right now. Please try again.');
-          break;
-        default:
-          ShowToastDialog.showToast(
-              e.message ?? 'Verification failed. Please try again.');
-      }
-    } catch (_) {
-      ShowToastDialog.showToast('Something went wrong. Please try again.');
-    } finally {
+
+      // ── Step 2b: SIGNUP flow ───────────────────────────────────────
+      final fcmToken = await NotificationService.getToken();
+      final newUid = const Uuid().v4();
+      final User userModel = User()
+        ..userID = newUid
+        ..countryCode = countryCode
+        ..phoneNumber = phoneNumber
+        ..fcmToken = fcmToken;
+
       ShowToastDialog.closeLoader();
+      if (!mounted) return;
+      push(context, SignupScreen(type: 'mobileNumber', userModel: userModel));
+    } catch (e) {
+      ShowToastDialog.closeLoader();
+      final msg = e.toString();
+      if (msg.contains('SocketException') ||
+          msg.contains('TimeoutException') ||
+          msg.contains('NetworkException')) {
+        ShowToastDialog.showToast(
+            'No internet connection. Please try again.');
+      } else {
+        ShowToastDialog.showToast('Something went wrong. Please try again.');
+      }
+    } finally {
       if (mounted) setState(() => _isVerifying = false);
     }
   }
 
+  // ── UI ────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
     final dark = isDarkMode(context);
@@ -262,7 +290,7 @@ class _OtpScreenState extends State<OtpScreen> {
           dark ? AppThemeData.surfaceDark : const Color(0xFFF5F6FA),
       body: Column(
         children: [
-          // Gradient header — matches other auth screens
+          // Gradient header
           Container(
             width: double.infinity,
             decoration: const BoxDecoration(
@@ -283,7 +311,6 @@ class _OtpScreenState extends State<OtpScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Back button
                     GestureDetector(
                       onTap: () => Navigator.pop(context),
                       child: Container(
@@ -301,7 +328,6 @@ class _OtpScreenState extends State<OtpScreen> {
                       ),
                     ),
                     const SizedBox(height: 20),
-                    // Logo row
                     Row(
                       children: [
                         Container(
@@ -373,11 +399,11 @@ class _OtpScreenState extends State<OtpScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  // OTP boxes
+                  // OTP pin boxes — 4 digits, keyboard OTP suggestion enabled
                   PinCodeTextField(
-                    length: 6,
+                    length: 4,
                     appContext: context,
-                    keyboardType: TextInputType.phone,
+                    keyboardType: TextInputType.number,
                     enablePinAutofill: true,
                     hintCharacter: '·',
                     hintStyle: TextStyle(
@@ -387,23 +413,20 @@ class _OtpScreenState extends State<OtpScreen> {
                       fontSize: 22,
                     ),
                     textStyle: TextStyle(
-                      color: dark
-                          ? AppThemeData.grey50
-                          : AppThemeData.grey900,
+                      color: dark ? AppThemeData.grey50 : AppThemeData.grey900,
                       fontFamily: AppThemeData.semiBold,
                       fontSize: 20,
                     ),
                     pinTheme: PinTheme(
-                      fieldHeight: 54,
-                      fieldWidth: 46,
+                      fieldHeight: 58,
+                      fieldWidth: 58,
                       inactiveFillColor: Colors.transparent,
                       selectedFillColor: Colors.transparent,
                       activeFillColor: Colors.transparent,
                       selectedColor: AppThemeData.primary500,
                       activeColor: AppThemeData.primary500,
-                      inactiveColor: dark
-                          ? AppThemeData.grey600
-                          : AppThemeData.grey300,
+                      inactiveColor:
+                          dark ? AppThemeData.grey600 : AppThemeData.grey300,
                       disabledColor: AppThemeData.grey300,
                       shape: PinCodeFieldShape.box,
                       errorBorderColor: AppThemeData.error500,
@@ -420,12 +443,14 @@ class _OtpScreenState extends State<OtpScreen> {
 
                   const SizedBox(height: 28),
 
-                  // Timer + resend row
+                  // Timer / resend row
                   Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       Text(
-                        "${'Resend code in'.tr()} ",
+                        _canResend
+                            ? "${'Didn\'t receive the code?'.tr()} "
+                            : "${'Resend code in'.tr()} ",
                         style: TextStyle(
                           fontSize: 14,
                           fontFamily: AppThemeData.regular,
@@ -461,11 +486,91 @@ class _OtpScreenState extends State<OtpScreen> {
 
                   const SizedBox(height: 32),
 
-                  // Verify button — uses AuthPrimaryButton which stretches
-                  // correctly without a fixed pixel/percentage width
-                  AuthPrimaryButton(
-                    label: 'Verify & Continue'.tr(),
-                    onTap: _verifyOtp,
+                  // Verify button
+                  GestureDetector(
+                    onTap: _isVerifying ? null : _verifyOtp,
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 200),
+                      height: 52,
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: _isVerifying
+                              ? [
+                                  AppThemeData.primary500
+                                      .withValues(alpha: 0.6),
+                                  AppThemeData.primary400
+                                      .withValues(alpha: 0.6),
+                                ]
+                              : [
+                                  AppThemeData.primary500,
+                                  AppThemeData.primary400,
+                                ],
+                        ),
+                        borderRadius: BorderRadius.circular(14),
+                        boxShadow: _isVerifying
+                            ? []
+                            : [
+                                BoxShadow(
+                                  color: AppThemeData.primary500
+                                      .withValues(alpha: 0.3),
+                                  blurRadius: 12,
+                                  offset: const Offset(0, 4),
+                                ),
+                              ],
+                      ),
+                      child: Center(
+                        child: _isVerifying
+                            ? const SizedBox(
+                                width: 22,
+                                height: 22,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2.5,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : Text(
+                                'Verify & Continue'.tr(),
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 15,
+                                  fontFamily: AppThemeData.semiBold,
+                                ),
+                              ),
+                      ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 24),
+
+                  // Wrong number? Go back
+                  Center(
+                    child: GestureDetector(
+                      onTap: () => Navigator.pop(context),
+                      child: Text.rich(
+                        TextSpan(
+                          children: [
+                            TextSpan(
+                              text: 'Wrong number? '.tr(),
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontFamily: AppThemeData.regular,
+                                color: dark
+                                    ? AppThemeData.grey400
+                                    : AppThemeData.grey500,
+                              ),
+                            ),
+                            TextSpan(
+                              text: 'Change'.tr(),
+                              style: const TextStyle(
+                                fontSize: 13,
+                                fontFamily: AppThemeData.semiBold,
+                                color: AppThemeData.primary500,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
                   ),
                 ],
               ),

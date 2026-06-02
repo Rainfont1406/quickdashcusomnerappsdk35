@@ -6,6 +6,7 @@ import 'package:emartconsumer/model/createRazorPayOrderModel.dart';
 import 'package:emartconsumer/model/razorpayKeyModel.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/userPrefrence.dart';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:uuid/uuid.dart';
 
@@ -36,9 +37,10 @@ class RazorPayResult {
 class RazorPayController {
   Future<RazorPayResult> createOrderRazorPay(
       {required double amount, bool isTopup = false}) async {
-    final RazorPayModel razorPayData = UserPreference.getRazorPayData();
+    final RazorPayModel? razorPayData = UserPreference.getRazorPayData();
 
-    if (razorPayData.razorpayKey.isEmpty ||
+    if (razorPayData == null ||
+        razorPayData.razorpayKey.isEmpty ||
         razorPayData.razorpaySecret.isEmpty) {
       return RazorPayResult(
         errorType: RazorPayErrorType.missingCredentials,
@@ -85,68 +87,89 @@ class RazorPayController {
         throw Exception('Request timeout');
       });
 
+      debugPrint('[RazorPay] status=${response.statusCode} body=${response.body}');
+
       if (response.statusCode >= 200 && response.statusCode < 300) {
         try {
-          final data = jsonDecode(response.body);
-          if (data is Map<String, dynamic>) {
-            if (data.containsKey('error')) {
-              String msg =
-                  'Unable to initialize payment. Please try again later.';
-              if (data['error'] is Map &&
-                  data['error'].containsKey('description')) {
-                msg = data['error']['description'].toString();
-              }
-              return RazorPayResult(
-                  errorType: RazorPayErrorType.apiError, errorMessage: msg);
+          final raw = jsonDecode(response.body);
+
+          // Unwrap common server envelopes: {"data": {...}} or {"order": {...}}
+          Map<String, dynamic>? data;
+          if (raw is Map<String, dynamic>) {
+            if (raw.containsKey('data') && raw['data'] is Map<String, dynamic>) {
+              data = raw['data'] as Map<String, dynamic>;
+            } else if (raw.containsKey('order') && raw['order'] is Map<String, dynamic>) {
+              data = raw['order'] as Map<String, dynamic>;
+            } else {
+              data = raw;
             }
-            if (!data.containsKey('id')) {
-              return RazorPayResult(
-                errorType: RazorPayErrorType.invalidResponse,
-                errorMessage:
-                    'Payment service is temporarily unavailable. Please try again later.',
-              );
-            }
-            return RazorPayResult(
-                order: CreateRazorPayOrderModel.fromJson(data));
           }
+
+          if (data == null) {
+            return RazorPayResult(
+              errorType: RazorPayErrorType.invalidResponse,
+              errorMessage: 'Payment service is temporarily unavailable. Please try again later.',
+            );
+          }
+
+          // Surface any error returned by the server or Razorpay
+          if (data.containsKey('error')) {
+            final err = data['error'];
+            String msg = 'Unable to initialize payment. Please try again later.';
+            if (err is Map && err.containsKey('description')) {
+              msg = err['description'].toString();
+            } else if (err is String && err.isNotEmpty) {
+              msg = err;
+            }
+            return RazorPayResult(errorType: RazorPayErrorType.apiError, errorMessage: msg);
+          }
+
+          // Also handle {status: false/error, message: "..."} style responses
+          if (data.containsKey('message') && !data.containsKey('id')) {
+            final msg = data['message']?.toString() ?? 'Unable to initialize payment.';
+            return RazorPayResult(errorType: RazorPayErrorType.apiError, errorMessage: msg);
+          }
+
+          if (!data.containsKey('id')) {
+            return RazorPayResult(
+              errorType: RazorPayErrorType.invalidResponse,
+              errorMessage: 'Payment service is temporarily unavailable. Please try again later.',
+            );
+          }
+
+          return RazorPayResult(order: CreateRazorPayOrderModel.fromJson(data));
+        } catch (parseErr) {
+          debugPrint('[RazorPay] parse error: $parseErr');
           return RazorPayResult(
             errorType: RazorPayErrorType.invalidResponse,
-            errorMessage:
-                'Payment service is temporarily unavailable. Please try again later.',
-          );
-        } catch (_) {
-          return RazorPayResult(
-            errorType: RazorPayErrorType.invalidResponse,
-            errorMessage:
-                'Unable to initialize payment. Please try again later.',
+            errorMessage: 'Unable to initialize payment. Please try again later.',
           );
         }
       } else {
-        String errorMsg =
-            'Payment service is temporarily unavailable. Please try again later.';
+        String errorMsg = 'Payment service is temporarily unavailable. (HTTP ${response.statusCode})';
         try {
           final errorData = jsonDecode(response.body);
           if (errorData is Map<String, dynamic>) {
             if (errorData.containsKey('error')) {
-              errorMsg = errorData['error'] is Map
-                  ? (errorData['error']['description']?.toString() ?? errorMsg)
-                  : errorData['error'].toString();
+              final err = errorData['error'];
+              errorMsg = err is Map
+                  ? (err['description']?.toString() ?? errorMsg)
+                  : err.toString();
             } else if (errorData.containsKey('message')) {
               errorMsg = errorData['message'].toString();
             }
           }
         } catch (_) {}
-        return RazorPayResult(
-            errorType: RazorPayErrorType.apiError, errorMessage: errorMsg);
+        debugPrint('[RazorPay] error response: $errorMsg');
+        return RazorPayResult(errorType: RazorPayErrorType.apiError, errorMessage: errorMsg);
       }
     } catch (e) {
+      debugPrint('[RazorPay] exception: $e');
       final isTimeout = e.toString().contains('timeout') ||
           e.toString().contains('TimeoutException');
       return RazorPayResult(
-        errorType:
-            isTimeout ? RazorPayErrorType.timeout : RazorPayErrorType.networkError,
-        errorMessage:
-            'Unable to initialize payment. Please try again later.',
+        errorType: isTimeout ? RazorPayErrorType.timeout : RazorPayErrorType.networkError,
+        errorMessage: 'Unable to initialize payment. Please try again later.',
       );
     }
   }

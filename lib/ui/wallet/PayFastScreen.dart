@@ -2,8 +2,8 @@
 
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/model/PayFastSettingData.dart';
+import 'package:emartconsumer/services/app_dialog.dart';
 import 'package:flutter/foundation.dart';
-import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
@@ -78,38 +78,16 @@ class _PayFastScreenState extends State<PayFastScreen> {
   }
 
   Future<void> _showMyDialog() async {
-    return showDialog<void>(
-      context: context,
-      barrierDismissible: true, // user must tap button!
-      builder: (BuildContext context) {
-        return AlertDialog(
-          title: const Text('Cancel Payment').tr(),
-          content: SingleChildScrollView(
-            child: const Text("cancelPayment?").tr(),
-          ),
-          actions: <Widget>[
-            TextButton(
-              child: Text(
-                'Exit'.tr(),
-                style: const TextStyle(color: AppThemeData.primary500),
-              ),
-              onPressed: () {
-                Navigator.of(context).pop();
-                Navigator.of(context).pop(false);
-              },
-            ),
-            TextButton(
-              child: Text(
-                'Continue Payment'.tr(),
-                style: const TextStyle(color: Colors.green),
-              ),
-              onPressed: () {
-                Navigator.of(context).pop();
-              },
-            ),
-          ],
-        );
-      },
+    final confirmed = await AppDialog.showConfirm(
+      context,
+      title: 'Cancel Payment'.tr(),
+      message: 'cancelPayment?'.tr(),
+      confirmLabel: 'Exit'.tr(),
+      cancelLabel: 'Continue Payment'.tr(),
+      destructive: true,
     );
+    if (confirmed) {
+      if (mounted) Navigator.of(context).pop(false);
+    }
   }
 }

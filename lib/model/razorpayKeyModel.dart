@@ -15,8 +15,8 @@ class RazorPayModel {
     return RazorPayModel(
       razorpayKey: parsedJson['razorpayKey'] ?? '',
       razorpaySecret: parsedJson['razorpaySecret'] ?? '',
-      isSandboxEnabled: parsedJson['isSandboxEnabled'],
-      isEnabled: parsedJson['isEnabled'],
+      isSandboxEnabled: parsedJson['isSandboxEnabled'] ?? false,
+      isEnabled: parsedJson['isEnabled'] ?? false,
     );
   }
 

@@ -48,7 +48,7 @@ class CreateRazorPayOrderModel {
         offerId: json["offer_id"],
         status: json["status"],
         attempts: json["attempts"],
-        notes: Notes.fromJson(json["notes"]),
+        notes: Notes.fromJson(json["notes"] is Map<String, dynamic> ? json["notes"] as Map<String, dynamic> : {}),
         createdAt: json["created_at"],
       );
 

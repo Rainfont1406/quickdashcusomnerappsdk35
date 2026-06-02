@@ -9,6 +9,7 @@ import 'package:emartconsumer/theme/app_them_data.dart';
 /// Branded gradient header shared by login and signup screens.
 class AuthHeader extends StatelessWidget {
   final String title;
+  final String? tagline;
   final String subtitle;
   final Widget? action;
   final bool showBackButton;
@@ -16,6 +17,7 @@ class AuthHeader extends StatelessWidget {
   const AuthHeader({
     super.key,
     required this.title,
+    this.tagline,
     required this.subtitle,
     this.action,
     this.showBackButton = false,
@@ -118,11 +120,23 @@ class AuthHeader extends StatelessWidget {
                   fontFamily: AppThemeData.bold,
                 ),
               ),
+              if (tagline != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  tagline!,
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.75),
+                    fontSize: 12,
+                    fontFamily: AppThemeData.regular,
+                    height: 1.5,
+                  ),
+                ),
+              ],
               const SizedBox(height: 6),
               Text(
                 subtitle,
                 style: TextStyle(
-                  color: Colors.white.withValues(alpha: 0.8),
+                  color: Colors.white.withValues(alpha: 0.9),
                   fontSize: 14,
                   fontFamily: AppThemeData.regular,
                 ),

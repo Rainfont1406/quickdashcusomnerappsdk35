@@ -189,10 +189,10 @@ class _OffersScreenState extends State<OffersScreen> {
                     style: TextStyle(color: AppThemeData.primary500, fontWeight: FontWeight.w500, letterSpacing: 0.1),
                   ),
                   TextSpan(
-                    text: " & get".tr() +
-                       // " ${offerModel.discountTypeOffer == "Fix Price" ? currencyData!.symbol : ""}${offerModel.discountOffer}${offerModel.discountTypeOffer == "Percentage" ? "% off" : " off"} ",
-                       "${ offerModel.discountTypeOffer == "Fix Price" ? (currencyData!.symbolatright == true) ? "${offerModel.discountOffer}${currencyData!.symbol.toString()} OFF":"${currencyData!.symbol.toString()}${offerModel.discountOffer} OFF"
-                        : "${offerModel.discountOffer} % Off"}",
+                    text: ' & get '.tr() +
+                        (offerModel.discountTypeOffer == "Fix Price"
+                            ? '${amountShow(amount: offerModel.discountOffer)} OFF'
+                            : '${offerModel.discountOffer}% Off'),
                     style: const TextStyle(fontSize: 16.0, color: Colors.grey, fontWeight: FontWeight.w700),
                   ),
                 ],
@@ -435,8 +435,9 @@ class _OffersScreenState extends State<OffersScreen> {
                   margin: const EdgeInsets.only(top: 3),
                   child: Text(
                   //  "${offerModel.discountTypeOffer == "Fix Price".tr() ? currencyData!.symbol : ""}${offerModel.discountOffer}${offerModel.discountTypeOffer == "Percentage" ? "% Off" : " Off"}",
-                    offerModel.discountTypeOffer == "Fix Price" ? (currencyData!.symbolatright == true) ? "${offerModel.discountOffer}${currencyData!.symbol.toString()} OFF":"${currencyData!.symbol.toString()}${offerModel.discountOffer} OFF"
-                        : "${offerModel.discountOffer} % Off",
+                    offerModel.discountTypeOffer == "Fix Price"
+                        ? '${amountShow(amount: offerModel.discountOffer)} OFF'
+                        : '${offerModel.discountOffer}% Off',
                     style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, letterSpacing: 0.7),
                   ),
                 )

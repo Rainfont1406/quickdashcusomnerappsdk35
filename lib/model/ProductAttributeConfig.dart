@@ -62,31 +62,37 @@ class ProductAttributeOption {
   final String id;
   final String name;
   final double price;
+  final double discountedPrice;
   final bool enabled;
 
   ProductAttributeOption({
     required this.id,
     required this.name,
     this.price = 0.0,
+    this.discountedPrice = 0.0,
     this.enabled = true,
   });
+
+  double get effectivePrice => discountedPrice > 0 ? discountedPrice : price;
 
   factory ProductAttributeOption.fromJson(Map<String, dynamic> json) =>
       ProductAttributeOption(
         id: json['id']?.toString() ?? '',
         name: json['name']?.toString() ?? '',
         price: (json['price'] != null ? (json['price'] as num).toDouble() : 0.0),
+        discountedPrice: (json['discounted_price'] != null ? (json['discounted_price'] as num).toDouble() : 0.0),
         enabled: json['enabled'] ?? true,
       );
 
   Map<String, dynamic> toJson() =>
-      {'id': id, 'name': name, 'price': price, 'enabled': enabled};
+      {'id': id, 'name': name, 'price': price, 'discounted_price': discountedPrice, 'enabled': enabled};
 
-  ProductAttributeOption copyWith({bool? enabled, double? price}) =>
+  ProductAttributeOption copyWith({bool? enabled, double? price, double? discountedPrice}) =>
       ProductAttributeOption(
         id: id,
         name: name,
         price: price ?? this.price,
+        discountedPrice: discountedPrice ?? this.discountedPrice,
         enabled: enabled ?? this.enabled,
       );
 }

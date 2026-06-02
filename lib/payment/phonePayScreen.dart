@@ -1,4 +1,5 @@
 import 'package:easy_localization/easy_localization.dart';
+import 'package:emartconsumer/services/app_dialog.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
@@ -97,33 +98,16 @@ class _PhonePayScreenState extends State<PhonePayScreen> {
   }
 
   Future<void> _showCancelDialog() async {
-    return showDialog<void>(
-      context: context,
-      barrierDismissible: true,
-      builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-        title: Text('Cancel Payment'.tr()),
-        content: Text('Are you sure you want to cancel the payment?'.tr()),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: Text(
-              'Continue'.tr(),
-              style: const TextStyle(color: Colors.green),
-            ),
-          ),
-          TextButton(
-            onPressed: () {
-              Navigator.of(ctx).pop();
-              Navigator.of(context).pop(false);
-            },
-            child: Text(
-              'Cancel'.tr(),
-              style: const TextStyle(color: AppThemeData.primary500),
-            ),
-          ),
-        ],
-      ),
+    final confirmed = await AppDialog.showConfirm(
+      context,
+      title: 'Cancel Payment'.tr(),
+      message: 'Are you sure you want to cancel the payment?'.tr(),
+      confirmLabel: 'Cancel Payment'.tr(),
+      cancelLabel: 'Continue'.tr(),
+      destructive: true,
     );
+    if (confirmed) {
+      if (mounted) Navigator.of(context).pop(false);
+    }
   }
 }

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:developer';
+import 'package:flutter/foundation.dart';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:easy_localization/easy_localization.dart';
@@ -42,12 +43,10 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
-  // TODO: Re-enable App Check with proper configuration for production
-  // await FirebaseAppCheck.instance.activate(
-  //   webProvider: ReCaptchaV3Provider('recaptcha-v3-site-key'),
-  //   androidProvider: AndroidProvider.playIntegrity,
-  //   appleProvider: AppleProvider.appAttest,
-  // );
+  await FirebaseAppCheck.instance.activate(
+    androidProvider: kReleaseMode ? AndroidProvider.playIntegrity : AndroidProvider.debug,
+    appleProvider: kReleaseMode ? AppleProvider.appAttest : AppleProvider.debug,
+  );
   await EasyLocalization.ensureInitialized();
 
   FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
@@ -260,7 +259,14 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
   }
 
   @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {}
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      // Re-sync lightweight global settings (theme colour, wallet, currency)
+      // so they reflect any admin changes made while the app was backgrounded.
+      initializeFlutterFire();
+      FireStoreUtils.getWalletSettingData();
+    }
+  }
 }
 
 class OnBoarding extends StatefulWidget {
@@ -381,7 +387,71 @@ class OnBoardingState extends State<OnBoarding> with TickerProviderStateMixin {
           pushReplacement(context, const LoginScreen());
         }
       } else {
-        pushReplacement(context, const LoginScreen());
+        // No Firebase Auth session — try to restore a MSG91 phone user's session
+        final savedPhoneUid = prefs.getString(PHONE_AUTH_USER_ID);
+        if (savedPhoneUid != null && savedPhoneUid.isNotEmpty) {
+          User? user = await FireStoreUtils.getCurrentUser(savedPhoneUid);
+          if (user != null && user.role == USER_ROLE_CUSTOMER && user.active) {
+            user.fcmToken =
+                await FireStoreUtils.firebaseMessaging.getToken() ?? '';
+            await FireStoreUtils.updateCurrentUser(user);
+            MyAppState.currentUser = user;
+
+            if (MyAppState.currentUser!.shippingAddress != null &&
+                MyAppState.currentUser!.shippingAddress!.isNotEmpty) {
+              if (MyAppState.currentUser!.shippingAddress!
+                  .where((element) => element.isDefault == true)
+                  .isNotEmpty) {
+                MyAppState.selectedPosotion = MyAppState
+                    .currentUser!.shippingAddress!
+                    .where((element) => element.isDefault == true)
+                    .single;
+              } else {
+                MyAppState.selectedPosotion =
+                    MyAppState.currentUser!.shippingAddress!.first;
+              }
+              final sections = await FireStoreUtils.getSections();
+              if (sections.isNotEmpty) {
+                sectionConstantModel = sections.first;
+                if (sectionConstantModel?.color != null) {
+                  AppThemeData.primary300 = Color(
+                    int.parse(sectionConstantModel!.color!
+                        .replaceFirst("#", "0xff")),
+                  );
+                }
+                FireStoreUtils.getRazorPayDemo();
+                FireStoreUtils.getPaypalSettingData();
+                FireStoreUtils.getStripeSettingData();
+                FireStoreUtils.getPayStackSettingData();
+                FireStoreUtils.getFlutterWaveSettingData();
+                FireStoreUtils.getPaytmSettingData();
+                FireStoreUtils.getPayFastSettingData();
+                FireStoreUtils.getWalletSettingData();
+                FireStoreUtils.getMercadoPagoSettingData();
+                FireStoreUtils.getOrangeMoneySettingData();
+                FireStoreUtils.getXenditSettingData();
+                FireStoreUtils.getMidTransSettingData();
+                FireStoreUtils.getPhonePaySettingData();
+              }
+              pushReplacement(
+                  context,
+                  ContainerScreen(
+                    user: MyAppState.currentUser!,
+                    currentWidget: HomeScreen(user: MyAppState.currentUser!),
+                    appBarTitle: 'Home',
+                    drawerSelection: DrawerSelection.Home,
+                  ));
+            } else {
+              pushAndRemoveUntil(context, LocationPermissionScreen());
+            }
+          } else {
+            // Stored session is invalid or user deactivated — clear it
+            await prefs.remove(PHONE_AUTH_USER_ID);
+            pushReplacement(context, const LoginScreen());
+          }
+        } else {
+          pushReplacement(context, const LoginScreen());
+        }
       }
     } else {
       pushReplacement(context, const OnBoardingScreen());

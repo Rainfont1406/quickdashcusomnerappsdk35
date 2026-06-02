@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:easy_localization/easy_localization.dart';
@@ -6,14 +7,17 @@ import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/BookTableModel.dart';
 import 'package:emartconsumer/model/BookingSlotModel.dart';
 import 'package:emartconsumer/model/User.dart';
+import 'package:emartconsumer/model/topupTranHistory.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/auth_screen/login_screen.dart';
 import 'package:emartconsumer/ui/dineInScreen/booking_confirmation_screen.dart';
+import 'package:emartconsumer/ui/wallet/walletScreen.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:intl/intl.dart';
 
 class DineInRestaurantDetailsScreen extends StatefulWidget {
   final VendorModel vendorModel;
@@ -36,10 +40,26 @@ class _DineInRestaurantDetailsScreenState
   String _selectedSlotEnd = '';
   int _guestCount = 2;
 
+  // Header image carousel (vendorMenuPhotos uploaded via AddDineIn)
+  late PageController _headerCtrl;
+  Timer? _headerTimer;
+  int _headerPage = 0;
+
+  // vendorMenuPhotos[0..n] = menu/ambience photos set by vendor in AddDineIn
+  List<String> get _menuPhotos =>
+      widget.vendorModel.vendorMenuPhotos
+          .map((e) => e.toString())
+          .where((s) => s.isNotEmpty && s != 'null')
+          .toList();
+
   // Slot booking count cache: slotId → count
   Map<String, int> _slotBookingCounts = {};
   bool _loadingSlotCounts = false;
   String? _slotLoadError;
+
+  // Wallet balance
+  double _walletBalance = 0.0;
+  bool _walletLoaded = false;
 
   // Orange — used only for price/offer emphasis (rating, total, pricing chip)
   static const Color _accent = AppThemeData.accent500;
@@ -56,10 +76,43 @@ class _DineInRestaurantDetailsScreenState
   @override
   void initState() {
     super.initState();
-    // Clamp guest count to vendor's limits
     _guestCount = widget.vendorModel.minGuests.clamp(1, 100);
     if (widget.vendorModel.bookingType == 'slot_based') {
       _loadSlotCounts();
+    }
+    _fetchWalletBalance();
+    _headerCtrl = PageController();
+    final photos = _menuPhotos;
+    if (photos.length > 1) {
+      _headerTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+        if (!mounted) return;
+        final next = (_headerPage + 1) % photos.length;
+        _headerCtrl.animateToPage(next,
+            duration: const Duration(milliseconds: 400),
+            curve: Curves.easeInOut);
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _headerTimer?.cancel();
+    _headerCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _fetchWalletBalance() async {
+    if (MyAppState.currentUser == null) return;
+    try {
+      final user = await FireStoreUtils.getCurrentUser(MyAppState.currentUser!.userID);
+      if (mounted && user != null) {
+        setState(() {
+          _walletBalance = double.tryParse(user.wallet_amount.toString()) ?? 0.0;
+          _walletLoaded = true;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _walletLoaded = true);
     }
   }
 
@@ -193,6 +246,8 @@ class _DineInRestaurantDetailsScreenState
 
   // ─── Sliver Header ────────────────────────────────────────────
   Widget _buildSliverHeader(bool dark) {
+    final photos = _menuPhotos;
+    final fallback = getImageVAlidUrl(widget.vendorModel.photo);
     return SliverAppBar(
       expandedHeight: 240,
       pinned: true,
@@ -202,15 +257,35 @@ class _DineInRestaurantDetailsScreenState
         background: Stack(
           fit: StackFit.expand,
           children: [
-            CachedNetworkImage(
-              imageUrl: getImageVAlidUrl(widget.vendorModel.photo),
-              fit: BoxFit.cover,
-              placeholder: (_, __) =>
-                  Container(color: Colors.grey.shade300),
-              errorWidget: (_, __, ___) =>
-                  Container(color: Colors.grey.shade300,
-                      child: const Icon(Icons.restaurant, size: 40, color: Colors.grey)),
-            ),
+            // Menu photo carousel (vendorMenuPhotos from AddDineIn),
+            // falls back to restaurant logo if none uploaded yet.
+            photos.isEmpty
+                ? CachedNetworkImage(
+                    imageUrl: fallback,
+                    fit: BoxFit.cover,
+                    placeholder: (_, __) =>
+                        Container(color: Colors.grey.shade300),
+                    errorWidget: (_, __, ___) => Container(
+                        color: Colors.grey.shade300,
+                        child: const Icon(Icons.restaurant,
+                            size: 40, color: Colors.grey)),
+                  )
+                : PageView.builder(
+                    controller: _headerCtrl,
+                    itemCount: photos.length,
+                    onPageChanged: (i) =>
+                        setState(() => _headerPage = i),
+                    itemBuilder: (_, i) => CachedNetworkImage(
+                      imageUrl: getImageVAlidUrl(photos[i]),
+                      fit: BoxFit.cover,
+                      placeholder: (_, __) =>
+                          Container(color: Colors.grey.shade300),
+                      errorWidget: (_, __, ___) => Container(
+                          color: Colors.grey.shade300,
+                          child: const Icon(Icons.restaurant,
+                              size: 40, color: Colors.grey)),
+                    ),
+                  ),
             // Dark gradient overlay at bottom
             Positioned(
               bottom: 0,
@@ -227,6 +302,31 @@ class _DineInRestaurantDetailsScreenState
                 ),
               ),
             ),
+            // Dot indicators
+            if (photos.length > 1)
+              Positioned(
+                bottom: 12,
+                left: 0,
+                right: 0,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: List.generate(photos.length, (i) {
+                    final active = i == _headerPage;
+                    return AnimatedContainer(
+                      duration: const Duration(milliseconds: 250),
+                      margin: const EdgeInsets.symmetric(horizontal: 3),
+                      width: active ? 18 : 6,
+                      height: 6,
+                      decoration: BoxDecoration(
+                        color: active
+                            ? Colors.white
+                            : Colors.white.withValues(alpha: 0.55),
+                        borderRadius: BorderRadius.circular(3),
+                      ),
+                    );
+                  }),
+                ),
+              ),
           ],
         ),
       ),
@@ -272,16 +372,20 @@ class _DineInRestaurantDetailsScreenState
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                 decoration: BoxDecoration(
-                    color: AppThemeData.accent50, borderRadius: BorderRadius.circular(6)),
+                    color: const Color(0xFFDCFCE7),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(
+                        color: const Color(0xFF16A34A).withValues(alpha: 0.35),
+                        width: 1)),
                 child: Row(
                   children: [
-                    const Icon(Icons.star_rounded, size: 14, color: AppThemeData.accent500),
+                    const Icon(Icons.star_rounded, size: 14, color: Color(0xFF16A34A)),
                     const SizedBox(width: 3),
                     Text(rating.toStringAsFixed(1),
                         style: const TextStyle(
                             fontSize: 12,
                             fontWeight: FontWeight.w600,
-                            color: AppThemeData.accent600)),
+                            color: Color(0xFF15803D))),
                   ],
                 ),
               ),
@@ -400,9 +504,6 @@ class _DineInRestaurantDetailsScreenState
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           _sectionTitle(dark, Icons.grid_view_rounded, 'Select Time Slot'.tr()),
-          const SizedBox(height: 6),
-          Text('30-minute dining sessions'.tr(),
-              style: TextStyle(fontSize: 12, color: dark ? Colors.white54 : Colors.grey.shade500)),
           const SizedBox(height: 14),
           if (_loadingSlotCounts)
             _SlotGridSkeleton(dark: dark)
@@ -672,7 +773,6 @@ class _DineInRestaurantDetailsScreenState
   // ─── Price Summary ────────────────────────────────────────────
   Widget _buildPriceSummary(bool dark) {
     final vendor = widget.vendorModel;
-    final sym = currencyData?.symbol ?? '₹';
     final isFree = vendor.bookingPricingModel == 'free';
 
     return Container(
@@ -704,7 +804,7 @@ class _DineInRestaurantDetailsScreenState
               ),
             )
           else ...[
-            _priceRow(dark, _priceLineLabel(vendor), '$sym${vendor.bookingCharge.toStringAsFixed(0)}'),
+            _priceRow(dark, _priceLineLabel(vendor), amountShow(amount: vendor.bookingCharge.toString(), decimals: 0)),
             if (vendor.bookingPricingModel == 'per_person' ||
                 vendor.bookingPricingModel == 'cover_charge') ...[
               const SizedBox(height: 6),
@@ -722,7 +822,7 @@ class _DineInRestaurantDetailsScreenState
                 AnimatedSwitcher(
                   duration: const Duration(milliseconds: 300),
                   child: Text(
-                    '$sym${_totalCharge.toStringAsFixed(0)}',
+                    amountShow(amount: _totalCharge.toString(), decimals: 0),
                     key: ValueKey(_totalCharge),
                     style: const TextStyle(
                         fontSize: 18,
@@ -732,6 +832,32 @@ class _DineInRestaurantDetailsScreenState
                 ),
               ],
             ),
+            Divider(height: 24, color: dark ? Colors.white12 : Colors.grey.shade200),
+            // ── Payment method ──────────────────────────────────────
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(6),
+                  decoration: BoxDecoration(
+                    color: _primary.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Icon(Icons.account_balance_wallet_rounded, size: 16, color: _primary),
+                ),
+                const SizedBox(width: 10),
+                Text('Payment Method'.tr(),
+                    style: TextStyle(fontSize: 13, color: dark ? Colors.white60 : Colors.grey.shade600)),
+                const Spacer(),
+                Text('Wallet'.tr(),
+                    style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                        color: dark ? Colors.white : Colors.black87)),
+              ],
+            ),
+            const SizedBox(height: 12),
+            // ── Wallet balance indicator ────────────────────────────
+            _buildWalletBalanceRow(dark),
           ],
         ],
       ),
@@ -767,6 +893,90 @@ class _DineInRestaurantDetailsScreenState
                   color: dark ? Colors.white : Colors.black87)),
         ],
       ),
+    );
+  }
+
+  Widget _buildWalletBalanceRow(bool dark) {
+    if (!_walletLoaded) {
+      return const SizedBox(
+        height: 20,
+        width: 20,
+        child: CircularProgressIndicator(strokeWidth: 2),
+      );
+    }
+    final bool sufficient = _walletBalance >= _totalCharge;
+    final Color statusColor = sufficient ? const Color(0xFF2E7D32) : const Color(0xFFC62828);
+    final Color bgColor = sufficient
+        ? const Color(0xFFE8F5E9)
+        : (dark ? const Color(0xFF3E1A1A) : const Color(0xFFFFEBEE));
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: bgColor,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: statusColor.withValues(alpha: 0.25),
+            ),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                sufficient ? Icons.check_circle_rounded : Icons.warning_amber_rounded,
+                size: 16,
+                color: statusColor,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                amountShow(amount: _walletBalance.toStringAsFixed(2)),
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: statusColor,
+                ),
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  sufficient ? '· ${"Sufficient balance".tr()}' : '· ${"Insufficient balance".tr()}',
+                  style: TextStyle(fontSize: 12, color: statusColor),
+                ),
+              ),
+            ],
+          ),
+        ),
+        if (!sufficient) ...[
+          const SizedBox(height: 8),
+          GestureDetector(
+            onTap: () => push(context, const WalletScreen(showAppBar: true)).then((_) => _fetchWalletBalance()),
+            child: Container(
+              padding: const EdgeInsets.symmetric(vertical: 11),
+              decoration: BoxDecoration(
+                border: Border.all(color: _primary, width: 1.5),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(Icons.add_circle_outline_rounded, size: 16, color: _primary),
+                  const SizedBox(width: 6),
+                  Text(
+                    'Add Wallet Balance'.tr(),
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      color: _primary,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ],
     );
   }
 
@@ -840,14 +1050,13 @@ class _DineInRestaurantDetailsScreenState
       return;
     }
 
-    // Show skeleton loading overlay
     _showSkeletonLoader();
 
     try {
       final vendor = widget.vendorModel;
       final user = MyAppState.currentUser!;
 
-      // Validate slot availability (real-time check)
+      // ── Slot availability check ──────────────────────────────
       if (vendor.bookingType == 'slot_based') {
         final count = await FireStoreUtils.getSlotBookingCount(
           vendorId: vendor.id,
@@ -856,7 +1065,7 @@ class _DineInRestaurantDetailsScreenState
         );
         final slot = vendor.bookingSlots.firstWhere((s) => s.id == _selectedSlotId);
         if (count >= slot.maxCapacity) {
-          Navigator.pop(context); // close loader
+          Navigator.pop(context);
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text('Sorry, this slot is fully booked. Please choose another.'.tr()),
@@ -868,7 +1077,67 @@ class _DineInRestaurantDetailsScreenState
         }
       }
 
-      // Build booking date timestamp
+      // ── Wallet check + deduction (when charge applies) ───────
+      if (_totalCharge > 0) {
+        final userRef = FireStoreUtils.firestore.collection(USERS).doc(user.userID);
+        bool insufficientBalance = false;
+        double newBalance = 0;
+
+        await FireStoreUtils.firestore.runTransaction((txn) async {
+          final snap = await txn.get(userRef);
+          if (!snap.exists || snap.data() == null) throw Exception('user-not-found');
+
+          final currentBalance = double.tryParse(snap.data()!['wallet_amount'].toString()) ?? 0.0;
+          final charge = _totalCharge.toDouble();
+
+          if (currentBalance < charge) {
+            insufficientBalance = true;
+            return; // abort writes — transaction commits with no changes
+          }
+
+          newBalance = currentBalance - charge;
+          txn.update(userRef, {'wallet_amount': newBalance});
+        });
+
+        if (insufficientBalance) {
+          Navigator.pop(context);
+          // Refresh displayed balance from Firestore
+          _fetchWalletBalance();
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                'Booking not completed. Wallet balance is insufficient. Please add funds and try again.'.tr(),
+              ),
+              backgroundColor: Colors.red,
+              duration: const Duration(seconds: 4),
+            ),
+          );
+          return;
+        }
+
+        // Keep local cache in sync
+        MyAppState.currentUser!.wallet_amount = newBalance;
+        if (mounted) setState(() => _walletBalance = newBalance);
+
+        // ── Write wallet transaction history record ───────────
+        final txnRef = FireStoreUtils.firestore.collection(Wallet).doc();
+        final txnRecord = TopupTranHistoryModel(
+          id: txnRef.id,
+          user_id: user.userID,
+          amount: _totalCharge,
+          isTopup: false,
+          payment_method: 'Wallet',
+          payment_status: 'success',
+          date: Timestamp.now(),
+          order_id: '',
+          serviceType: 'Table Booking',
+          transactionUser: '${user.firstName} ${user.lastName}',
+          note: 'Table Booking – ${widget.vendorModel.title}',
+        );
+        await txnRef.set(txnRecord.toJson());
+      }
+
+      // ── Create booking ───────────────────────────────────────
       final bookingDateTime = DateTime(
         _selectedDate.year,
         _selectedDate.month,
@@ -894,6 +1163,7 @@ class _DineInRestaurantDetailsScreenState
         selectedTime: vendor.bookingType == 'slot_based' ? _selectedSlotStart : _selectedTime,
         selectedEndTime: vendor.bookingType == 'slot_based' ? _selectedSlotEnd : '',
         bookingDate: DateFormat('EEE, MMM d yyyy').format(_selectedDate),
+        bookingDateKey: DateFormat('yyyy-MM-dd').format(_selectedDate),
         pricingModel: vendor.bookingPricingModel,
         bookingCharge: vendor.bookingCharge,
         totalCharge: _totalCharge,
@@ -902,7 +1172,7 @@ class _DineInRestaurantDetailsScreenState
 
       final saved = await FireStoreUtils().bookTable(booking);
 
-      // Write notification to Firestore for vendor push notification
+      // Vendor push notification (best-effort)
       try {
         await FireStoreUtils.firestore.collection('notifications').add({
           'to': vendor.fcmToken,
@@ -912,10 +1182,10 @@ class _DineInRestaurantDetailsScreenState
         });
       } catch (_) {}
 
-      Navigator.pop(context); // close loader
+      Navigator.pop(context);
       push(context, BookingConfirmationScreen(booking: saved));
     } catch (e) {
-      Navigator.pop(context); // close loader
+      Navigator.pop(context);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Booking failed. Please try again.'.tr()),
@@ -1040,14 +1310,14 @@ class _DineInRestaurantDetailsScreenState
       );
 
   String _pricingLabel(VendorModel vendor) {
-    final sym = currencyData?.symbol ?? '₹';
+    final String amt = amountShow(amount: vendor.bookingCharge.toString(), decimals: 0);
     switch (vendor.bookingPricingModel) {
       case 'per_person':
-        return '$sym${vendor.bookingCharge.toStringAsFixed(0)}/person';
+        return '$amt/person';
       case 'table_charge':
-        return '$sym${vendor.bookingCharge.toStringAsFixed(0)} table';
+        return '$amt table';
       case 'cover_charge':
-        return '$sym${vendor.bookingCharge.toStringAsFixed(0)} cover';
+        return '$amt cover';
       default:
         return 'Free'.tr();
     }

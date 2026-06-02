@@ -44,6 +44,7 @@ import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/ui/wallet/MercadoPagoScreen.dart';
 import 'package:emartconsumer/ui/wallet/payStackScreen.dart';
 import 'package:http/http.dart' as http;
+import 'package:emartconsumer/services/app_dialog.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/paystack_url_genrater.dart';
 import 'package:emartconsumer/services/rozorpayConroller.dart';
@@ -1509,7 +1510,7 @@ class _GiftCardPurchaseScreenState extends State<GiftCardPurchaseScreen> {
       Navigator.pop(context);
       var lo1 = jsonEncode(e);
       var lo2 = jsonDecode(lo1);
-      showDialog(context: context, builder: (_) => AlertDialog(content: Text("Payment Failed")));
+      AppDialog.showError(context, message: 'Payment failed. Please try again.');
     } catch (e) {
       print('$e');
       Navigator.pop(context);
@@ -1673,23 +1674,7 @@ class _GiftCardPurchaseScreenState extends State<GiftCardPurchaseScreen> {
   }
 
   Future<void> showLoading({required String message, Color txtColor = Colors.black}) {
-    return showDialog(
-      context: this.context,
-      barrierDismissible: false,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          content: Container(
-            margin: EdgeInsets.fromLTRB(30, 20, 30, 20),
-            width: double.infinity,
-            height: 30,
-            child: Text(
-              message,
-              style: TextStyle(color: txtColor),
-            ),
-          ),
-        );
-      },
-    );
+    return AppDialog.showInfo(context, message: message);
   }
 
   ///PayStack Payment Method

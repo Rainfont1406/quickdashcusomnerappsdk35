@@ -1,4 +1,5 @@
 import 'package:easy_localization/easy_localization.dart';
+import 'package:emartconsumer/services/app_dialog.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -75,94 +76,14 @@ class _DeliveryTypeSelectorState extends State<DeliveryTypeSelector> {
   }
 
   void _showUnavailableDialog(BuildContext ctx, String value) {
-    final isDark = widget.isDarkMode;
     final isDelivery = value == 'Delivery'.tr();
-    showDialog(
-      context: ctx,
-      barrierDismissible: true,
-      builder: (dialogCtx) => Dialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        backgroundColor: isDark ? AppThemeData.darkBgSecondary : Colors.white,
-        insetPadding: const EdgeInsets.symmetric(horizontal: 24),
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 64,
-                height: 64,
-                decoration: BoxDecoration(
-                  color: AppThemeData.error500.withValues(alpha: 0.12),
-                  shape: BoxShape.circle,
-                ),
-                child: Icon(
-                  isDelivery
-                      ? Icons.delivery_dining_rounded
-                      : Icons.restaurant_menu_rounded,
-                  color: AppThemeData.error500,
-                  size: 28,
-                ),
-              ),
-              const SizedBox(height: 16),
-              Text(
-                isDelivery
-                    ? 'Delivery Unavailable'.tr()
-                    : 'DineAway Unavailable'.tr(),
-                style: TextStyle(
-                  fontSize: 17,
-                  fontFamily: AppThemeData.bold,
-                  fontWeight: FontWeight.w700,
-                  color: isDark
-                      ? AppThemeData.darkTextPrimary
-                      : AppThemeData.neutral900,
-                ),
-              ),
-              const SizedBox(height: 10),
-              Text(
-                isDelivery
-                    ? 'One or more items in your cart are not available for Delivery. Please remove those items or choose DineAway.'
-                        .tr()
-                    : 'One or more items in your cart are not available for DineAway. Please remove those items or choose Delivery.'
-                        .tr(),
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  fontSize: 14,
-                  fontFamily: AppThemeData.regular,
-                  color: isDark
-                      ? AppThemeData.darkTextSecondary
-                      : AppThemeData.neutral600,
-                  height: 1.5,
-                ),
-              ),
-              const SizedBox(height: 24),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: () => Navigator.of(dialogCtx).pop(),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppThemeData.primary500,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    elevation: 0,
-                  ),
-                  child: Text(
-                    'Got It'.tr(),
-                    style: const TextStyle(
-                      fontSize: 15,
-                      fontFamily: AppThemeData.semiBold,
-                      fontWeight: FontWeight.w600,
-                      color: Colors.white,
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
+    AppDialog.showError(
+      ctx,
+      title: isDelivery ? 'Delivery Unavailable' : 'DineAway Unavailable',
+      message: isDelivery
+          ? 'One or more items in your cart are not available for Delivery. Please remove those items or choose DineAway.'
+          : 'One or more items in your cart are not available for DineAway. Please remove those items or choose Delivery.',
+      buttonLabel: 'Got It',
     );
   }
 

@@ -138,22 +138,38 @@ class _PlaceOrderScreenState extends State<PlaceOrderScreen>
   }
 
   void _sendNotificationsBackground() {
+    _sendVendorNotification().catchError((_) {});
+    FireStoreUtils.sendOrderEmail(orderModel: widget.orderModel)
+        .catchError((_) {});
+  }
+
+  Future<void> _sendVendorNotification() async {
     try {
+      // Always fetch the live token from Firestore — never use the
+      // cached value from widget.orderModel.vendor which may be stale
+      // (e.g. vendor logged out after customer opened the restaurant page).
+      final vendorId = widget.orderModel.vendor.id;
+      String liveToken = '';
+      if (vendorId.isNotEmpty) {
+        final doc = await FireStoreUtils.firestore
+            .collection(VENDORS)
+            .doc(vendorId)
+            .get();
+        liveToken = (doc.data()?['fcmToken'] as String?) ?? '';
+      }
+
+      // If vendor is logged out their token will be empty — skip silently
+      if (liveToken.isEmpty) return;
+
       final payload = <String, dynamic>{
         'type': 'vendor_order',
         'orderId': widget.orderModel.id,
       };
-      if (widget.orderModel.scheduleTime != null) {
-        SendNotification.sendFcmMessage(
-            scheduleOrder, widget.orderModel.vendor.fcmToken, payload);
-      } else {
-        SendNotification.sendFcmMessage(
-            orderPlaced, widget.orderModel.vendor.fcmToken, payload);
-      }
+      final type = widget.orderModel.scheduleTime != null
+          ? scheduleOrder
+          : orderPlaced;
+      SendNotification.sendFcmMessage(type, liveToken, payload);
     } catch (_) {}
-
-    FireStoreUtils.sendOrderEmail(orderModel: widget.orderModel)
-        .catchError((_) {});
   }
 
   void _navigateAway() {

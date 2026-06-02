@@ -27,6 +27,7 @@ import 'package:emartconsumer/ui/auth_screen/login_screen.dart';
 import 'package:emartconsumer/ui/cartScreen/CartScreen.dart';
 import 'package:emartconsumer/ui/container/ContainerScreen.dart';
 import 'package:emartconsumer/ui/vendorProductsScreen/review.dart';
+import 'package:emartconsumer/services/app_dialog.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_rating_bar/flutter_rating_bar.dart';
 import 'package:provider/provider.dart';
@@ -48,66 +49,6 @@ class ProductDetailsScreen extends StatefulWidget {
 
 class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
   
-  // Helper method to build nutrition item
-  Widget _buildNutritionItem(BuildContext context, {
-    required IconData icon,
-    required String label,
-    required String value,
-    required Color color,
-    required Color iconColor,
-  }) {
-    return Expanded(
-      child: Container(
-        padding: EdgeInsets.symmetric(vertical: 12, horizontal: 12),
-        decoration: BoxDecoration(
-          color: color,
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Row(
-          children: [
-            Container(
-              padding: EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Icon(
-                icon,
-                color: iconColor,
-                size: 22,
-              ),
-            ),
-            SizedBox(width: 12),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  value,
-                  style: TextStyle(
-                    fontFamily: AppThemeData.bold,
-                    fontSize: 18,
-                    color: isDarkMode(context)
-                        ? AppThemeData.grey50
-                        : AppThemeData.grey900,
-                  ),
-                ),
-                Text(
-                  label,
-                  style: TextStyle(
-                    fontFamily: AppThemeData.regular,
-                    fontSize: 12,
-                    color: isDarkMode(context)
-                        ? AppThemeData.grey300
-                        : AppThemeData.grey600,
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
   late CartDatabase cartDatabase;
 
   String radioItem = '';
@@ -325,11 +266,29 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
       final selectedIds = _selectedAttrOptions[cfg.attributeId] ?? [];
       for (final opt in cfg.options) {
         if (opt.enabled && selectedIds.contains(opt.id)) {
-          total += opt.price;
+          total += opt.effectivePrice;
         }
       }
     }
     _attrAddOnTotal = total;
+  }
+
+  bool get _hasVariantPricing {
+    return widget.productModel.productAttributes.isNotEmpty &&
+        widget.productModel.productAttributes.any((cfg) => cfg.options.any((o) => o.enabled && o.price > 0));
+  }
+
+  double get _startsFromPrice {
+    double minPrice = double.infinity;
+    for (final cfg in widget.productModel.productAttributes) {
+      for (final opt in cfg.options) {
+        if (opt.enabled && opt.price > 0) {
+          final ep = opt.effectivePrice;
+          if (ep < minPrice) minPrice = ep;
+        }
+      }
+    }
+    return minPrice == double.infinity ? 0 : minPrice;
   }
 
   @override
@@ -587,62 +546,90 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                     ),
                                   ),
                                   const SizedBox(height: 10),
-                                  Row(
-                                    crossAxisAlignment: CrossAxisAlignment.center,
-                                    children: [
-                                      Text(
-                                        (widget.productModel.disPrice == "" || widget.productModel.disPrice == "0")
-                                            ? amountShow(amount: productCommissionPrice(widget.productModel.price))
-                                            : amountShow(amount: productCommissionPrice(widget.productModel.disPrice.toString())),
-                                        style: TextStyle(
-                                          fontSize: 24,
-                                          letterSpacing: 0.5,
-                                          fontFamily: AppThemeData.bold,
-                                          color: (widget.productModel.disPrice != null &&
-                                              widget.productModel.disPrice != "" &&
-                                              widget.productModel.disPrice != "0")
-                                              ? AppThemeData.accent500
-                                              : AppThemeData.primary500,
-                                        ),
-                                      ),
-                                      if (widget.productModel.disPrice != null &&
-                                          widget.productModel.disPrice != "" &&
-                                          widget.productModel.disPrice != "0") ...[
-                                        const SizedBox(width: 8),
+                                  Builder(builder: (ctx) {
+                                    if (_hasVariantPricing) {
+                                      final displayPrice = _attrAddOnTotal > 0 ? _attrAddOnTotal : _startsFromPrice;
+                                      return Row(
+                                        crossAxisAlignment: CrossAxisAlignment.center,
+                                        children: [
+                                          Column(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                _attrAddOnTotal > 0 ? 'Selected Price'.tr() : 'Starts From'.tr(),
+                                                style: TextStyle(
+                                                  fontSize: 11,
+                                                  fontFamily: AppThemeData.regular,
+                                                  color: isDarkMode(ctx) ? AppThemeData.grey500 : AppThemeData.grey400,
+                                                ),
+                                              ),
+                                              Text(
+                                                amountShow(amount: productCommissionPrice(displayPrice.toStringAsFixed(2))),
+                                                style: const TextStyle(
+                                                  fontSize: 24,
+                                                  letterSpacing: 0.5,
+                                                  fontFamily: AppThemeData.bold,
+                                                  color: AppThemeData.primary500,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ],
+                                      );
+                                    }
+                                    return Row(
+                                      crossAxisAlignment: CrossAxisAlignment.center,
+                                      children: [
                                         Text(
-                                          amountShow(amount: productCommissionPrice(widget.productModel.price)),
-                                          style: TextStyle(
-                                            fontSize: 14,
-                                            fontFamily: AppThemeData.regular,
-                                            color: isDarkMode(context) ? AppThemeData.grey500 : AppThemeData.grey400,
-                                            decoration: TextDecoration.lineThrough,
+                                          (widget.productModel.disPrice == "" || widget.productModel.disPrice == "0")
+                                              ? amountShow(amount: productCommissionPrice(widget.productModel.price))
+                                              : amountShow(amount: productCommissionPrice(widget.productModel.disPrice.toString())),
+                                          style: const TextStyle(
+                                            fontSize: 24,
+                                            letterSpacing: 0.5,
+                                            fontFamily: AppThemeData.bold,
+                                            color: AppThemeData.primary500,
                                           ),
                                         ),
-                                        const SizedBox(width: 8),
-                                        Builder(builder: (_) {
-                                          final orig = double.tryParse(widget.productModel.price) ?? 0;
-                                          final disc = double.tryParse(widget.productModel.disPrice ?? '0') ?? 0;
-                                          final pct = orig > 0 ? ((orig - disc) / orig * 100).round() : 0;
-                                          if (pct <= 0) return const SizedBox.shrink();
-                                          return Container(
-                                            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-                                            decoration: BoxDecoration(
-                                              color: AppThemeData.accent500,
-                                              borderRadius: BorderRadius.circular(6),
+                                        if (widget.productModel.disPrice != null &&
+                                            widget.productModel.disPrice != "" &&
+                                            widget.productModel.disPrice != "0") ...[
+                                          const SizedBox(width: 8),
+                                          Text(
+                                            amountShow(amount: productCommissionPrice(widget.productModel.price)),
+                                            style: TextStyle(
+                                              fontSize: 14,
+                                              fontFamily: AppThemeData.regular,
+                                              color: isDarkMode(ctx) ? AppThemeData.grey500 : AppThemeData.grey400,
+                                              decoration: TextDecoration.lineThrough,
                                             ),
-                                            child: Text(
-                                              '$pct% OFF',
-                                              style: const TextStyle(
-                                                color: Colors.white,
-                                                fontSize: 11,
-                                                fontFamily: AppThemeData.semiBold,
+                                          ),
+                                          const SizedBox(width: 8),
+                                          Builder(builder: (_) {
+                                            final orig = double.tryParse(widget.productModel.price) ?? 0;
+                                            final disc = double.tryParse(widget.productModel.disPrice ?? '0') ?? 0;
+                                            final pct = orig > 0 ? ((orig - disc) / orig * 100).round() : 0;
+                                            if (pct <= 0) return const SizedBox.shrink();
+                                            return Container(
+                                              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                                              decoration: BoxDecoration(
+                                                color: AppThemeData.primary500.withOpacity(0.12),
+                                                borderRadius: BorderRadius.circular(6),
                                               ),
-                                            ),
-                                          );
-                                        }),
+                                              child: Text(
+                                                '$pct% OFF',
+                                                style: const TextStyle(
+                                                  color: AppThemeData.primary500,
+                                                  fontSize: 11,
+                                                  fontFamily: AppThemeData.semiBold,
+                                                ),
+                                              ),
+                                            );
+                                          }),
+                                        ],
                                       ],
-                                    ],
-                                  ),
+                                    );
+                                  }),
                                   if (widget.productModel.nutritionEnabled &&
                                       widget.productModel.nutritionInfo != null) ...[
                                     const SizedBox(height: 10),
@@ -2142,110 +2129,6 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                             ],
                           ),
                         ),
-                    Visibility(
-                    visible: sectionConstantModel!.dineInActive!,
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 16, vertical: 16),
-                      child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(
-                          "Nutritional Information".tr(),
-                          textAlign: TextAlign.start,
-                          style: TextStyle(
-                            fontFamily: AppThemeData.bold,
-                            fontSize: 18,
-                            color: isDarkMode(context)
-                              ? AppThemeData.grey50
-                              : AppThemeData.grey900,
-                          ),
-                          ),
-                          Icon(
-                          Icons.fitness_center,
-                          color: AppThemeData.primary500,
-                          size: 20,
-                          ),
-                        ],
-                        ),
-                        const SizedBox(
-                        height: 16,
-                        ),
-                        Container(
-                        width: double.infinity,
-                        decoration: BoxDecoration(
-                          color: isDarkMode(context) 
-                            ? AppThemeData.grey900 
-                            : AppThemeData.grey50,
-                          borderRadius: BorderRadius.circular(16),
-                          boxShadow: [
-                          BoxShadow(
-                            color: Color(0x0A000000),
-                            blurRadius: 16,
-                            offset: Offset(0, 4),
-                            spreadRadius: 0,
-                          )
-                          ],
-                        ),
-                        child: Padding(
-                          padding: const EdgeInsets.all(20),
-                          child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                            children: [
-                              _buildNutritionItem(
-                              context,
-                              icon: Icons.local_fire_department_outlined,
-                              label: "kcal".tr(),
-                              value: widget.productModel.calories.toString(),
-                              color: AppThemeData.danger300.withOpacity(0.1),
-                              iconColor: AppThemeData.danger300,
-                              ),
-                              SizedBox(width: 10),
-                              _buildNutritionItem(
-                              context,
-                              icon: Icons.grain_outlined,
-                              label: "grams".tr(),
-                              value: widget.productModel.grams.toString(),
-                              color: AppThemeData.success300.withOpacity(0.1),
-                              iconColor: AppThemeData.success300,
-                              ),
-                            ],
-                            ),
-                            SizedBox(height: 10),
-                            Row(
-                            children: [
-                              _buildNutritionItem(
-                              context,
-                              icon: Icons.fitness_center_outlined,
-                              label: "proteins".tr(),
-                              value: widget.productModel.proteins.toString(),
-                              color: AppThemeData.primary500.withOpacity(0.1),
-                              iconColor: AppThemeData.primary500,
-                              ),
-                              SizedBox(width: 10),
-                              _buildNutritionItem(
-                              context,
-                              icon: Icons.water_drop_outlined,
-                              label: "fats".tr(),
-                              value: widget.productModel.fats.toString(),
-                              color: AppThemeData.warning300.withOpacity(0.1),
-                              iconColor: AppThemeData.warning300,
-                              ),
-                            ],
-                            ),
-                          ],
-                          ),
-                        ),
-                        ),
-                      ],
-                      ),
-                    ),
-                    ),
                   lstAddAddonsCustom.isEmpty
                       ? Container()
                       : Padding(
@@ -2384,33 +2267,10 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                                       // Check if main product is in cart before allowing add-on selection
                                                       if (productQnt == 0 && !lstAddAddonsCustom[index].isCheck) {
                                                         // Show alert that main item must be added first
-                                                        showDialog(
-                                                          context: context,
-                                                          builder: (BuildContext context) {
-                                                            return AlertDialog(
-                                                              title: Text("Add Main Item First".tr()),
-                                                              content: Text(
-                                                                "Please add the main item to your cart before selecting add-ons.".tr(),
-                                                                style: TextStyle(
-                                                                  fontFamily: AppThemeData.regular,
-                                                                  fontSize: 14,
-                                                                ),
-                                                              ),
-                                                              actions: <Widget>[
-                                                                TextButton(
-                                                                  child: Text(
-                                                                    "OK".tr(),
-                                                                    style: TextStyle(
-                                                                      color: AppThemeData.primary500,
-                                                                    ),
-                                                                  ),
-                                                                  onPressed: () {
-                                                                    Navigator.of(context).pop();
-                                                                  },
-                                                                ),
-                                                              ],
-                                                            );
-                                                          },
+                                                        AppDialog.showInfo(
+                                                          context,
+                                                          title: 'Add Main Item First',
+                                                          message: 'Please add the main item to your cart before selecting add-ons.',
                                                         );
                                                         return; // Exit early, don't toggle add-on
                                                       }
@@ -2908,55 +2768,6 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                                           MainAxisAlignment
                                                               .spaceBetween,
                                                       children: [
-                                                        Container(
-                                                          decoration:
-                                                              BoxDecoration(
-                                                            color: Colors.green,
-                                                            borderRadius:
-                                                                BorderRadius
-                                                                    .circular(
-                                                                        5),
-                                                          ),
-                                                          child: Padding(
-                                                            padding:
-                                                                const EdgeInsets
-                                                                    .symmetric(
-                                                                    horizontal:
-                                                                        5,
-                                                                    vertical:
-                                                                        2),
-                                                            child: Row(
-                                                              mainAxisSize:
-                                                                  MainAxisSize
-                                                                      .min,
-                                                              children: [
-                                                                Text(
-                                                                    productModel.reviewsCount !=
-                                                                            0
-                                                                        ? (productModel.reviewsSum / productModel.reviewsCount)
-                                                                            .toStringAsFixed(
-                                                                                1)
-                                                                        : 0
-                                                                            .toString(),
-                                                                    style:
-                                                                        const TextStyle(
-                                                                      letterSpacing:
-                                                                          0.5,
-                                                                      color: Colors
-                                                                          .white,
-                                                                    )),
-                                                                const SizedBox(
-                                                                    width: 3),
-                                                                const Icon(
-                                                                  Icons.star,
-                                                                  size: 16,
-                                                                  color: Colors
-                                                                      .white,
-                                                                ),
-                                                              ],
-                                                            ),
-                                                          ),
-                                                        ),
                                                         disPrice == "" ||
                                                                 disPrice ==
                                                                     productCommissionPrice(
@@ -3207,54 +3018,6 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                                         MainAxisAlignment
                                                             .spaceBetween,
                                                     children: [
-                                                      Container(
-                                                        decoration:
-                                                            BoxDecoration(
-                                                          color: Colors.green,
-                                                          borderRadius:
-                                                              BorderRadius
-                                                                  .circular(5),
-                                                        ),
-                                                        child: Padding(
-                                                          padding:
-                                                              const EdgeInsets
-                                                                  .symmetric(
-                                                                  horizontal: 5,
-                                                                  vertical: 2),
-                                                          child: Row(
-                                                            mainAxisSize:
-                                                                MainAxisSize
-                                                                    .min,
-                                                            children: [
-                                                              Text(
-                                                                  productModel.reviewsCount !=
-                                                                          0
-                                                                      ? (productModel.reviewsSum /
-                                                                              productModel
-                                                                                  .reviewsCount)
-                                                                          .toStringAsFixed(
-                                                                              1)
-                                                                      : 0
-                                                                          .toString(),
-                                                                  style:
-                                                                      const TextStyle(
-                                                                    letterSpacing:
-                                                                        0.5,
-                                                                    color: Colors
-                                                                        .white,
-                                                                  )),
-                                                              const SizedBox(
-                                                                  width: 3),
-                                                              const Icon(
-                                                                Icons.star,
-                                                                size: 16,
-                                                                color: Colors
-                                                                    .white,
-                                                              ),
-                                                            ],
-                                                          ),
-                                                        ),
-                                                      ),
                                                       disPrice == "" ||
                                                               disPrice == "0" ||
                                                               disPrice ==
@@ -3900,50 +3663,17 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
       String cartVendorID = cartProducts[0].vendorID;
       if (cartVendorID != widget.vendorModel.id) {
         // Show a dialog to confirm if user wants to clear cart and add new product
-        bool? confirmClear = await showDialog<bool>(
-          context: context,
-          builder: (BuildContext context) {
-            return AlertDialog(
-              title: Text("Replace Cart Items?".tr()),
-              content: Text(
-                "Your cart contains items from a different store. Would you like to clear your cart and add this item?".tr(),
-                style: TextStyle(
-                  fontFamily: AppThemeData.regular,
-                  fontSize: 14,
-                ),
-              ),
-              actions: <Widget>[
-                TextButton(
-                  child: Text(
-                    "Cancel".tr(),
-                    style: TextStyle(
-                      color: isDarkMode(context) 
-                        ? AppThemeData.grey400 
-                        : AppThemeData.grey700,
-                    ),
-                  ),
-                  onPressed: () {
-                    Navigator.of(context).pop(false);
-                  },
-                ),
-                TextButton(
-                  child: Text(
-                    "Clear & Add".tr(),
-                    style: TextStyle(
-                      color: AppThemeData.primary500,
-                    ),
-                  ),
-                  onPressed: () {
-                    Navigator.of(context).pop(true);
-                  },
-                ),
-              ],
-            );
-          },
+        final confirmed = await AppDialog.showConfirm(
+          context,
+          title: 'Replace Cart Items?',
+          message: 'Your cart contains items from a different store. Would you like to clear your cart and add this item?',
+          confirmLabel: 'Clear & Add',
+          cancelLabel: 'Cancel',
+          destructive: true,
         );
-        
+
         // If user cancels, return without adding to cart
-        if (confirmClear == null || !confirmClear) {
+        if (!confirmed) {
           setState(() {
             productQnt = 0; // Reset quantity as we're not adding to cart
           });
@@ -4076,12 +3806,9 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
           }
         }
         await sp.setString('attr_sel_${widget.productModel.id}', jsonEncode(selectionMap));
-        // Also update the product price to include add-on total
-        if (_attrAddOnTotal > 0) {
-          final basePrice = double.tryParse(widget.productModel.disPrice?.isNotEmpty == true && widget.productModel.disPrice != '0'
-              ? widget.productModel.disPrice!
-              : widget.productModel.price) ?? 0.0;
-          widget.productModel.price = (basePrice + _attrAddOnTotal).toStringAsFixed(2);
+        // When product has variant pricing, the selected option price replaces the base price entirely
+        if (_hasVariantPricing && _attrAddOnTotal > 0) {
+          widget.productModel.price = _attrAddOnTotal.toStringAsFixed(2);
           widget.productModel.disPrice = '0';
         }
       }
@@ -4471,10 +4198,10 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
             ),
             child: Row(
               children: [
-                Icon(Icons.add_circle_outline, size: 14, color: AppThemeData.primary500),
+                Icon(Icons.check_circle_outline, size: 14, color: AppThemeData.primary500),
                 const SizedBox(width: 8),
                 Text(
-                  'Add-ons: '.tr(),
+                  'Variant Total: '.tr(),
                   style: TextStyle(
                     fontSize: 13,
                     fontFamily: AppThemeData.medium,
@@ -4482,7 +4209,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                   ),
                 ),
                 Text(
-                  '+₹${_attrAddOnTotal % 1 == 0 ? _attrAddOnTotal.toInt() : _attrAddOnTotal.toStringAsFixed(2)}',
+                  amountShow(amount: _attrAddOnTotal.toStringAsFixed(2)),
                   style: TextStyle(
                     fontSize: 14,
                     fontFamily: AppThemeData.bold,
@@ -4636,14 +4363,29 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                 ),
               ),
             ),
-            if (opt.price > 0)
-              Text(
-                '+₹${opt.price % 1 == 0 ? opt.price.toInt() : opt.price.toStringAsFixed(2)}',
-                style: TextStyle(
-                  fontSize: 13,
-                  fontFamily: AppThemeData.semiBold,
-                  color: isSelected ? AppThemeData.primary500 : Colors.grey.shade500,
-                ),
+            if (opt.price > 0 || opt.discountedPrice > 0)
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text(
+                    amountShow(amount: opt.effectivePrice.toStringAsFixed(2)),
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontFamily: AppThemeData.semiBold,
+                      color: isSelected ? AppThemeData.primary500 : Colors.grey.shade500,
+                    ),
+                  ),
+                  if (opt.discountedPrice > 0 && opt.price > 0)
+                    Text(
+                      amountShow(amount: opt.price.toStringAsFixed(2)),
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontFamily: AppThemeData.regular,
+                        color: Colors.grey.shade400,
+                        decoration: TextDecoration.lineThrough,
+                      ),
+                    ),
+                ],
               )
             else
               Text(
@@ -4706,16 +4448,27 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                     : (isDark ? AppThemeData.grey300 : AppThemeData.grey700),
               ),
             ),
-            if (opt.price > 0) ...[
+            if (opt.price > 0 || opt.discountedPrice > 0) ...[
               const SizedBox(width: 5),
               Text(
-                '+₹${opt.price % 1 == 0 ? opt.price.toInt() : opt.price.toStringAsFixed(2)}',
+                amountShow(amount: opt.effectivePrice.toStringAsFixed(2)),
                 style: TextStyle(
                   fontSize: 11,
                   fontFamily: AppThemeData.semiBold,
                   color: isSelected ? AppThemeData.primary500 : Colors.grey.shade500,
                 ),
               ),
+              if (opt.discountedPrice > 0 && opt.price > 0) ...[
+                const SizedBox(width: 3),
+                Text(
+                  amountShow(amount: opt.price.toStringAsFixed(2)),
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: Colors.grey.shade400,
+                    decoration: TextDecoration.lineThrough,
+                  ),
+                ),
+              ],
             ],
           ],
         ),

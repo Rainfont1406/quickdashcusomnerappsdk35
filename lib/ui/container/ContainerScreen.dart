@@ -33,6 +33,7 @@ import 'package:emartconsumer/userPrefrence.dart';
 import 'package:emartconsumer/widget/userAvatar.dart';
 import 'package:firebase_auth/firebase_auth.dart' as auth;
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:provider/provider.dart';
 import 'package:emartconsumer/ui/contactUs/ContactUsScreen.dart';
 
@@ -680,6 +681,9 @@ class _ContainerScreen extends State<ContainerScreen> {
               MyAppState.currentUser!.fcmToken = '';
               await FireStoreUtils.updateCurrentUser(MyAppState.currentUser!);
               await auth.FirebaseAuth.instance.signOut();
+              // Clear persisted phone user session
+              final prefs = await SharedPreferences.getInstance();
+              await prefs.remove(PHONE_AUTH_USER_ID);
               MyAppState.currentUser = null;
               Provider.of<CartDatabase>(context, listen: false)
                   .deleteAllProducts();
@@ -830,6 +834,11 @@ class _ContainerScreen extends State<ContainerScreen> {
                 : AppThemeData.surface,
             key: key,
             drawer: _buildDrawer(context, user),
+            // Disable edge-drag so the left-side drag zone (0–20dp) no longer
+            // competes with the hamburger InkWell tap gesture. The hamburger
+            // button sits at x≈16px, inside that zone, causing intermittent
+            // missed taps when the finger has any horizontal drift.
+            drawerEnableOpenDragGesture: false,
             appBar: _drawerSelection == DrawerSelection.Home
                 ? null
                 : AppBar(
@@ -839,7 +848,7 @@ class _ContainerScreen extends State<ContainerScreen> {
                         ? true
                         : false,
                     backgroundColor: isDarkMode(context)
-                        ? Colors.black
+                        ? AppThemeData.primary600
                         : AppThemeData.primary500,
                     leading: (_drawerSelection == DrawerSelection.Cart)
                         ? IconButton(
@@ -885,59 +894,10 @@ class _ContainerScreen extends State<ContainerScreen> {
                           fontWeight: FontWeight.normal),
                     ),
                     actions: _drawerSelection == DrawerSelection.Wallet ||
-                            _drawerSelection == DrawerSelection.MyBooking
+                            _drawerSelection == DrawerSelection.MyBooking ||
+                            _drawerSelection == DrawerSelection.dineIn
                         ? []
-                        : _drawerSelection == DrawerSelection.dineIn
-                            ? [
-                                IconButton(
-                                    padding: const EdgeInsets.only(right: 20),
-                                    visualDensity:
-                                        const VisualDensity(horizontal: -4),
-                                    tooltip: 'QrCode'.tr(),
-                                    icon: Image(
-                                      image: const AssetImage(
-                                          "assets/images/qrscan.png"),
-                                      width: 20,
-                                      color: Colors.white,
-                                    ),
-                                    onPressed: () {
-                                      push(
-                                          context,
-                                          const QrCodeScanner(
-                                              presectionList: []));
-                                    }),
-                                IconButton(
-                                    visualDensity:
-                                        const VisualDensity(horizontal: -4),
-                                    padding: const EdgeInsets.only(right: 10),
-                                    icon: Image(
-                                      image: const AssetImage(
-                                          "assets/images/search.png"),
-                                      width: 20,
-                                      color: Colors.white,
-                                    ),
-                                    onPressed: () {
-                                      push(context, const SearchScreen());
-                                    }),
-                                if (_currentWidget is! CartScreen ||
-                                    _currentWidget is! ProfileScreen)
-                                  IconButton(
-                                    visualDensity:
-                                        const VisualDensity(horizontal: -4),
-                                    padding: const EdgeInsets.only(right: 10),
-                                    icon: Image(
-                                      image: const AssetImage(
-                                          "assets/images/map.png"),
-                                      width: 20,
-                                      color: Colors.white,
-                                    ),
-                                    onPressed: () => push(
-                                      context,
-                                      const MapViewScreen(isShowAppBar: true),
-                                    ),
-                                  )
-                              ]
-                            : [
+                        : [
                                 IconButton(
                                     visualDensity:
                                         const VisualDensity(horizontal: -4),
@@ -985,9 +945,9 @@ class _ContainerScreen extends State<ContainerScreen> {
                                                   child: Container(
                                                     padding:
                                                         const EdgeInsets.all(4),
-                                                    decoration: const BoxDecoration(
+                                                    decoration: BoxDecoration(
                                                       shape: BoxShape.circle,
-                                                      color: AppThemeData.accent500,
+                                                      color: Colors.white.withValues(alpha: 0.9),
                                                     ),
                                                     constraints:
                                                         const BoxConstraints(
@@ -999,8 +959,11 @@ class _ContainerScreen extends State<ContainerScreen> {
                                                         cartCount <= 99
                                                             ? '$cartCount'
                                                             : '+99',
-                                                        style: const TextStyle(
-                                                          color: Colors.white,
+                                                        style: TextStyle(
+                                                          fontSize: 9,
+                                                          fontFamily: AppThemeData.bold,
+                                                          color: AppThemeData.primary600,
+                                                          fontWeight: FontWeight.w700,
                                                         ),
                                                         textAlign:
                                                             TextAlign.center,
@@ -1065,15 +1028,15 @@ class _DrawerHeader extends StatelessWidget {
       child: Container(
         width: double.infinity,
         decoration: BoxDecoration(
-          gradient: LinearGradient(
+          gradient: const LinearGradient(
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
             colors: [
               AppThemeData.primary600,
               AppThemeData.primary500,
-              AppThemeData.primary300,
+              Color(0xFF9F67F5), // fixed light-purple endpoint — never overwritten
             ],
-            stops: const [0.0, 0.55, 1.0],
+            stops: [0.0, 0.55, 1.0],
           ),
         ),
         child: Stack(

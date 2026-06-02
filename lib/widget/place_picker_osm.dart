@@ -5,7 +5,6 @@ import 'dart:developer' as developer;
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
-import 'package:emartconsumer/widget/osm_map_search_place.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_osm_plugin/flutter_osm_plugin.dart';
 import 'package:fluttertoast/fluttertoast.dart';
@@ -23,11 +22,30 @@ class LocationPicker extends StatefulWidget {
   State<LocationPicker> createState() => _LocationPickerState();
 }
 
+/// Lightweight result model for inline search suggestions.
+class _PlaceSuggestion {
+  final String title;
+  final String subtitle;
+  final double lat;
+  final double lon;
+  final IconData icon;
+  const _PlaceSuggestion({
+    required this.title,
+    required this.subtitle,
+    required this.lat,
+    required this.lon,
+    required this.icon,
+  });
+}
+
 class _LocationPickerState extends State<LocationPicker> {
   GeoPoint? selectedLocation;
   late MapController mapController;
   Place? place;
-  TextEditingController searchController = TextEditingController();
+
+  final TextEditingController searchController = TextEditingController();
+  final FocusNode _searchFocus = FocusNode();
+
   String currentAddress = '';
   bool isLoadingAddress = false;
   Timer? _debounceTimer;
@@ -36,6 +54,14 @@ class _LocationPickerState extends State<LocationPicker> {
   GeoPoint? _lastCheckedLocation;
   int _addressRequestCounter = 0;
   bool _isProcessingAddressRequest = false;
+  bool _isLocating = false;
+
+  // ── Inline search state ─────────────────────────────────────────────────
+  List<_PlaceSuggestion> _searchResults = [];
+  bool _isSearchLoading = false;
+  bool _showSearchResults = false;
+  Timer? _searchDebounce;
+  int _searchRequestId = 0;
 
   @override
   void initState() {
@@ -43,7 +69,24 @@ class _LocationPickerState extends State<LocationPicker> {
     mapController = MapController(
       initPosition: GeoPoint(latitude: 37.7749, longitude: -122.4194),
     );
+    searchController.addListener(_onSearchChanged);
   }
+
+  @override
+  void dispose() {
+    _debounceTimer?.cancel();
+    _mapCheckTimer?.cancel();
+    _searchDebounce?.cancel();
+    searchController.removeListener(_onSearchChanged);
+    searchController.dispose();
+    _searchFocus.dispose();
+    mapController.dispose();
+    _addressRequestCounter = 0;
+    _isProcessingAddressRequest = false;
+    super.dispose();
+  }
+
+  // ── Toast ───────────────────────────────────────────────────────────────
 
   void _showToast(String message, {bool isError = false}) {
     Fluttertoast.showToast(
@@ -56,13 +99,16 @@ class _LocationPickerState extends State<LocationPicker> {
     );
   }
 
+  // ── Map center polling (address resolution when user pans) ──────────────
+
   void _startMapCenterTracking() {
     _mapCheckTimer = Timer.periodic(const Duration(milliseconds: 800), (timer) async {
       if (!mounted) { timer.cancel(); return; }
       if (_isProcessingAddressRequest) return;
       try {
         GeoPoint centerPoint = await mapController.centerMap;
-        if (_lastCheckedLocation == null || _hasLocationChanged(_lastCheckedLocation!, centerPoint)) {
+        if (_lastCheckedLocation == null ||
+            _hasLocationChanged(_lastCheckedLocation!, centerPoint)) {
           _lastCheckedLocation = centerPoint;
           _debounceTimer?.cancel();
           if (mounted) setState(() => isLoadingAddress = true);
@@ -84,6 +130,8 @@ class _LocationPickerState extends State<LocationPicker> {
         (oldLocation.longitude - newLocation.longitude).abs() > threshold;
   }
 
+  // ── Network check ───────────────────────────────────────────────────────
+
   Future<bool> _hasNetworkConnection() async {
     try {
       final connectivityResult = await Connectivity().checkConnectivity();
@@ -94,6 +142,8 @@ class _LocationPickerState extends State<LocationPicker> {
       return true;
     }
   }
+
+  // ── Reverse geocoding ───────────────────────────────────────────────────
 
   Future<void> _fetchAddressForLocation(GeoPoint position) async {
     if (!mounted) return;
@@ -148,37 +198,20 @@ class _LocationPickerState extends State<LocationPicker> {
       if (currentRequestId != _addressRequestCounter || !mounted) return;
 
       setState(() {
-        if (fetchedAddress.isNotEmpty) {
-          currentAddress = fetchedAddress;
-          place = Place(
-            lat: position.latitude,
-            lon: position.longitude,
-            displayName: fetchedAddress,
-            placeId: 0,
-            osmType: '',
-            osmId: 0,
-            placeRank: 0,
-            category: '',
-            type: '',
-            importance: 0,
-            boundingBox: ['0', '0', '0', '0'],
-          );
-        } else {
-          currentAddress = 'Selected Location';
-          place = Place(
-            lat: position.latitude,
-            lon: position.longitude,
-            displayName: currentAddress,
-            placeId: 0,
-            osmType: '',
-            osmId: 0,
-            placeRank: 0,
-            category: '',
-            type: '',
-            importance: 0,
-            boundingBox: ['0', '0', '0', '0'],
-          );
-        }
+        currentAddress = fetchedAddress.isNotEmpty ? fetchedAddress : 'Selected Location';
+        place = Place(
+          lat: position.latitude,
+          lon: position.longitude,
+          displayName: currentAddress,
+          placeId: 0,
+          osmType: '',
+          osmId: 0,
+          placeRank: 0,
+          category: '',
+          type: '',
+          importance: 0,
+          boundingBox: ['0', '0', '0', '0'],
+        );
         isLoadingAddress = false;
       });
     } catch (e) {
@@ -208,18 +241,26 @@ class _LocationPickerState extends State<LocationPicker> {
     }
   }
 
+  // ── GPS current location ─────────────────────────────────────────────────
+
   Future<void> _setUserLocation() async {
+    if (_isLocating) return;
+    if (mounted) setState(() => _isLocating = true);
     try {
-      _showToast("Getting your location...".tr());
       final locationData = await _getCurrentLocation();
       if (locationData != null && mounted) {
-        selectedLocation = GeoPoint(latitude: locationData.latitude, longitude: locationData.longitude);
+        selectedLocation = GeoPoint(
+            latitude: locationData.latitude, longitude: locationData.longitude);
         await mapController.moveTo(selectedLocation!, animate: true);
         await _fetchAddressForLocation(selectedLocation!);
-        _showToast("Location updated".tr());
+      } else if (mounted) {
+        _showToast("Could not get your location. Please try again.".tr(),
+            isError: true);
       }
     } catch (e) {
-      _showToast("Error getting location".tr(), isError: true);
+      if (mounted) _showToast("Error getting location".tr(), isError: true);
+    } finally {
+      if (mounted) setState(() => _isLocating = false);
     }
   }
 
@@ -240,43 +281,151 @@ class _LocationPickerState extends State<LocationPicker> {
     return await Geolocator.getCurrentPosition();
   }
 
-  Future<void> _openSearchScreen() async {
-    final result = await Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => const OsmSearchPlacesApi()),
-    );
-    if (result != null && result is SearchInfo) {
-      if (result.point != null && mounted) {
-        GeoPoint point = result.point!;
-        selectedLocation = point;
-        await mapController.moveTo(point, animate: true);
-        await _fetchAddressForLocation(point);
+  // ── Inline search (Zomato / Swiggy style) ──────────────────────────────
+
+  void _onSearchChanged() {
+    final text = searchController.text.trim();
+    _searchDebounce?.cancel();
+    if (text.isEmpty) {
+      if (mounted) {
+        setState(() {
+          _searchResults = [];
+          _showSearchResults = false;
+          _isSearchLoading = false;
+        });
+      }
+      return;
+    }
+    if (mounted) setState(() => _isSearchLoading = true);
+    _searchDebounce =
+        Timer(const Duration(milliseconds: 350), () => _performSearch(text));
+  }
+
+  Future<void> _performSearch(String query) async {
+    final myId = ++_searchRequestId;
+    try {
+      final lang = Localizations.localeOf(context).languageCode;
+      final url = Uri.https('nominatim.openstreetmap.org', '/search', {
+        'q': query,
+        'format': 'json',
+        'addressdetails': '1',
+        'limit': '8',
+        'accept-language': lang,
+      });
+      final response = await http.get(url, headers: {
+        'User-Agent': 'QuickDash/1.0',
+        'Accept': 'application/json',
+      }).timeout(const Duration(seconds: 12));
+
+      if (myId != _searchRequestId || !mounted) return;
+
+      if (response.statusCode == 200) {
+        final List<dynamic> data = json.decode(response.body);
+        final results = data.map<_PlaceSuggestion>((p) {
+          final addr = p['address'] as Map<String, dynamic>? ?? {};
+          final cls = p['class'] as String? ?? '';
+          final type = p['type'] as String? ?? '';
+
+          // Title: most specific named element available
+          String title = '';
+          for (final k in ['name', 'amenity', 'shop', 'tourism', 'leisure', 'building', 'office']) {
+            if (addr[k] != null && addr[k].toString().isNotEmpty) {
+              title = addr[k].toString();
+              break;
+            }
+          }
+          if (title.isEmpty) {
+            final dn = (p['display_name'] as String? ?? '').split(', ');
+            title = dn.isNotEmpty ? dn[0] : query;
+          }
+
+          // Subtitle: road → neighbourhood/suburb → city → state
+          final sub = <String>[];
+          final road = addr['road'] ?? addr['street'] ?? addr['pedestrian'];
+          if (road != null) sub.add(road.toString());
+          final nb = addr['neighbourhood'] ?? addr['suburb'];
+          if (nb != null) sub.add(nb.toString());
+          final city = addr['city'] ?? addr['town'] ?? addr['village'];
+          if (city != null) sub.add(city.toString());
+          final state = addr['state'];
+          if (state != null) sub.add(state.toString());
+
+          // Icon hint
+          IconData icon = Icons.location_on_rounded;
+          if (cls == 'amenity' ||
+              ['restaurant', 'cafe', 'fast_food', 'food_court'].contains(type))
+            icon = Icons.restaurant_rounded;
+          else if (cls == 'place' ||
+              ['city', 'town', 'village', 'suburb', 'neighbourhood'].contains(type))
+            icon = Icons.location_city_rounded;
+          else if (cls == 'highway' ||
+              type == 'residential' ||
+              type == 'road')
+            icon = Icons.route_rounded;
+
+          return _PlaceSuggestion(
+            title: title,
+            subtitle: sub.take(3).join(', '),
+            lat: double.tryParse(p['lat'].toString()) ?? 0,
+            lon: double.tryParse(p['lon'].toString()) ?? 0,
+            icon: icon,
+          );
+        }).toList();
+
+        if (mounted) {
+          setState(() {
+            _searchResults = results;
+            _showSearchResults = results.isNotEmpty;
+            _isSearchLoading = false;
+          });
+        }
+      } else {
+        if (mounted) setState(() => _isSearchLoading = false);
+      }
+    } catch (_) {
+      if (myId == _searchRequestId && mounted) {
+        setState(() => _isSearchLoading = false);
       }
     }
   }
 
-  @override
-  void dispose() {
-    _debounceTimer?.cancel();
-    _mapCheckTimer?.cancel();
-    mapController.dispose();
-    searchController.dispose();
-    _addressRequestCounter = 0;
-    _isProcessingAddressRequest = false;
-    super.dispose();
+  Future<void> _selectSearchResult(_PlaceSuggestion suggestion) async {
+    final pt = GeoPoint(latitude: suggestion.lat, longitude: suggestion.lon);
+    if (mounted) {
+      // Cancel any pending debounce and remove the listener BEFORE setting
+      // text — otherwise setting text triggers _onSearchChanged which would
+      // re-run the search and make the list reappear after 350 ms.
+      _searchDebounce?.cancel();
+      searchController.removeListener(_onSearchChanged);
+      setState(() {
+        _showSearchResults = false;
+        _searchResults = [];
+        _isSearchLoading = false;
+        searchController.text = suggestion.title;
+      });
+      searchController.addListener(_onSearchChanged);
+      _searchFocus.unfocus(); // outside setState for proper keyboard dismissal
+    }
+    selectedLocation = pt;
+    await mapController.moveTo(pt, animate: true);
+    await _fetchAddressForLocation(pt);
   }
+
+  // ── Build ────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
     final themeChange = Provider.of<DarkThemeProvider>(context);
     final dark = themeChange.darkTheme;
     final bottomPadding = MediaQuery.of(context).padding.bottom;
+    final topPadding = MediaQuery.of(context).padding.top;
 
     return Scaffold(
       extendBodyBehindAppBar: true,
       backgroundColor: Colors.black,
       body: Stack(
         children: [
-          // ── OSM Map ─────────────────────────────────────────────────
+          // ── OSM Map ───────────────────────────────────────────────────
           OSMFlutter(
             controller: mapController,
             mapIsLoading: Container(
@@ -285,8 +434,9 @@ class _LocationPickerState extends State<LocationPicker> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    CircularProgressIndicator(
-                      valueColor: const AlwaysStoppedAnimation<Color>(AppThemeData.primary500),
+                    const CircularProgressIndicator(
+                      valueColor:
+                          AlwaysStoppedAnimation<Color>(AppThemeData.primary500),
                       strokeWidth: 2.5,
                     ),
                     const SizedBox(height: 14),
@@ -295,7 +445,9 @@ class _LocationPickerState extends State<LocationPicker> {
                       style: TextStyle(
                         fontFamily: AppThemeData.medium,
                         fontSize: 14,
-                        color: dark ? AppThemeData.darkTextSecondary : AppThemeData.neutral600,
+                        color: dark
+                            ? AppThemeData.darkTextSecondary
+                            : AppThemeData.neutral600,
                       ),
                     ),
                   ],
@@ -305,7 +457,8 @@ class _LocationPickerState extends State<LocationPicker> {
             osmOption: OSMOption(
               userLocationMarker: UserLocationMaker(
                 personMarker: const MarkerIcon(
-                  icon: Icon(Icons.person_pin_circle, color: Colors.blue, size: 48),
+                  icon: Icon(Icons.person_pin_circle,
+                      color: Colors.blue, size: 48),
                 ),
                 directionArrowMarker: const MarkerIcon(
                   icon: Icon(Icons.location_on, color: Colors.blue, size: 48),
@@ -331,7 +484,7 @@ class _LocationPickerState extends State<LocationPicker> {
             },
           ),
 
-          // ── Centered pin ─────────────────────────────────────────────
+          // ── Centered pin ──────────────────────────────────────────────
           if (isMapReady)
             Center(
               child: Column(
@@ -343,7 +496,10 @@ class _LocationPickerState extends State<LocationPicker> {
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
                       color: AppThemeData.primary500.withValues(alpha: 0.15),
-                      border: Border.all(color: AppThemeData.primary500.withValues(alpha: 0.4), width: 1.5),
+                      border: Border.all(
+                          color:
+                              AppThemeData.primary500.withValues(alpha: 0.4),
+                          width: 1.5),
                     ),
                     child: const Icon(
                       Icons.location_on_rounded,
@@ -359,16 +515,19 @@ class _LocationPickerState extends State<LocationPicker> {
                       color: AppThemeData.primary500,
                       shape: BoxShape.circle,
                       boxShadow: [
-                        BoxShadow(color: Colors.black.withValues(alpha: 0.25), blurRadius: 4, spreadRadius: 1)
+                        BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.25),
+                            blurRadius: 4,
+                            spreadRadius: 1)
                       ],
                     ),
                   ),
-                  const SizedBox(height: 20), // offset for bottom balance
+                  const SizedBox(height: 20),
                 ],
               ),
             ),
 
-          // ── Top gradient scrim ────────────────────────────────────────
+          // ── Top gradient scrim ─────────────────────────────────────────
           Positioned(
             top: 0,
             left: 0,
@@ -379,15 +538,18 @@ class _LocationPickerState extends State<LocationPicker> {
                 gradient: LinearGradient(
                   begin: Alignment.topCenter,
                   end: Alignment.bottomCenter,
-                  colors: [Colors.black.withValues(alpha: 0.55), Colors.transparent],
+                  colors: [
+                    Colors.black.withValues(alpha: 0.55),
+                    Colors.transparent
+                  ],
                 ),
               ),
             ),
           ),
 
-          // ── Back button ───────────────────────────────────────────────
+          // ── Back button ────────────────────────────────────────────────
           Positioned(
-            top: MediaQuery.of(context).padding.top + 8,
+            top: topPadding + 8,
             left: 12,
             child: GestureDetector(
               onTap: () => Navigator.pop(context),
@@ -398,58 +560,166 @@ class _LocationPickerState extends State<LocationPicker> {
                   color: Colors.black.withValues(alpha: 0.45),
                   shape: BoxShape.circle,
                 ),
-                child: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white, size: 18),
+                child: const Icon(Icons.arrow_back_ios_new_rounded,
+                    color: Colors.white, size: 18),
               ),
             ),
           ),
 
-          // ── Search bar ────────────────────────────────────────────────
+          // ── Search bar + inline results (Zomato/Swiggy style) ──────────
           Positioned(
-            top: MediaQuery.of(context).padding.top + 8,
+            top: topPadding + 8,
             left: 62,
             right: 12,
-            child: GestureDetector(
-              onTap: _openSearchScreen,
-              child: Container(
-                height: 48,
-                decoration: BoxDecoration(
-                  color: dark ? AppThemeData.darkBgSecondary : Colors.white,
-                  borderRadius: BorderRadius.circular(14),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.18),
-                      blurRadius: 12,
-                      offset: const Offset(0, 3),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Search input
+                Container(
+                  height: 48,
+                  decoration: BoxDecoration(
+                    color: dark ? AppThemeData.darkBgSecondary : Colors.white,
+                    borderRadius: BorderRadius.circular(14),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.18),
+                        blurRadius: 12,
+                        offset: const Offset(0, 3),
+                      ),
+                    ],
+                  ),
+                  child: TextField(
+                    controller: searchController,
+                    focusNode: _searchFocus,
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontFamily: AppThemeData.medium,
+                      color: dark
+                          ? AppThemeData.darkTextPrimary
+                          : AppThemeData.neutral900,
                     ),
-                  ],
-                ),
-                child: Row(
-                  children: [
-                    const SizedBox(width: 14),
-                    Icon(Icons.search_rounded, color: AppThemeData.primary500, size: 22),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        'Search for a location...'.tr(),
-                        style: TextStyle(
-                          fontSize: 14,
-                          fontFamily: AppThemeData.regular,
-                          color: dark ? AppThemeData.darkTextTertiary : AppThemeData.neutral400,
-                        ),
+                    decoration: InputDecoration(
+                      contentPadding: const EdgeInsets.symmetric(vertical: 14),
+                      border: InputBorder.none,
+                      prefixIcon: Icon(Icons.search_rounded,
+                          color: AppThemeData.primary500, size: 22),
+                      suffixIcon: _isSearchLoading
+                          ? Padding(
+                              padding: const EdgeInsets.all(14),
+                              child: SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  valueColor: const AlwaysStoppedAnimation(
+                                      AppThemeData.primary500),
+                                ),
+                              ),
+                            )
+                          : searchController.text.isNotEmpty
+                              ? IconButton(
+                                  icon: Icon(Icons.close_rounded,
+                                      size: 18,
+                                      color: dark
+                                          ? AppThemeData.darkTextTertiary
+                                          : AppThemeData.neutral400),
+                                  onPressed: () {
+                                    searchController.clear();
+                                    setState(() {
+                                      _searchResults = [];
+                                      _showSearchResults = false;
+                                    });
+                                  },
+                                )
+                              : null,
+                      hintText: 'Search for a location...'.tr(),
+                      hintStyle: TextStyle(
+                        fontSize: 14,
+                        fontFamily: AppThemeData.regular,
+                        color: dark
+                            ? AppThemeData.darkTextTertiary
+                            : AppThemeData.neutral400,
                       ),
                     ),
-                    Container(
-                      width: 1,
-                      height: 20,
-                      color: dark ? AppThemeData.darkBorderPrimary : AppThemeData.neutral200,
-                    ),
-                    const SizedBox(width: 12),
-                    Icon(Icons.tune_rounded, size: 18,
-                        color: dark ? AppThemeData.darkTextTertiary : AppThemeData.neutral400),
-                    const SizedBox(width: 14),
-                  ],
+                  ),
                 ),
-              ),
+
+                // Inline results dropdown
+                if (_showSearchResults && _searchResults.isNotEmpty)
+                  Container(
+                    margin: const EdgeInsets.only(top: 4),
+                    decoration: BoxDecoration(
+                      color:
+                          dark ? AppThemeData.darkBgSecondary : Colors.white,
+                      borderRadius: BorderRadius.circular(14),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withValues(alpha: 0.15),
+                          blurRadius: 12,
+                          offset: const Offset(0, 4),
+                        ),
+                      ],
+                    ),
+                    constraints: const BoxConstraints(maxHeight: 280),
+                    child: ListView.separated(
+                      padding: EdgeInsets.zero,
+                      shrinkWrap: true,
+                      itemCount: _searchResults.length,
+                      separatorBuilder: (_, __) => Divider(
+                        height: 1,
+                        color: dark
+                            ? AppThemeData.darkBorderPrimary
+                            : AppThemeData.neutral100,
+                      ),
+                      itemBuilder: (_, i) {
+                        final s = _searchResults[i];
+                        return ListTile(
+                          dense: true,
+                          contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 14, vertical: 4),
+                          leading: Container(
+                            width: 34,
+                            height: 34,
+                            decoration: BoxDecoration(
+                              color: AppThemeData.primary500
+                                  .withValues(alpha: 0.1),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Icon(s.icon,
+                                color: AppThemeData.primary500, size: 18),
+                          ),
+                          title: Text(
+                            s.title,
+                            style: TextStyle(
+                              fontFamily: AppThemeData.semiBold,
+                              fontSize: 13,
+                              color: dark
+                                  ? AppThemeData.darkTextPrimary
+                                  : AppThemeData.neutral900,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          subtitle: s.subtitle.isNotEmpty
+                              ? Text(
+                                  s.subtitle,
+                                  style: TextStyle(
+                                    fontFamily: AppThemeData.regular,
+                                    fontSize: 11,
+                                    color: dark
+                                        ? AppThemeData.darkTextTertiary
+                                        : AppThemeData.neutral500,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                )
+                              : null,
+                          onTap: () => _selectSearchResult(s),
+                        );
+                      },
+                    ),
+                  ),
+              ],
             ),
           ),
 
@@ -458,12 +728,17 @@ class _LocationPickerState extends State<LocationPicker> {
             bottom: currentAddress.isNotEmpty ? 220 : 24,
             right: 16,
             child: GestureDetector(
-              onTap: _setUserLocation,
-              child: Container(
+              onTap: _isLocating ? null : _setUserLocation,
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 200),
                 width: 48,
                 height: 48,
                 decoration: BoxDecoration(
-                  color: dark ? AppThemeData.darkBgSecondary : Colors.white,
+                  color: _isLocating
+                      ? AppThemeData.primary500.withValues(alpha: 0.12)
+                      : dark
+                          ? AppThemeData.darkBgSecondary
+                          : Colors.white,
                   shape: BoxShape.circle,
                   boxShadow: [
                     BoxShadow(
@@ -473,16 +748,29 @@ class _LocationPickerState extends State<LocationPicker> {
                     ),
                   ],
                   border: Border.all(
-                    color: dark ? AppThemeData.darkBorderPrimary : AppThemeData.neutral200,
-                    width: 1,
+                    color: _isLocating
+                        ? AppThemeData.primary500.withValues(alpha: 0.5)
+                        : dark
+                            ? AppThemeData.darkBorderPrimary
+                            : AppThemeData.neutral200,
+                    width: _isLocating ? 1.5 : 1,
                   ),
                 ),
-                child: Icon(Icons.my_location_rounded, color: AppThemeData.primary500, size: 22),
+                child: _isLocating
+                    ? Padding(
+                        padding: const EdgeInsets.all(13),
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2.5,
+                          color: AppThemeData.primary500,
+                        ),
+                      )
+                    : Icon(Icons.my_location_rounded,
+                        color: AppThemeData.primary500, size: 22),
               ),
             ),
           ),
 
-          // ── Bottom address card ───────────────────────────────────────
+          // ── Bottom address card ──────────────────────────────────────
           if (currentAddress.isNotEmpty)
             Positioned(
               bottom: 0,
@@ -508,14 +796,15 @@ class _LocationPickerState extends State<LocationPicker> {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Drag handle
                     Center(
                       child: Container(
                         width: 36,
                         height: 4,
                         margin: const EdgeInsets.only(bottom: 16),
                         decoration: BoxDecoration(
-                          color: dark ? AppThemeData.darkBorderPrimary : AppThemeData.neutral300,
+                          color: dark
+                              ? AppThemeData.darkBorderPrimary
+                              : AppThemeData.neutral300,
                           borderRadius: BorderRadius.circular(2),
                         ),
                       ),
@@ -526,10 +815,12 @@ class _LocationPickerState extends State<LocationPicker> {
                           width: 40,
                           height: 40,
                           decoration: BoxDecoration(
-                            color: AppThemeData.primary500.withValues(alpha: 0.1),
+                            color: AppThemeData.primary500
+                                .withValues(alpha: 0.1),
                             borderRadius: BorderRadius.circular(10),
                           ),
-                          child: const Icon(Icons.location_on_rounded, color: AppThemeData.primary500, size: 20),
+                          child: const Icon(Icons.location_on_rounded,
+                              color: AppThemeData.primary500, size: 20),
                         ),
                         const SizedBox(width: 12),
                         Expanded(
@@ -543,7 +834,9 @@ class _LocationPickerState extends State<LocationPicker> {
                                     style: TextStyle(
                                       fontSize: 12,
                                       fontFamily: AppThemeData.semiBold,
-                                      color: dark ? AppThemeData.darkTextTertiary : AppThemeData.neutral500,
+                                      color: dark
+                                          ? AppThemeData.darkTextTertiary
+                                          : AppThemeData.neutral500,
                                       letterSpacing: 0.5,
                                     ),
                                   ),
@@ -554,7 +847,9 @@ class _LocationPickerState extends State<LocationPicker> {
                                       height: 12,
                                       child: CircularProgressIndicator(
                                         strokeWidth: 1.5,
-                                        valueColor: const AlwaysStoppedAnimation(AppThemeData.primary500),
+                                        valueColor:
+                                            const AlwaysStoppedAnimation(
+                                                AppThemeData.primary500),
                                       ),
                                     ),
                                   ],
@@ -567,7 +862,9 @@ class _LocationPickerState extends State<LocationPicker> {
                                   fontSize: 14,
                                   fontFamily: AppThemeData.medium,
                                   height: 1.4,
-                                  color: dark ? AppThemeData.darkTextPrimary : AppThemeData.neutral900,
+                                  color: dark
+                                      ? AppThemeData.darkTextPrimary
+                                      : AppThemeData.neutral900,
                                 ),
                                 maxLines: 2,
                                 overflow: TextOverflow.ellipsis,
@@ -582,19 +879,24 @@ class _LocationPickerState extends State<LocationPicker> {
                       width: double.infinity,
                       height: 52,
                       child: ElevatedButton(
-                        onPressed: selectedLocation != null && place != null && !isLoadingAddress
+                        onPressed: selectedLocation != null &&
+                                place != null &&
+                                !isLoadingAddress
                             ? () => Navigator.pop(context, place)
                             : null,
                         style: ElevatedButton.styleFrom(
                           backgroundColor: AppThemeData.primary500,
-                          disabledBackgroundColor: AppThemeData.primary500.withValues(alpha: 0.4),
+                          disabledBackgroundColor:
+                              AppThemeData.primary500.withValues(alpha: 0.4),
                           elevation: 0,
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                          shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(14)),
                         ),
                         child: Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            const Icon(Icons.check_circle_rounded, color: Colors.white, size: 20),
+                            const Icon(Icons.check_circle_rounded,
+                                color: Colors.white, size: 20),
                             const SizedBox(width: 10),
                             Text(
                               'Confirm Location'.tr(),

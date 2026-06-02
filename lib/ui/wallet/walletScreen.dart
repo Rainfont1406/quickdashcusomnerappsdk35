@@ -10,7 +10,6 @@ import 'package:emartconsumer/model/MercadoPagoSettingsModel.dart';
 import 'package:emartconsumer/model/PayFastSettingData.dart';
 import 'package:emartconsumer/model/PayStackSettingsModel.dart';
 
-import 'package:emartconsumer/model/createRazorPayOrderModel.dart';
 import 'package:emartconsumer/model/payStackURLModel.dart';
 import 'package:emartconsumer/model/payment_model/mid_trans.dart';
 import 'package:emartconsumer/model/payment_model/orange_money.dart';
@@ -27,13 +26,13 @@ import 'package:emartconsumer/payment/xenditScreen.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/paystack_url_genrater.dart';
 import 'package:emartconsumer/services/rozorpayConroller.dart';
+import 'package:emartconsumer/services/app_dialog.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/gift_card/gift_card_redeem_screen.dart';
 import 'package:emartconsumer/ui/wallet/MercadoPagoScreen.dart';
 import 'package:emartconsumer/ui/wallet/PayFastScreen.dart';
 import 'package:emartconsumer/ui/wallet/payStackScreen.dart';
-import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_paypal_native/flutter_paypal_native.dart';
@@ -61,7 +60,12 @@ import '../../constants/spacing.dart';
 import '../../constants/border_radius.dart';
 
 class WalletScreen extends StatefulWidget {
-  const WalletScreen({Key? key}) : super(key: key);
+  /// Set to true when pushed as a standalone route (e.g. from Table Booking).
+  /// Renders a proper AppBar with back button so the screen is self-contained.
+  /// Keep false (default) when embedded inside ContainerScreen.
+  final bool showAppBar;
+
+  const WalletScreen({Key? key, this.showAppBar = false}) : super(key: key);
 
   @override
   WalletScreenState createState() => WalletScreenState();
@@ -107,10 +111,11 @@ class WalletScreenState extends State<WalletScreen> {
   final userId = MyAppState.currentUser!.userID;
 
   getPaymentSettingData() async {
+    // No orderBy here — compound (where + orderBy on different fields) requires
+    // a Firestore composite index that may not exist. Sort client-side instead.
     topupHistoryQuery = FireStoreUtils.firestore
         .collection(Wallet)
         .where('user_id', isEqualTo: userId)
-        .orderBy('date', descending: true)
         .snapshots();
     userQuery = FireStoreUtils.firestore
         .collection(USERS)
@@ -193,9 +198,6 @@ class WalletScreenState extends State<WalletScreen> {
         onSuccess: (data) {
           Navigator.pop(context);
           _flutterPaypalNativePlugin.removeAllPurchaseItems();
-          String visitor = data.cart?.shippingAddress?.firstName ?? 'Visitor';
-          String address =
-              data.cart?.shippingAddress?.line1 ?? 'Unknown Address';
           ShowToastDialog.showToast("Payment Successfully");
           paymentCompleted(paymentMethod: "Paypal");
         },
@@ -220,6 +222,31 @@ class WalletScreenState extends State<WalletScreen> {
     return Scaffold(
       key: _scaffoldKey,
       backgroundColor: bg,
+      // AppBar is shown only in standalone mode (e.g. pushed from Table Booking).
+      // When embedded inside ContainerScreen the outer scaffold provides the AppBar.
+      appBar: widget.showAppBar
+          ? AppBar(
+              elevation: 0,
+              scrolledUnderElevation: 0,
+              centerTitle: true,
+              backgroundColor:
+                  dark ? AppThemeData.primary600 : AppThemeData.primary500,
+              systemOverlayStyle: SystemUiOverlayStyle.light,
+              leading: IconButton(
+                icon: const Icon(Icons.arrow_back_ios_new_rounded,
+                    size: 18, color: Colors.white),
+                onPressed: () => Navigator.of(context).pop(),
+              ),
+              title: Text(
+                'Wallet'.tr(),
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.normal,
+                ),
+              ),
+            )
+          : null,
       body: Column(
         children: [
           // ── Premium Wallet Card ────────────────────────────────────────
@@ -517,10 +544,20 @@ class WalletScreenState extends State<WalletScreen> {
         if (snapshot.data!.docs.isEmpty) {
           return _buildHistoryEmptyState(dark);
         } else {
+          // Sort newest-first client-side (avoids requiring a Firestore composite index)
+          final sortedDocs = List<DocumentSnapshot>.from(snapshot.data!.docs)
+            ..sort((a, b) {
+              final aTs = (a.data() as Map<String, dynamic>)['date'];
+              final bTs = (b.data() as Map<String, dynamic>)['date'];
+              if (aTs is Timestamp && bTs is Timestamp) {
+                return bTs.compareTo(aTs);
+              }
+              return 0;
+            });
           return ListView(
             physics: const BouncingScrollPhysics(),
             padding: EdgeInsets.symmetric(horizontal: AppSpacing.spacing4, vertical: AppSpacing.spacing2),
-            children: snapshot.data!.docs.map((DocumentSnapshot document) {
+            children: sortedDocs.map((DocumentSnapshot document) {
               final topUpData = TopupTranHistoryModel.fromJson(
                   document.data() as Map<String, dynamic>);
               return buildTransactionCard(
@@ -538,7 +575,7 @@ class WalletScreenState extends State<WalletScreen> {
     required TopupTranHistoryModel topupTranHistory,
     required DateTime date,
   }) {
-    final size = MediaQuery.of(context).size;
+    final dark = isDarkMode(context);
     return Padding(
       padding: EdgeInsets.symmetric(horizontal: AppSpacing.spacing1, vertical: AppSpacing.spacing1),
       child: GestureDetector(
@@ -547,7 +584,7 @@ class WalletScreenState extends State<WalletScreen> {
           elevation: 0,
           shape: RoundedRectangleBorder(borderRadius: AppBorderRadius.lg),
           shadowColor: Colors.transparent,
-          color: AppColors.neutral0,
+          color: dark ? AppThemeData.darkBgSecondary : AppColors.neutral0,
           child: Padding(
             padding: EdgeInsets.symmetric(horizontal: AppSpacing.spacing2, vertical: AppSpacing.spacing4),
             child: Row(
@@ -573,17 +610,16 @@ class WalletScreenState extends State<WalletScreen> {
                       Text(
                         topupTranHistory.note.toString(),
                         style: AppTypography.bodyMedium.copyWith(
-                          color: AppColors.neutral900,
+                          color: dark ? AppThemeData.darkTextPrimary : AppColors.neutral900,
                           fontWeight: FontWeight.w500,
                         ),
                       ),
                       SizedBox(height: AppSpacing.spacing1),
                       Text(
-                        DateFormat('KK:mm:ss a, dd MMM yyyy')
-                            .format(topupTranHistory.date.toDate())
-                            .toUpperCase(),
+                        DateFormat('hh:mm a, dd MMM yyyy')
+                            .format(topupTranHistory.date.toDate()),
                         style: AppTypography.caption.copyWith(
-                          color: AppColors.neutral600,
+                          color: dark ? AppThemeData.darkTextTertiary : AppColors.neutral600,
                         ),
                       ),
                     ],
@@ -604,9 +640,9 @@ class WalletScreenState extends State<WalletScreen> {
                     ),
                     SizedBox(height: AppSpacing.spacing2),
                     Icon(
-                      Icons.arrow_forward_ios,
-                      size: 16,
-                      color: AppColors.neutral500,
+                      Icons.chevron_right_rounded,
+                      size: 18,
+                      color: dark ? AppThemeData.darkTextTertiary : AppColors.neutral400,
                     ),
                   ],
                 ),
@@ -718,9 +754,10 @@ class WalletScreenState extends State<WalletScreen> {
 
   showTransactionDetails({required TopupTranHistoryModel topupTranHistory}) {
     final size = MediaQuery.of(context).size;
+    final dark = isDarkMode(context);
     return showModalBottomSheet(
       elevation: 0,
-      backgroundColor: AppColors.neutral0,
+      backgroundColor: dark ? AppThemeData.darkBgSecondary : AppColors.neutral0,
       shape: RoundedRectangleBorder(
         borderRadius: AppBorderRadius.xl,
       ),
@@ -738,11 +775,11 @@ class WalletScreenState extends State<WalletScreen> {
                 children: [
                   // Handle bar
                   Container(
-                    width: 32,
+                    width: 36,
                     height: 4,
-                    margin: EdgeInsets.symmetric(vertical: AppSpacing.spacing2),
+                    margin: const EdgeInsets.symmetric(vertical: 12),
                     decoration: BoxDecoration(
-                      color: AppColors.neutral300,
+                      color: dark ? AppThemeData.darkBorderPrimary : AppColors.neutral300,
                       borderRadius: AppBorderRadius.full,
                     ),
                   ),
@@ -753,7 +790,7 @@ class WalletScreenState extends State<WalletScreen> {
                     child: Text(
                       "Transaction Details".tr(),
                       style: AppTypography.h4.copyWith(
-                        color: AppColors.neutral900,
+                        color: dark ? AppThemeData.darkTextPrimary : AppColors.neutral900,
                         fontWeight: FontWeight.w600,
                       ),
                       textAlign: TextAlign.center,
@@ -765,7 +802,7 @@ class WalletScreenState extends State<WalletScreen> {
                     padding: EdgeInsets.symmetric(horizontal: AppSpacing.spacing4, vertical: AppSpacing.spacing2),
                     child: Card(
                       elevation: 0,
-                      color: AppColors.neutral50,
+                      color: dark ? AppThemeData.darkBgTertiary : AppColors.neutral50,
                       shape: RoundedRectangleBorder(
                         borderRadius: AppBorderRadius.lg,
                       ),
@@ -777,7 +814,7 @@ class WalletScreenState extends State<WalletScreen> {
                             Text(
                               "Transaction ID".tr(),
                               style: AppTypography.labelMedium.copyWith(
-                                color: AppColors.neutral700,
+                                color: dark ? AppThemeData.darkTextTertiary : AppColors.neutral700,
                                 fontWeight: FontWeight.w500,
                               ),
                             ),
@@ -785,7 +822,7 @@ class WalletScreenState extends State<WalletScreen> {
                             Text(
                               topupTranHistory.id,
                               style: AppTypography.bodyMedium.copyWith(
-                                color: AppColors.neutral900,
+                                color: dark ? AppThemeData.darkTextPrimary : AppColors.neutral900,
                                 fontWeight: FontWeight.w500,
                               ),
                             ),
@@ -800,7 +837,7 @@ class WalletScreenState extends State<WalletScreen> {
                     padding: EdgeInsets.symmetric(horizontal: AppSpacing.spacing4, vertical: AppSpacing.spacing2),
                     child: Card(
                       elevation: 0,
-                      color: AppColors.neutral50,
+                      color: dark ? AppThemeData.darkBgTertiary : AppColors.neutral50,
                       shape: RoundedRectangleBorder(
                         borderRadius: AppBorderRadius.lg,
                       ),
@@ -829,7 +866,7 @@ class WalletScreenState extends State<WalletScreen> {
                                   Text(
                                     DateFormat('MMM dd, yyyy • hh:mm a').format(topupTranHistory.date.toDate()),
                                     style: AppTypography.bodyMedium.copyWith(
-                                      color: AppColors.neutral900,
+                                      color: dark ? AppThemeData.darkTextPrimary : AppColors.neutral900,
                                       fontWeight: FontWeight.w500,
                                     ),
                                   ),
@@ -837,7 +874,7 @@ class WalletScreenState extends State<WalletScreen> {
                                   Text(
                                     topupTranHistory.note.toString(),
                                     style: AppTypography.bodySmall.copyWith(
-                                      color: AppColors.neutral600,
+                                      color: dark ? AppThemeData.darkTextSecondary : AppColors.neutral600,
                                     ),
                                   ),
                                 ],
@@ -870,7 +907,7 @@ class WalletScreenState extends State<WalletScreen> {
                     padding: EdgeInsets.symmetric(horizontal: AppSpacing.spacing4, vertical: AppSpacing.spacing2),
                     child: Card(
                       elevation: 0,
-                      color: AppColors.neutral50,
+                      color: dark ? AppThemeData.darkBgTertiary : AppColors.neutral50,
                       shape: RoundedRectangleBorder(
                         borderRadius: AppBorderRadius.lg,
                       ),
@@ -888,7 +925,7 @@ class WalletScreenState extends State<WalletScreen> {
                                       Text(
                                         "Payment Details".tr(),
                                         style: AppTypography.labelLarge.copyWith(
-                                          color: AppColors.neutral900,
+                                          color: dark ? AppThemeData.darkTextPrimary : AppColors.neutral900,
                                           fontWeight: FontWeight.w600,
                                         ),
                                       ),
@@ -898,7 +935,7 @@ class WalletScreenState extends State<WalletScreen> {
                                           Text(
                                             "Pay Via".tr(),
                                             style: AppTypography.bodyMedium.copyWith(
-                                              color: AppColors.neutral600,
+                                              color: dark ? AppThemeData.darkTextSecondary : AppColors.neutral600,
                                             ),
                                           ),
                                           if (!topupTranHistory.isTopup) ...[
@@ -958,7 +995,7 @@ class WalletScreenState extends State<WalletScreen> {
 
                             Container(
                               height: 1,
-                              color: AppColors.neutral200,
+                              color: dark ? AppThemeData.darkBorderSecondary : AppColors.neutral200,
                             ),
 
                             SizedBox(height: AppSpacing.spacing4),
@@ -970,17 +1007,17 @@ class WalletScreenState extends State<WalletScreen> {
                                     crossAxisAlignment: CrossAxisAlignment.start,
                                     children: [
                                       Text(
-                                        "Date in UTC Format".tr(),
+                                        "Date".tr(),
                                         style: AppTypography.labelMedium.copyWith(
-                                          color: AppColors.neutral700,
+                                          color: dark ? AppThemeData.darkTextTertiary : AppColors.neutral700,
                                           fontWeight: FontWeight.w500,
                                         ),
                                       ),
                                       SizedBox(height: AppSpacing.spacing2),
                                       Text(
-                                        DateFormat('yyyy-MM-dd HH:mm:ss').format(topupTranHistory.date.toDate()),
+                                        DateFormat('MMM dd, yyyy  HH:mm').format(topupTranHistory.date.toDate()),
                                         style: AppTypography.bodyMedium.copyWith(
-                                          color: AppColors.neutral900,
+                                          color: dark ? AppThemeData.darkTextPrimary : AppColors.neutral900,
                                           fontWeight: FontWeight.w500,
                                         ),
                                       ),
@@ -1009,13 +1046,14 @@ class WalletScreenState extends State<WalletScreen> {
     final size = MediaQuery.of(context).size;
     bool isProcessingTopup = false;
     return showModalBottomSheet(
-        elevation: 5,
+        elevation: 0,
         enableDrag: true,
         useRootNavigator: true,
         isScrollControlled: true,
+        backgroundColor: isDarkMode(context) ? AppThemeData.darkBgSecondary : Colors.white,
         shape: const RoundedRectangleBorder(
             borderRadius: BorderRadius.only(
-                topLeft: Radius.circular(15), topRight: Radius.circular(15))),
+                topLeft: Radius.circular(20), topRight: Radius.circular(20))),
         context: context,
         builder: (context) {
           return FractionallySizedBox(
@@ -1031,17 +1069,24 @@ class WalletScreenState extends State<WalletScreen> {
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
+                        // Drag handle
+                        Container(
+                          width: 36,
+                          height: 4,
+                          margin: const EdgeInsets.symmetric(vertical: 12),
+                          decoration: BoxDecoration(
+                            color: isDarkMode(context) ? AppThemeData.darkBorderPrimary : AppThemeData.neutral300,
+                            borderRadius: BorderRadius.circular(2),
+                          ),
+                        ),
                         Padding(
-                          padding: EdgeInsets.symmetric(vertical: AppSpacing.spacing2),
+                          padding: EdgeInsets.symmetric(horizontal: AppSpacing.spacing4, vertical: AppSpacing.spacing1),
                           child: Row(
                             children: [
-                              Padding(
-                                padding: EdgeInsets.symmetric(horizontal: AppSpacing.spacing4),
-                                child: Text(
-                                  "Topup Wallet".tr(),
-                                  style: AppTypography.h3.copyWith(
-                                    color: isDarkMode(context) ? AppColors.darkTextPrimary : AppColors.neutral900,
-                                  ),
+                              Text(
+                                "Add Money".tr(),
+                                style: AppTypography.h3.copyWith(
+                                  color: isDarkMode(context) ? AppColors.darkTextPrimary : AppColors.neutral900,
                                 ),
                               ),
                             ],
@@ -1268,31 +1313,35 @@ class WalletScreenState extends State<WalletScreen> {
                                 showLoadingAlert();
                                 mercadoPagoMakePayment();
                               } else if (selectedRadioTile == "payFast" && (payFastSettingData?.isEnable ?? false)) {
+                                Navigator.pop(context);
                                 showLoadingAlert();
-                                PayStackURLGen.getPayHTML(
-                                  payFastSettingData: payFastSettingData!,
-                                  amount: _amountController.text,
-                                ).then((value) async {
-                                  bool isDone = await Navigator.of(context).push(MaterialPageRoute(
-                                    builder: (context) => PayFastScreen(
-                                      htmlData: value,
+                                try {
+                                  final html = await PayStackURLGen.getPayHTML(
+                                    payFastSettingData: payFastSettingData!,
+                                    amount: _amountController.text,
+                                  );
+                                  if (!mounted) return;
+                                  final bool isDone = await Navigator.of(this.context).push(MaterialPageRoute(
+                                    builder: (ctx) => PayFastScreen(
+                                      htmlData: html,
                                       payFastSettingData: payFastSettingData!,
                                     ),
                                   ));
+                                  if (!mounted) return;
+                                  Navigator.pop(this.context);
                                   if (isDone) {
-                                    Navigator.pop(context);
-                                    Navigator.pop(context);
                                     await paymentCompleted(paymentMethod: "PayFast");
                                   } else {
-                                    Navigator.pop(context);
-                                    Navigator.pop(context);
-                                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                                      content: Text("Payment Unsuccessful!!".tr() + "\n"),
+                                    ScaffoldMessenger.of(_scaffoldKey.currentContext!).showSnackBar(SnackBar(
+                                      content: Text("Payment Cancelled or Unsuccessful.".tr()),
                                       backgroundColor: AppColors.error500,
-                                      duration: const Duration(seconds: 6),
+                                      duration: const Duration(seconds: 4),
                                     ));
                                   }
-                                });
+                                } catch (e) {
+                                  if (mounted) Navigator.pop(this.context);
+                                  ShowToastDialog.showToast("Payment failed. Please try again.");
+                                }
                               } else if (selectedRadioTile == "RazorPay" && (razorPayData?.isEnabled ?? false)) {
                                 Navigator.pop(context);
                                 showLoadingAlert();
@@ -1300,22 +1349,13 @@ class WalletScreenState extends State<WalletScreen> {
                                   isTopup: true,
                                   amount: double.parse(_amountController.text),
                                 ).then((result) {
-                                  try {
-                                    Navigator.of(context, rootNavigator: true).pop();
-                                  } catch (e) {
-                                    // Fallback: try with scaffold context
-                                    try {
-                                      if (_scaffoldKey.currentContext != null) {
-                                        Navigator.pop(_scaffoldKey.currentContext!);
-                                      } else {
-                                      }
-                                    } catch (e2) {
-                                    }
-                                  }
+                                  // Use this.context (wallet state) — the bottom-sheet context captured
+                                  // in the closure is deactivated by this point.
+                                  if (mounted) Navigator.of(this.context, rootNavigator: true).pop();
                                   if (result.isSuccess) {
                                     openCheckout(amount: int.parse(_amountController.text), orderId: result.order!.id);
                                   } else {
-                                    showAlert(_scaffoldKey.currentContext!,
+                                    if (mounted) showAlert(this.context,
                                       response: result.errorMessage?.tr() ?? "Something went wrong, please contact admin.".tr(),
                                       colors: AppColors.error500,
                                     );
@@ -1330,13 +1370,21 @@ class WalletScreenState extends State<WalletScreen> {
                                 showLoadingAlert();
                                 payStackPayment();
                               } else if (selectedRadioTile == "FlutterWave" && (flutterWaveSettingData?.isEnable ?? false)) {
-                                _flutterWaveInitiatePayment(context);
+                                Navigator.pop(context);
+                                showLoadingAlert();
+                                _flutterWaveInitiatePayment();
                               } else if (selectedRadioTile == "Midtrans" && (midTransModel?.enable ?? false)) {
-                                midtransMakePayment(context: context, amount: _amountController.text);
+                                Navigator.pop(context);
+                                showLoadingAlert();
+                                midtransMakePayment(amount: _amountController.text);
                               } else if (selectedRadioTile == "OrangeMoney" && (orangeMoneyModel?.enable ?? false)) {
-                                orangeMakePayment(context: context, amount: _amountController.text);
+                                Navigator.pop(context);
+                                showLoadingAlert();
+                                orangeMakePayment(amount: _amountController.text);
                               } else if (selectedRadioTile == "Xendit" && (xenditModel?.enable ?? false)) {
-                                xenditPayment(context, _amountController.text);
+                                Navigator.pop(context);
+                                showLoadingAlert();
+                                xenditPayment(_amountController.text);
                               } else {
                                 setModalState(() => isProcessingTopup = false);
                                 showAlert(context,
@@ -1415,7 +1463,8 @@ class WalletScreenState extends State<WalletScreen> {
   }
 
   void _handleExternalWaller(ExternalWalletResponse response) {
-    Navigator.pop(context);
+    // Loading dialog is already dismissed before openCheckout() is called — do not pop here.
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
       content: Text(
         "Payment Processing Via".tr() + "\n" + response.walletName!,
@@ -1426,8 +1475,8 @@ class WalletScreenState extends State<WalletScreen> {
   }
 
   void _handlePaymentError(PaymentFailureResponse response) {
-    Navigator.pop(context);
-    // Safely extract the description; RazorPay can send null or non-JSON messages.
+    // Loading dialog is already dismissed before openCheckout() is called — do not pop here.
+    if (!mounted) return;
     String description = 'Payment failed. Please try again.'.tr();
     try {
       final msg = response.message;
@@ -1505,7 +1554,9 @@ class WalletScreenState extends State<WalletScreen> {
         setState(() {});
         displayStripePaymentSheet();
       }
-    } catch (e, s) {
+    } catch (e) {
+      if (mounted) Navigator.pop(context);
+      ShowToastDialog.showToast("Payment failed. Please try again.");
     }
   }
 
@@ -1516,13 +1567,9 @@ class WalletScreenState extends State<WalletScreen> {
         paymentCompleted(paymentMethod: "Stripe");
         paymentIntentData = null;
       });
-    } on stripe1.StripeException catch (e) {
+    } on stripe1.StripeException catch (_) {
       Navigator.pop(context);
-      var lo1 = jsonEncode(e);
-      var lo2 = jsonDecode(lo1);
-      showDialog(
-          context: context,
-          builder: (_) => AlertDialog(content: Text("Payment Failed")));
+      AppDialog.showError(context, message: 'Payment failed. Please try again.');
     } catch (e) {
       Navigator.pop(context);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -1709,95 +1756,111 @@ class WalletScreenState extends State<WalletScreen> {
 
   ///PayStack Payment Method
   payStackPayment() async {
-    await PayStackURLGen.payStackURLGen(
-      amount: (double.parse(_amountController.text) * 100).toString(),
-      currency: currencyData!.code,
-      secretKey: payStackSettingData!.secretKey,
-    ).then((value) async {
+    try {
+      final value = await PayStackURLGen.payStackURLGen(
+        amount: (double.parse(_amountController.text) * 100).toString(),
+        currency: currencyData!.code,
+        secretKey: payStackSettingData!.secretKey,
+      );
+
+      if (!mounted) return;
+
       if (value != null) {
-        PayStackUrlModel _payStackModel = value;
-        bool isDone = await Navigator.of(context).push(MaterialPageRoute(
-            builder: (context) => PayStackScreen(
+        final PayStackUrlModel payStackModel = value;
+        final bool isDone = await Navigator.of(context).push(MaterialPageRoute(
+            builder: (ctx) => PayStackScreen(
                   secretKey: payStackSettingData!.secretKey,
                   callBackUrl: payStackSettingData!.callbackURL,
-                  initialURl: _payStackModel.data.authorizationUrl,
+                  initialURl: payStackModel.data.authorizationUrl,
                   amount: _amountController.text,
-                  reference: _payStackModel.data.reference,
+                  reference: payStackModel.data.reference,
                 )));
-        Navigator.pop(_scaffoldKey.currentContext!);
+
+        if (!mounted) return;
+        Navigator.pop(context);  // Dismiss loading dialog
 
         if (isDone) {
-          // Navigator.pop(context);
           paymentCompleted(paymentMethod: "PayStack");
         } else {
-          hideProgress();
-          ScaffoldMessenger.of(_scaffoldKey.currentContext!)
-              .showSnackBar(SnackBar(
-            content: Text("Payment UnSuccessful!!".tr() + "\n"),
+          ScaffoldMessenger.of(_scaffoldKey.currentContext!).showSnackBar(SnackBar(
+            content: Text("Payment Cancelled or Unsuccessful.".tr()),
             backgroundColor: AppThemeData.primary500,
           ));
         }
       } else {
-        hideProgress();
-        ScaffoldMessenger.of(_scaffoldKey.currentContext!)
-            .showSnackBar(SnackBar(
-          content: Text("Error while transaction!".tr() + "\n"),
+        Navigator.pop(context);  // Dismiss loading dialog on URL generation failure
+        ScaffoldMessenger.of(_scaffoldKey.currentContext!).showSnackBar(SnackBar(
+          content: Text("Error while setting up payment. Please try again.".tr()),
           backgroundColor: AppThemeData.primary500,
         ));
       }
-    });
+    } catch (e) {
+      if (mounted) Navigator.pop(context);
+      ShowToastDialog.showToast("Payment failed. Please try again.");
+    }
   }
 
   ///MercadoPago Payment Method
 
   mercadoPagoMakePayment() async {
-    final headers = {
-      'Authorization': 'Bearer ${mercadoPagoSettingData!.accessToken}',
-      'Content-Type': 'application/json',
-    };
+    try {
+      final headers = {
+        'Authorization': 'Bearer ${mercadoPagoSettingData!.accessToken}',
+        'Content-Type': 'application/json',
+      };
 
-    final body = jsonEncode({
-      "items": [
-        {
-          "title": "Test",
-          "description": "Test Payment",
-          "quantity": 1,
-          "currency_id": "BRL", // or your preferred currency
-          "unit_price": double.parse(amount),
+      final body = jsonEncode({
+        "items": [
+          {
+            "title": "Wallet Top-up",
+            "description": "Wallet Top-up",
+            "quantity": 1,
+            "currency_id": currencyData?.code ?? "BRL",
+            "unit_price": double.parse(_amountController.text),
+          }
+        ],
+        "payer": {"email": MyAppState.currentUser!.email},
+        "back_urls": {
+          "failure": "${GlobalURL}payment/failure",
+          "pending": "${GlobalURL}payment/pending",
+          "success": "${GlobalURL}payment/success",
+        },
+        "auto_return": "approved"
+      });
+
+      final response = await http.post(
+        Uri.parse("https://api.mercadopago.com/checkout/preferences"),
+        headers: headers,
+        body: body,
+      );
+
+      if (!mounted) return;
+
+      if (response.statusCode == 200 || response.statusCode == 201) {
+        final data = jsonDecode(response.body);
+        final bool isDone = await Navigator.push(
+            context,
+            MaterialPageRoute(
+                builder: (ctx) =>
+                    MercadoPagoScreen(initialURl: data['init_point'])));
+
+        if (!mounted) return;
+        // Dismiss the loading dialog that was shown before this method was called
+        Navigator.pop(context);
+
+        if (isDone) {
+          ShowToastDialog.showToast("Payment Successful!!");
+          paymentCompleted(paymentMethod: "MercadoPago");
+        } else {
+          ShowToastDialog.showToast("Payment Cancelled or Unsuccessful.");
         }
-      ],
-      "payer": {"email": MyAppState.currentUser!.email},
-      "back_urls": {
-        "failure": "${GlobalURL}payment/failure",
-        "pending": "${GlobalURL}payment/pending",
-        "success": "${GlobalURL}payment/success",
-      },
-      "auto_return":
-          "approved" // Automatically return after payment is approved
-    });
-
-    final response = await http.post(
-      Uri.parse("https://api.mercadopago.com/checkout/preferences"),
-      headers: headers,
-      body: body,
-    );
-
-    if (response.statusCode == 200 || response.statusCode == 201) {
-      final data = jsonDecode(response.body);
-      final bool isDone = await Navigator.push(
-          context,
-          MaterialPageRoute(
-              builder: (context) =>
-                  MercadoPagoScreen(initialURl: data['init_point'])));
-
-      if (isDone) {
-        ShowToastDialog.showToast("Payment Successful!!");
-        paymentCompleted(paymentMethod: "Mercoado");
       } else {
-        ShowToastDialog.showToast("Payment UnSuccessful!!");
+        Navigator.pop(context);
+        ShowToastDialog.showToast("Payment setup failed. Please try again.");
       }
-    } else {
-      return null;
+    } catch (e) {
+      if (mounted) Navigator.pop(context);
+      ShowToastDialog.showToast("Payment failed. Please try again.");
     }
   }
 
@@ -1819,70 +1882,88 @@ class WalletScreenState extends State<WalletScreen> {
     }
   }
 
-  _flutterWaveInitiatePayment(BuildContext context) async {
-    final url = Uri.parse('https://api.flutterwave.com/v3/payments');
-    final headers = {
-      'Authorization': 'Bearer ${flutterWaveSettingData!.secretKey}',
-      'Content-Type': 'application/json',
-    };
+  _flutterWaveInitiatePayment() async {
+    try {
+      final url = Uri.parse('https://api.flutterwave.com/v3/payments');
+      final headers = {
+        'Authorization': 'Bearer ${flutterWaveSettingData!.secretKey}',
+        'Content-Type': 'application/json',
+      };
 
-    final body = jsonEncode({
-      "tx_ref": _ref,
-      "amount": amount,
-      "currency": "NGN",
-      "redirect_url": "${GlobalURL}payment/success",
-      "payment_options": "ussd, card, barter, payattitude",
-      "customer": {
-        "email": MyAppState.currentUser!.email.toString(),
-        "phonenumber":
-            MyAppState.currentUser!.phoneNumber, // Add a real phone number
-        "name": MyAppState.currentUser!.fullName(), // Add a real customer name
-      },
-      "customizations": {
-        "title": "Payment for Services",
-        "description": "Payment for XYZ services",
-      }
-    });
+      final body = jsonEncode({
+        "tx_ref": _ref,
+        "amount": _amountController.text,
+        "currency": currencyData?.code ?? "NGN",
+        "redirect_url": "${GlobalURL}payment/success",
+        "payment_options": "ussd, card, barter, payattitude",
+        "customer": {
+          "email": MyAppState.currentUser!.email.toString(),
+          "phonenumber": MyAppState.currentUser!.phoneNumber,
+          "name": MyAppState.currentUser!.fullName(),
+        },
+        "customizations": {
+          "title": "Wallet Top-up",
+          "description": "Wallet Top-up via FlutterWave",
+        }
+      });
 
-    final response = await http.post(url, headers: headers, body: body);
+      final response = await http.post(url, headers: headers, body: body);
 
-    if (response.statusCode == 200) {
-      final data = jsonDecode(response.body);
-      final bool isDone = await Navigator.push(
-          context,
-          MaterialPageRoute(
-              builder: (context) =>
-                  MercadoPagoScreen(initialURl: data['data']['link'])));
+      if (!mounted) return;
 
-      if (isDone) {
-        ShowToastDialog.showToast("Payment Successful!!");
-        paymentCompleted(paymentMethod: "FlutterWave");
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final bool isDone = await Navigator.push(
+            context,
+            MaterialPageRoute(
+                builder: (ctx) =>
+                    MercadoPagoScreen(initialURl: data['data']['link'])));
+
+        if (!mounted) return;
+        Navigator.pop(context);
+
+        if (isDone) {
+          ShowToastDialog.showToast("Payment Successful!!");
+          paymentCompleted(paymentMethod: "FlutterWave");
+        } else {
+          ShowToastDialog.showToast("Payment Cancelled or Unsuccessful.");
+        }
       } else {
-        ShowToastDialog.showToast("Payment UnSuccessful!!");
+        Navigator.pop(context);
+        ShowToastDialog.showToast("Payment setup failed. Please try again.");
       }
-    } else {
-      return null;
+    } catch (e) {
+      if (mounted) Navigator.pop(context);
+      ShowToastDialog.showToast("Payment failed. Please try again.");
     }
   }
 
   //Midtrans payment
-  midtransMakePayment(
-      {required String amount, required BuildContext context}) async {
-    await createPaymentLink(amount: amount).then((url) async {
-      ShowToastDialog.closeLoader();
-      if (url != '') {
+  midtransMakePayment({required String amount}) async {
+    try {
+      final url = await createPaymentLink(amount: amount);
+      if (!mounted) return;
+      if (url.isNotEmpty) {
         final bool isDone = await Navigator.push(
             context,
             MaterialPageRoute(
-                builder: (context) => MidtransScreen(initialURl: url)));
+                builder: (ctx) => MidtransScreen(initialURl: url)));
+        if (!mounted) return;
+        Navigator.pop(context);
         if (isDone) {
           ShowToastDialog.showToast("Payment Successful!!");
-          paymentCompleted(paymentMethod: "midtrans");
+          paymentCompleted(paymentMethod: "Midtrans");
         } else {
-          ShowToastDialog.showToast("Payment Unsuccessful!!");
+          ShowToastDialog.showToast("Payment Cancelled or Unsuccessful.");
         }
+      } else {
+        Navigator.pop(context);
+        ShowToastDialog.showToast("Payment setup failed. Please try again.");
       }
-    });
+    } catch (e) {
+      if (mounted) Navigator.pop(context);
+      ShowToastDialog.showToast("Payment failed. Please try again.");
+    }
   }
 
   Future<String> createPaymentLink({required var amount}) async {
@@ -1931,34 +2012,40 @@ class WalletScreenState extends State<WalletScreen> {
   static String orderId = '';
   static String amount = '';
 
-  orangeMakePayment(
-      {required String amount, required BuildContext context}) async {
-    reset();
-    var id = const Uuid().v4();
-    var paymentURL = await fetchToken(
-        context: context, orderId: id, amount: amount, currency: 'USD');
-    ShowToastDialog.closeLoader();
-    if (paymentURL.toString() != '') {
-      final bool isDone = await Navigator.push(
-          context,
-          MaterialPageRoute(
-              builder: (context) => OrangeMoneyScreen(
-                    initialURl: paymentURL,
-                    accessToken: accessToken,
-                    amount: amount,
-                    orangePay: orangeMoneyModel!,
-                    orderId: orderId,
-                    payToken: payToken,
-                  )));
-
-      if (isDone) {
-        ShowToastDialog.showToast("Payment Successful!!");
-        paymentCompleted(paymentMethod: "orangepay");
+  orangeMakePayment({required String amount}) async {
+    try {
+      reset();
+      var id = const Uuid().v4();
+      var paymentURL = await fetchToken(
+          context: context, orderId: id, amount: amount, currency: 'USD');
+      if (!mounted) return;
+      if (paymentURL.toString().isNotEmpty) {
+        final bool isDone = await Navigator.push(
+            context,
+            MaterialPageRoute(
+                builder: (ctx) => OrangeMoneyScreen(
+                      initialURl: paymentURL,
+                      accessToken: accessToken,
+                      amount: amount,
+                      orangePay: orangeMoneyModel!,
+                      orderId: orderId,
+                      payToken: payToken,
+                    )));
+        if (!mounted) return;
+        Navigator.pop(context);
+        if (isDone) {
+          ShowToastDialog.showToast("Payment Successful!!");
+          paymentCompleted(paymentMethod: "OrangeMoney");
+        } else {
+          ShowToastDialog.showToast("Payment Cancelled or Unsuccessful.");
+        }
       } else {
-        ShowToastDialog.showToast("Payment Unsuccessful!!");
+        Navigator.pop(context);
+        ShowToastDialog.showToast("Payment setup failed. Please try again.");
       }
-    } else {
-      ShowToastDialog.showToast("Payment Unsuccessful!!");
+    } catch (e) {
+      if (mounted) Navigator.pop(context);
+      ShowToastDialog.showToast("Payment failed. Please try again.");
     }
   }
 
@@ -2050,27 +2137,35 @@ class WalletScreenState extends State<WalletScreen> {
   }
 
   //XenditPayment
-  xenditPayment(context, amount) async {
-    await createXenditInvoice(amount: amount).then((model) async {
-      ShowToastDialog.closeLoader();
+  xenditPayment(amount) async {
+    try {
+      final model = await createXenditInvoice(amount: amount);
+      if (!mounted) return;
       if (model.id != null) {
         final bool isDone = await Navigator.push(
             context,
             MaterialPageRoute(
-                builder: (context) => XenditScreen(
+                builder: (ctx) => XenditScreen(
                       initialURl: model.invoiceUrl ?? '',
                       transId: model.id ?? '',
-                      apiKey: xenditModel!.apiKey!.toString() ?? "",
+                      apiKey: xenditModel!.apiKey!.toString(),
                     )));
-
+        if (!mounted) return;
+        Navigator.pop(context);
         if (isDone) {
           ShowToastDialog.showToast("Payment Successful!!");
-          paymentCompleted(paymentMethod: "xendit");
+          paymentCompleted(paymentMethod: "Xendit");
         } else {
-          ShowToastDialog.showToast("Payment Unsuccessful!!");
+          ShowToastDialog.showToast("Payment Cancelled or Unsuccessful.");
         }
+      } else {
+        Navigator.pop(context);
+        ShowToastDialog.showToast("Payment setup failed. Please try again.");
       }
-    });
+    } catch (e) {
+      if (mounted) Navigator.pop(context);
+      ShowToastDialog.showToast("Payment failed. Please try again.");
+    }
   }
 
   Future<XenditModel> createXenditInvoice({required var amount}) async {
@@ -2106,23 +2201,7 @@ class WalletScreenState extends State<WalletScreen> {
 
   Future<void> showLoading(
       {required String message, Color txtColor = Colors.black}) {
-    return showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          content: Container(
-            margin: const EdgeInsets.fromLTRB(30, 20, 30, 20),
-            width: double.infinity,
-            height: 30,
-            child: Text(
-              message,
-              style: TextStyle(color: txtColor),
-            ),
-          ),
-        );
-      },
-    );
+    return AppDialog.showInfo(context, message: message);
   }
 
   @override

@@ -32,6 +32,7 @@ import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/services/paystack_url_genrater.dart';
 import 'package:emartconsumer/services/rozorpayConroller.dart';
+import 'package:emartconsumer/services/app_dialog.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/theme/round_button_fill.dart';
@@ -40,7 +41,6 @@ import 'package:emartconsumer/ui/wallet/MercadoPagoScreen.dart';
 import 'package:emartconsumer/ui/wallet/PayFastScreen.dart';
 import 'package:emartconsumer/ui/wallet/payStackScreen.dart';
 import 'package:emartconsumer/userPrefrence.dart';
-import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_paypal_native/flutter_paypal_native.dart';
@@ -842,7 +842,7 @@ class PaymentScreenState extends State<PaymentScreen> {
                     const SizedBox(width: 8),
                     Text('Pay Now'.tr(), style: const TextStyle(fontSize: 16, fontFamily: AppThemeData.semiBold, color: Colors.white)),
                     const SizedBox(width: 8),
-                    Text('Â· ${amountShow(amount: widget.total.toString())}',
+                    Text('· ${amountShow(amount: widget.total.toString())}',
                         style: const TextStyle(fontSize: 16, fontFamily: AppThemeData.semiBold, color: Colors.white)),
                   ],
                 ),
@@ -889,67 +889,14 @@ class PaymentScreenState extends State<PaymentScreen> {
       });
     } else if (wallet && walletBalanceError == true) {
       paymentType = 'wallet';
-      bool? confirmOrder = await showDialog<bool>(
-        context: context,
-        barrierDismissible: false,
-        builder: (BuildContext context) {
-          return AlertDialog(
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
-            title: Row(children: [
-              Icon(Icons.info_outline, color: AppThemeData.primary500, size: 28),
-              const SizedBox(width: 12),
-              Expanded(child: Text('Confirm Order'.tr(), style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold))),
-            ]),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Do you want to confirm and place this order?'.tr(), style: const TextStyle(fontSize: 16, height: 1.5)),
-                const SizedBox(height: 16),
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(color: AppThemeData.primary500.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(8)),
-                  child: Row(children: [
-                    const Icon(Icons.account_balance_wallet, color: AppThemeData.primary500, size: 24),
-                    const SizedBox(width: 12),
-                    Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      Text('Payment Method'.tr(), style: TextStyle(fontSize: 12, color: Colors.grey[600])),
-                      const Text('Wallet', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-                    ]),
-                  ]),
-                ),
-                const SizedBox(height: 12),
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(color: Colors.grey[100], borderRadius: BorderRadius.circular(8)),
-                  child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                    Text('Total Amount'.tr(), style: TextStyle(fontSize: 14, color: Colors.grey[700])),
-                    Text(amountShow(amount: widget.total.toString()),
-                        style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppThemeData.primary500)),
-                  ]),
-                ),
-              ],
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(false),
-                style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12)),
-                child: Text('Cancel'.tr(), style: TextStyle(color: Colors.grey[600], fontSize: 16, fontWeight: FontWeight.w600)),
-              ),
-              ElevatedButton(
-                onPressed: () => Navigator.of(context).pop(true),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: AppThemeData.primary500,
-                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                ),
-                child: Text('Yes, Place Order'.tr(), style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
-              ),
-            ],
-          );
-        },
+      final confirmOrder = await AppDialog.showConfirm(
+        context,
+        title: 'Confirm Order',
+        message: 'Do you want to confirm and place this order via Wallet?',
+        confirmLabel: 'Yes, Place Order',
+        cancelLabel: 'Cancel',
       );
-      if (confirmOrder == true) {
+      if (confirmOrder) {
         showLoadingAlert();
         setState(() { isOrderPlaced = true; });
         final orderId = await generateOrderId();
@@ -1013,55 +960,19 @@ class PaymentScreenState extends State<PaymentScreen> {
       );
     } else {
       // If order not placed yet, show confirmation to prevent placement
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (BuildContext context) {
-          return AlertDialog(
-            title: Row(
-              children: [
-                Icon(Icons.info_outline, color: Colors.blue, size: 24),
-                SizedBox(width: 8),
-                Text('Cancel Payment?'.tr()),
-              ],
-            ),
-            content: Text(
-              'Do you want to go back to cart? Your order will not be placed.'.tr(),
-              style: TextStyle(fontSize: 16),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () {
-                  Navigator.of(context).pop(); // Close dialog
-                },
-                child: Text(
-                  'Stay Here'.tr(),
-                  style: TextStyle(
-                    color: AppThemeData.primary500,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-              TextButton(
-                onPressed: () {
-                  setState(() {
-                    isProcessingOrder = false; // Stop any processing
-                  });
-                  Navigator.of(context).pop(); // Close dialog
-                  Navigator.of(context).pop(); // Go back to cart
-                },
-                child: Text(
-                  'Go Back'.tr(),
-                  style: TextStyle(
-                    color: AppThemeData.primary500,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-            ],
-          );
-        },
+      final goBack = await AppDialog.showConfirm(
+        context,
+        title: 'Cancel Payment?',
+        message: 'Do you want to go back to cart? Your order will not be placed.',
+        confirmLabel: 'Go Back',
+        cancelLabel: 'Stay Here',
       );
+      if (goBack) {
+        setState(() {
+          isProcessingOrder = false; // Stop any processing
+        });
+        Navigator.of(context).pop(); // Go back to cart
+      }
     }
   }
 
@@ -1230,17 +1141,13 @@ class PaymentScreenState extends State<PaymentScreen> {
         Navigator.pop(_scaffoldKey.currentContext!);
         var lo1 = jsonEncode(error);
         var lo2 = jsonDecode(lo1);
-        showDialog(
-            context: context,
-            builder: (_) => AlertDialog(content: Text("Payment Failed")));
+        AppDialog.showError(context, message: 'Payment failed. Please try again.');
       });
     } on stripe1.StripeException catch (e) {
       Navigator.pop(_scaffoldKey.currentContext!);
       var lo1 = jsonEncode(e);
       var lo2 = jsonDecode(lo1);
-      showDialog(
-          context: context,
-          builder: (_) => AlertDialog(content: Text("Payment Failed")));
+      AppDialog.showError(context, message: 'Payment failed. Please try again.');
     } catch (e) {
       Navigator.pop(_scaffoldKey.currentContext!);
       ScaffoldMessenger.of(_scaffoldKey.currentContext!).showSnackBar(SnackBar(
@@ -2147,10 +2054,7 @@ class PaymentScreenState extends State<PaymentScreen> {
     // Debounce: prevent duplicate order placements
     if (_isPlacingOrder) return;
     if (paymentType.isEmpty) {
-      ShowDialogToDismiss(
-          title: "Empty payment type".tr(),
-          buttonText: "ok".tr(),
-          content: "Select payment type".tr());
+      AppDialog.showWarning(buildContext, title: 'Missing Payment Method', message: 'Please select a payment method to continue.');
       return;
     }
 
@@ -2299,61 +2203,18 @@ class PaymentScreenState extends State<PaymentScreen> {
               .tr();
     }
 
-    showDialog(
-      context: ctx,
-      barrierDismissible: false,
-      builder: (_) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
-        backgroundColor: dark ? AppThemeData.darkBgSecondary : Colors.white,
-        icon: Icon(Icons.error_outline_rounded,
-            color: AppThemeData.error500, size: 40),
-        title: Text(
-          'Order Failed'.tr(),
-          style: TextStyle(
-            fontFamily: AppThemeData.bold,
-            fontWeight: FontWeight.w800,
-            color: dark ? AppThemeData.darkTextPrimary : AppThemeData.neutral900,
-          ),
-        ),
-        content: Text(
-          friendlyMsg,
-          style: TextStyle(
-            fontSize: 14,
-            height: 1.55,
-            color:
-                dark ? AppThemeData.darkTextSecondary : AppThemeData.neutral600,
-          ),
-          textAlign: TextAlign.center,
-        ),
-        actionsAlignment: MainAxisAlignment.center,
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: Text(
-              'Cancel'.tr(),
-              style: TextStyle(color: AppThemeData.neutral400),
-            ),
-          ),
-          ElevatedButton(
-            onPressed: () async {
-              Navigator.of(ctx).pop();
-              // Retry with a fresh order ID to avoid duplicates
-              final retryId = await generateOrderId();
-              placeOrder(ctx, oid: retryId);
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppThemeData.primary500,
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(10)),
-            ),
-            child: Text(
-              'Retry'.tr(),
-              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
-            ),
-          ),
-        ],
-      ),
-    );
+    AppDialog.showConfirm(
+      ctx,
+      title: 'Order Failed',
+      message: friendlyMsg,
+      confirmLabel: 'Retry',
+      cancelLabel: 'Cancel',
+    ).then((retry) async {
+      if (retry) {
+        final retryId = await generateOrderId();
+        placeOrder(ctx, oid: retryId);
+      }
+    });
   }
 
   Future<void> setPrefData() async {

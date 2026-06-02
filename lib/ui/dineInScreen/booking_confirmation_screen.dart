@@ -1,5 +1,5 @@
 import 'package:easy_localization/easy_localization.dart';
-import 'package:emartconsumer/constants.dart' show currencyData, ORDER_STATUS_ACCEPTED;
+import 'package:emartconsumer/constants.dart' show amountShow, ORDER_STATUS_ACCEPTED;
 import 'package:emartconsumer/model/BookTableModel.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
@@ -15,7 +15,6 @@ class BookingConfirmationScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final bool dark = isDarkMode(context);
-    final String sym = currencyData?.symbol ?? '₹';
 
     return Scaffold(
       backgroundColor: dark ? AppThemeData.surfaceDark : const Color(0xFFF5F5F5),
@@ -186,7 +185,7 @@ class BookingConfirmationScreen extends StatelessWidget {
                         if (booking.totalCharge > 0) ...[
                           _divider(dark),
                           _detailRow(dark, Icons.payments_outlined, 'Total Charge'.tr(),
-                              '$sym${booking.totalCharge.toStringAsFixed(0)}'),
+                              amountShow(amount: booking.totalCharge.toString(), decimals: 0)),
                         ],
                         _divider(dark),
                         _detailRow(

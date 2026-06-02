@@ -1,13 +1,11 @@
 import 'dart:async';
-import 'dart:io';
-import 'dart:convert';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:easy_localization/easy_localization.dart';
+import 'package:emartconsumer/services/app_dialog.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
-import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -80,43 +78,9 @@ hideProgress() {
   ShowToastDialog.closeLoader();
 }
 
-//helper method to show alert dialog
-showAlertDialog(
+void showAlertDialog(
     BuildContext context, String title, String content, bool addOkButton) {
-  // set up the AlertDialog
-  Widget? okButton;
-  if (addOkButton) {
-    okButton = TextButton(
-      child: const Text('ok').tr(),
-      onPressed: () {
-        Navigator.pop(context);
-      },
-    );
-  }
-  if (Platform.isIOS) {
-    CupertinoAlertDialog alert = CupertinoAlertDialog(
-      title: Text(title),
-      content: Text(content),
-      actions: [if (okButton != null) okButton],
-    );
-    showCupertinoDialog(
-        context: context,
-        builder: (context) {
-          return alert;
-        });
-  } else {
-    AlertDialog alert = AlertDialog(
-        title: Text(title),
-        content: Text(content),
-        actions: [if (okButton != null) okButton]);
-
-    showDialog(
-      context: context,
-      builder: (BuildContext context) {
-        return alert;
-      },
-    );
-  }
+  AppDialog.showInfo(context, title: title, message: content);
 }
 
 pushReplacement(BuildContext context, Widget destination) {
@@ -322,6 +286,8 @@ String orderDate(Timestamp? timestamp) {
           timestamp.millisecondsSinceEpoch));
 }
 
+/// Legacy dialog widget — now delegates to [AppDialogWidget].
+/// Preserved for backwards compatibility. Prefer [AppDialog] for new code.
 class ShowDialogToDismiss extends StatelessWidget {
   final String content;
   final String title;
@@ -329,73 +295,22 @@ class ShowDialogToDismiss extends StatelessWidget {
   final String? secondaryButtonText;
   final VoidCallback? action;
 
-  ShowDialogToDismiss(
-      {required this.title,
-      required this.buttonText,
-      required this.content,
-      this.secondaryButtonText,
-      this.action});
+  const ShowDialogToDismiss({
+    super.key,
+    required this.title,
+    required this.buttonText,
+    required this.content,
+    this.secondaryButtonText,
+    this.action,
+  });
 
   @override
-  Widget build(BuildContext context) {
-    if (!Platform.isIOS) {
-      return AlertDialog(
-        title: Text(
-          title,
-        ),
-        content: Text(
-          content,
-        ),
-        actions: [
-          if (action != null)
-            TextButton(
-              child: Text(
-                secondaryButtonText!,
-                style: const TextStyle(color: AppThemeData.primary500),
-              ),
-              onPressed: action,
-            ),
-          TextButton(
-            child: Text(
-              buttonText,
-            ),
-            onPressed: () {
-              Navigator.of(context).pop();
-            },
-          ),
-        ],
+  Widget build(BuildContext context) => AppDialogWidget(
+        type: action != null ? AppDialogType.confirm : AppDialogType.info,
+        title: title,
+        message: content,
+        primaryLabel: buttonText,
+        secondaryLabel: secondaryButtonText,
+        onPrimary: action,
       );
-    } else {
-      return CupertinoAlertDialog(
-        title: Text(
-          title,
-        ),
-        content: Text(
-          content,
-        ),
-        actions: [
-          CupertinoDialogAction(
-            isDefaultAction: true,
-            child: Text(
-              buttonText[0].toUpperCase() +
-                  buttonText.substring(1).toLowerCase(),
-            ),
-            onPressed: () {
-              Navigator.of(context).pop();
-            },
-          ),
-          if (action != null)
-            CupertinoDialogAction(
-              isDefaultAction: true,
-              isDestructiveAction: true,
-              child: Text(
-                secondaryButtonText![0].toUpperCase() +
-                    secondaryButtonText!.substring(1).toLowerCase(),
-              ),
-              onPressed: action,
-            ),
-        ],
-      );
-    }
-  }
 }

@@ -25,7 +25,8 @@ class BookTableModel {
   String slotId;            // for slot-based bookings
   String selectedTime;      // selected time (flexible) or slot start time
   String selectedEndTime;   // slot end time
-  String bookingDate;       // human-readable date string
+  String bookingDate;       // human-readable date string e.g. "Mon, Jan 15 2024"
+  String bookingDateKey;    // 'yyyy-MM-dd' for Firestore equality queries (no composite index needed)
   String pricingModel;      // 'free' | 'per_person' | 'table_charge' | 'cover_charge'
   num bookingCharge;        // per-unit charge
   num totalCharge;          // totalGuest * bookingCharge or flat charge
@@ -54,6 +55,7 @@ class BookTableModel {
       this.selectedTime = '',
       this.selectedEndTime = '',
       this.bookingDate = '',
+      this.bookingDateKey = '',
       this.pricingModel = 'free',
       this.bookingCharge = 0,
       this.totalCharge = 0,
@@ -97,6 +99,7 @@ class BookTableModel {
         selectedTime: parsedJson['selectedTime'] as String? ?? '',
         selectedEndTime: parsedJson['selectedEndTime'] as String? ?? '',
         bookingDate: parsedJson['bookingDate'] as String? ?? '',
+        bookingDateKey: parsedJson['bookingDateKey'] as String? ?? '',
         pricingModel: parsedJson['pricingModel'] as String? ?? 'free',
         bookingCharge: parsedJson['bookingCharge'] is num ? parsedJson['bookingCharge'] as num : 0,
         totalCharge: parsedJson['totalCharge'] is num ? parsedJson['totalCharge'] as num : 0,
@@ -127,6 +130,7 @@ class BookTableModel {
       'selectedTime': selectedTime,
       'selectedEndTime': selectedEndTime,
       'bookingDate': bookingDate,
+      'bookingDateKey': bookingDateKey,
       'pricingModel': pricingModel,
       'bookingCharge': bookingCharge,
       'totalCharge': totalCharge,

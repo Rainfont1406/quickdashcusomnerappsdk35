@@ -69,9 +69,13 @@ class HomeScreen extends StatefulWidget {
   _HomeScreenState createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   late CartDatabase cartDatabase;
   int cartCount = 0;
+
+  // Tracks when the app was last sent to background so we only refresh
+  // if the user was away long enough for data to go stale.
+  DateTime? _pausedAt;
 
   @override
   void didChangeDependencies() {
@@ -102,8 +106,8 @@ class _HomeScreenState extends State<HomeScreen> {
     final double userLng = MyAppState.selectedPosotion.location!.longitude;
 
     vendors.sort((a, b) {
-      bool aOpen = a.reststatus || a.isOpen();
-      bool bOpen = b.reststatus || b.isOpen();
+      bool aOpen = a.reststatus && (a.workingHours.isEmpty || a.isOpen());
+      bool bOpen = b.reststatus && (b.workingHours.isEmpty || b.isOpen());
 
       // Rule 1: open first
       if (aOpen != bOpen) {
@@ -179,6 +183,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     print("AK DEBUG: HomeScreen initState");
     getLocationData();
     getBanner();
@@ -239,7 +244,7 @@ class _HomeScreenState extends State<HomeScreen> {
       backgroundColor:
       isDarkMode(context) ? AppThemeData.surfaceDark : AppThemeData.surface,
       body: isLoading == true
-          ? const HomeSkeletonLoader()
+          ? HomeSkeletonLoader(orderType: selctedOrderTypeValue ?? 'Delivery')
           : Padding(
         padding: EdgeInsets.only(
             top: MediaQuery.of(context).viewPadding.top),
@@ -494,10 +499,9 @@ class _HomeScreenState extends State<HomeScreen> {
                                   child: Row(
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
-                                      // Red location pin
-                                      const Icon(
+                                      Icon(
                                         Icons.location_on,
-                                        color: Colors.red,
+                                        color: AppThemeData.primary500,
                                         size: 16,
                                       ),
                                       const SizedBox(width: 3),
@@ -752,34 +756,16 @@ class _HomeScreenState extends State<HomeScreen> {
                     SizedBox(
                       height: storyList.isEmpty ? 0 : 20,
                     ),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 16),
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.start,
-                        crossAxisAlignment:
-                        CrossAxisAlignment.start,
-                        children: [
-                          /// BY AK
-                          if (selctedOrderTypeValue ==
-                              "Delivery") ...[
-                            titleView("Eat What Makes You Happy",
-                                    () {
-                                  push(
-                                      context,
-                                      const CuisinesScreen(
-                                          isPageCallFromHomeScreen:
-                                          true));
-                                }),
-                            const SizedBox(height: 10),
-                            CategoryView(
-                                vendorCategoryList:
-                                vendorCategoryModel),
-                          ]
-                          ///
-                        ],
+                    if (selctedOrderTypeValue == "Delivery") ...[
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        child: titleView("Eat What Makes You Happy", () {
+                          push(context, const CuisinesScreen(isPageCallFromHomeScreen: true));
+                        }),
                       ),
-                    ),
+                      const SizedBox(height: 10),
+                      CategoryView(vendorCategoryList: vendorCategoryModel),
+                    ],
                     const SizedBox(height: 32),
                     bannerTopHome.isEmpty
                         ? const SizedBox()
@@ -1078,9 +1064,31 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     fireStoreUtils.closeOfferStream();
     fireStoreUtils.closeVendorStream();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.paused:
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.hidden:
+        _pausedAt = DateTime.now();
+        break;
+      case AppLifecycleState.resumed:
+        if (_pausedAt != null &&
+            DateTime.now().difference(_pausedAt!) >=
+                const Duration(seconds: 30)) {
+          _pausedAt = null;
+          _onRefresh();
+        }
+        break;
+      default:
+        break;
+    }
   }
 
   Future<void> saveFoodTypeValue() async {
@@ -1398,20 +1406,14 @@ class StoryView extends StatefulWidget {
 }
 
 class _StoryViewState extends State<StoryView> {
-  late ScrollController _scrollController1;
-  late ScrollController _scrollController2;
-  bool _isScrolling1 = false;
-  bool _isScrolling2 = false;
+  late ScrollController _scrollController;
 
   final Map<String, String?> _thumbnailCache = {};
 
   @override
   void initState() {
     super.initState();
-    _scrollController1 = ScrollController();
-    _scrollController2 = ScrollController();
-    _scrollController1.addListener(_syncScroll1);
-    _scrollController2.addListener(_syncScroll2);
+    _scrollController = ScrollController();
   }
 
   Future<String?> _generateVideoThumbnail(String videoUrl) async {
@@ -1441,38 +1443,9 @@ class _StoryViewState extends State<StoryView> {
     return null;
   }
 
-  void _syncScroll1() {
-    if (!_isScrolling2 &&
-        _scrollController1.hasClients &&
-        _scrollController2.hasClients) {
-      _isScrolling1 = true;
-      if ((_scrollController1.offset - _scrollController2.offset).abs() >
-          1.0) {
-        _scrollController2.jumpTo(_scrollController1.offset);
-      }
-      _isScrolling1 = false;
-    }
-  }
-
-  void _syncScroll2() {
-    if (!_isScrolling1 &&
-        _scrollController1.hasClients &&
-        _scrollController2.hasClients) {
-      _isScrolling2 = true;
-      if ((_scrollController2.offset - _scrollController1.offset).abs() >
-          1.0) {
-        _scrollController1.jumpTo(_scrollController2.offset);
-      }
-      _isScrolling2 = false;
-    }
-  }
-
   @override
   void dispose() {
-    _scrollController1.removeListener(_syncScroll1);
-    _scrollController2.removeListener(_syncScroll2);
-    _scrollController1.dispose();
-    _scrollController2.dispose();
+    _scrollController.dispose();
     super.dispose();
   }
 
@@ -1484,73 +1457,20 @@ class _StoryViewState extends State<StoryView> {
     final double _videoH = (_sw * 0.50).clamp(155.0, 220.0);
     final double _videoExt = (_sw * 0.40).clamp(130.0, 190.0);
     if (widget.orderType == "Delivery".tr()) {
-      if (widget.storyList.length >= 4) {
-        List<StoryModel> row1Stories = [];
-        List<StoryModel> row2Stories = [];
-        for (int i = 0; i < widget.storyList.length; i++) {
-          if (i % 2 == 0) {
-            row1Stories.add(widget.storyList[i]);
-          } else {
-            row2Stories.add(widget.storyList[i]);
-          }
-        }
-        return SizedBox(
-          height: _storyH * 2 + 10,
-          child: Column(
-            children: [
-              SizedBox(
-                height: _storyH,
-                child: ListView.builder(
-                  controller: _scrollController1,
-                  scrollDirection: Axis.horizontal,
-                  padding: EdgeInsets.zero,
-                  itemCount: row1Stories.length,
-                  addAutomaticKeepAlives: false,
-                  addRepaintBoundaries: true,
-                  itemExtent: _storyExt,
-                  itemBuilder: (context, index) {
-                    return _buildStoryItem(row1Stories[index],
-                        widget.storyList.indexOf(row1Stories[index]));
-                  },
-                ),
-              ),
-              const SizedBox(height: 10),
-              SizedBox(
-                height: _storyH,
-                child: ListView.builder(
-                  controller: _scrollController2,
-                  scrollDirection: Axis.horizontal,
-                  padding: EdgeInsets.zero,
-                  itemCount: row2Stories.length,
-                  addAutomaticKeepAlives: false,
-                  addRepaintBoundaries: true,
-                  itemExtent: _storyExt,
-                  itemBuilder: (context, index) {
-                    return _buildStoryItem(row2Stories[index],
-                        widget.storyList.indexOf(row2Stories[index]));
-                  },
-                ),
-              ),
-            ],
-          ),
-        );
-      } else {
-        return SizedBox(
-          height: _storyH,
-          child: ListView.builder(
-            controller: _scrollController1,
-            scrollDirection: Axis.horizontal,
-            padding: EdgeInsets.zero,
-            itemCount: widget.storyList.length,
-            addAutomaticKeepAlives: false,
-            addRepaintBoundaries: true,
-            itemExtent: _storyExt,
-            itemBuilder: (context, index) {
-              return _buildStoryItem(widget.storyList[index], index);
-            },
-          ),
-        );
-      }
+      return SizedBox(
+        height: _storyH,
+        child: ListView.builder(
+          controller: _scrollController,
+          scrollDirection: Axis.horizontal,
+          padding: EdgeInsets.zero,
+          itemCount: widget.storyList.length,
+          addAutomaticKeepAlives: false,
+          addRepaintBoundaries: true,
+          itemExtent: _storyExt,
+          itemBuilder: (context, index) =>
+              _buildStoryItem(widget.storyList[index], index),
+        ),
+      );
     }
 
     return SizedBox(
@@ -2135,6 +2055,123 @@ class _StoryShimmerState extends State<_StoryShimmer>
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Auto-sliding restaurant image carousel
+// ─────────────────────────────────────────────────────────────────────────────
+class _RestaurantCardImage extends StatefulWidget {
+  final VendorModel vendorModel;
+  final double height;
+  final BorderRadius borderRadius;
+  final bool showDots;
+
+  const _RestaurantCardImage({
+    required this.vendorModel,
+    required this.height,
+    required this.borderRadius,
+    this.showDots = true,
+  });
+
+  @override
+  State<_RestaurantCardImage> createState() => _RestaurantCardImageState();
+}
+
+class _RestaurantCardImageState extends State<_RestaurantCardImage> {
+  late PageController _pageController;
+  Timer? _timer;
+  int _currentPage = 0;
+
+  List<String> get _images {
+    // photos[0] = logo (same as photo field), photos[1..n] = card gallery images.
+    // Skip index 0 so only the actual card images appear in the carousel.
+    final allPhotos = widget.vendorModel.photos
+        .map((e) => e.toString())
+        .where((s) => s.isNotEmpty && s != 'null')
+        .toList();
+    final cardImages = allPhotos.length > 1 ? allPhotos.sublist(1) : <String>[];
+    if (cardImages.isNotEmpty) return cardImages;
+    // Fallback: show the logo if no card images have been uploaded yet.
+    final logo = widget.vendorModel.photo.toString();
+    return logo.isNotEmpty && logo != 'null' ? [logo] : [''];
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _pageController = PageController();
+    final imgs = _images;
+    if (imgs.length > 1) {
+      _timer = Timer.periodic(const Duration(seconds: 3), (_) {
+        if (!mounted) return;
+        final next = (_currentPage + 1) % imgs.length;
+        _pageController.animateToPage(
+          next,
+          duration: const Duration(milliseconds: 400),
+          curve: Curves.easeInOut,
+        );
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    _pageController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final imgs = _images;
+    return Stack(
+      children: [
+        ClipRRect(
+          borderRadius: widget.borderRadius,
+          child: imgs.length == 1
+              ? NetworkImageWidget(
+                  imageUrl: imgs[0],
+                  fit: BoxFit.cover,
+                  height: widget.height,
+                  width: double.infinity,
+                )
+              : PageView.builder(
+                  controller: _pageController,
+                  itemCount: imgs.length,
+                  onPageChanged: (i) => setState(() => _currentPage = i),
+                  itemBuilder: (_, i) => NetworkImageWidget(
+                    imageUrl: imgs[i],
+                    fit: BoxFit.cover,
+                    height: widget.height,
+                    width: double.infinity,
+                  ),
+                ),
+        ),
+        if (widget.showDots && imgs.length > 1)
+          Positioned(
+            bottom: 8,
+            left: 0,
+            right: 0,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: List.generate(imgs.length, (i) {
+                final active = i == _currentPage;
+                return AnimatedContainer(
+                  duration: const Duration(milliseconds: 250),
+                  margin: const EdgeInsets.symmetric(horizontal: 3),
+                  width: active ? 18 : 6,
+                  height: 6,
+                  decoration: BoxDecoration(
+                    color: active ? Colors.white : Colors.white.withValues(alpha: 0.55),
+                    borderRadius: BorderRadius.circular(3),
+                  ),
+                );
+              }),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // AllStore
 // ─────────────────────────────────────────────────────────────────────────────
 class AllStore extends StatelessWidget {
@@ -2166,7 +2203,7 @@ class AllStore extends StatelessWidget {
       addRepaintBoundaries: true,
       itemBuilder: (BuildContext context, int index) {
         final VendorModel vendorModel = allStoreList[index];
-        final bool open = vendorModel.isOpen() || vendorModel.reststatus;
+        final bool open = vendorModel.reststatus && (vendorModel.workingHours.isEmpty || vendorModel.isOpen());
         final String rating = calculateReview(
           reviewCount: vendorModel.reviewsCount.toString(),
           reviewSum: vendorModel.reviewsSum.toString(),
@@ -2203,16 +2240,16 @@ class AllStore extends StatelessWidget {
                   // ── Cinematic image area ─────────────────────────────────
                   Stack(
                     children: [
-                      ClipRRect(
-                        borderRadius: const BorderRadius.only(
-                          topLeft: Radius.circular(24),
-                          topRight: Radius.circular(24),
-                        ),
-                        child: NetworkImageWidget(
-                          imageUrl: vendorModel.photo.toString(),
-                          fit: BoxFit.cover,
+                      SizedBox(
+                        height: Responsive.height(24, context),
+                        width: double.infinity,
+                        child: _RestaurantCardImage(
+                          vendorModel: vendorModel,
                           height: Responsive.height(24, context),
-                          width: double.infinity,
+                          borderRadius: const BorderRadius.only(
+                            topLeft: Radius.circular(24),
+                            topRight: Radius.circular(24),
+                          ),
                         ),
                       ),
                       // Cinematic bottom gradient
@@ -2240,96 +2277,51 @@ class AllStore extends StatelessWidget {
                           ),
                         ),
                       ),
-                      // Top-left: Open / Closed badge
-                      Positioned(
-                        top: 12,
-                        left: 12,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 8, vertical: 4),
-                          decoration: BoxDecoration(
-                            color: open
-                                ? const Color(0xFF16A34A)
-                                : const Color(0xFFFFEEEE),
-                            borderRadius: BorderRadius.circular(50),
-                            boxShadow: [
-                              BoxShadow(
-                                color: (open
-                                    ? const Color(0xFF16A34A)
-                                    : const Color(0xFFDC2626))
-                                    .withValues(alpha: 0.25),
-                                blurRadius: 8,
-                                offset: const Offset(0, 3),
-                              ),
-                            ],
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Container(
-                                width: 6,
-                                height: 6,
-                                decoration: BoxDecoration(
-                                  color: open
-                                      ? Colors.white
-                                      : const Color(0xFFDC2626),
-                                  shape: BoxShape.circle,
+                      if (!open)
+                        Positioned(
+                          top: 12,
+                          left: 12,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFFFEEEE),
+                              borderRadius: BorderRadius.circular(50),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: const Color(0xFFDC2626)
+                                      .withValues(alpha: 0.25),
+                                  blurRadius: 8,
+                                  offset: const Offset(0, 3),
                                 ),
-                              ),
-                              const SizedBox(width: 4),
-                              Text(
-                                open ? 'Open' : 'Closed',
-                                style: TextStyle(
-                                  color: open
-                                      ? Colors.white
-                                      : const Color(0xFFDC2626),
-                                  fontSize: 11,
-                                  height: 1.2,
-                                  fontFamily: AppThemeData.semiBold,
-                                  letterSpacing: 0.1,
+                              ],
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Container(
+                                  width: 6,
+                                  height: 6,
+                                  decoration: const BoxDecoration(
+                                    color: Color(0xFFDC2626),
+                                    shape: BoxShape.circle,
+                                  ),
                                 ),
-                              ),
-                            ],
+                                const SizedBox(width: 4),
+                                const Text(
+                                  'Closed',
+                                  style: TextStyle(
+                                    color: Color(0xFFDC2626),
+                                    fontSize: 11,
+                                    height: 1.2,
+                                    fontFamily: AppThemeData.semiBold,
+                                    letterSpacing: 0.1,
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
                         ),
-                      ),
-                      // Top-right: Rating badge
-                      Positioned(
-                        top: 12,
-                        right: 12,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 9, vertical: 4),
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            borderRadius: BorderRadius.circular(20),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withValues(alpha: 0.10),
-                                blurRadius: 6,
-                                offset: const Offset(0, 2),
-                              ),
-                            ],
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Icon(Icons.star_rounded,
-                                  color: Color(0xFFFBBC05), size: 14),
-                              const SizedBox(width: 4),
-                              Text(
-                                rating,
-                                style: const TextStyle(
-                                  fontSize: 11,
-                                  height: 1.2,
-                                  fontFamily: AppThemeData.semiBold,
-                                  color: Color(0xFF1A1A1A),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
                     ],
                   ),
                   // ── Info section ─────────────────────────────────────────
@@ -2369,15 +2361,33 @@ class AllStore extends StatelessWidget {
                               ),
                             ),
                             const Spacer(),
-                            const Icon(Icons.rate_review_rounded,
-                                color: Color(0xFF7C3AED), size: 16),
-                            const SizedBox(width: 4),
-                            Text(
-                              '${vendorModel.reviewsCount} reviews',
-                              style: const TextStyle(
-                                fontSize: 13,
-                                fontFamily: AppThemeData.semiBold,
-                                color: Color(0xFF7C3AED),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 9, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFDCFCE7),
+                                borderRadius: BorderRadius.circular(20),
+                                border: Border.all(
+                                    color: const Color(0xFF16A34A)
+                                        .withValues(alpha: 0.35),
+                                    width: 1),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(Icons.star_rounded,
+                                      color: Color(0xFF16A34A), size: 14),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    rating,
+                                    style: const TextStyle(
+                                      fontSize: 11,
+                                      height: 1.2,
+                                      fontFamily: AppThemeData.semiBold,
+                                      color: Color(0xFF15803D),
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
                           ],
@@ -2430,7 +2440,7 @@ class NewArrival extends StatelessWidget {
         addRepaintBoundaries: true,
         itemBuilder: (BuildContext context, int index) {
           VendorModel vendorModel = newArrivalRestaurantList[index];
-          final bool open = vendorModel.isOpen();
+          final bool open = vendorModel.reststatus && (vendorModel.workingHours.isEmpty || vendorModel.isOpen());
           final String rating = calculateReview(
             reviewCount: vendorModel.reviewsCount.toString(),
             reviewSum: vendorModel.reviewsSum.toString(),
@@ -2462,95 +2472,55 @@ class NewArrival extends StatelessWidget {
                   children: [
                     Stack(
                       children: [
-                        ClipRRect(
-                          borderRadius: const BorderRadius.only(
-                            topLeft: Radius.circular(16),
-                            topRight: Radius.circular(16),
-                          ),
-                          child: NetworkImageWidget(
-                            imageUrl: vendorModel.photo.toString(),
-                            fit: BoxFit.cover,
+                        SizedBox(
+                          height: Responsive.height(14, context),
+                          width: double.infinity,
+                          child: _RestaurantCardImage(
+                            vendorModel: vendorModel,
                             height: Responsive.height(14, context),
-                            width: double.infinity,
+                            borderRadius: const BorderRadius.only(
+                              topLeft: Radius.circular(16),
+                              topRight: Radius.circular(16),
+                            ),
+                            showDots: false,
                           ),
                         ),
-                        Positioned(
-                          top: 8,
-                          right: 8,
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 7, vertical: 3),
-                            decoration: BoxDecoration(
-                              color: Colors.white,
-                              borderRadius: BorderRadius.circular(20),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: Colors.black.withValues(alpha: 0.10),
-                                  blurRadius: 6,
-                                  offset: const Offset(0, 2),
-                                ),
-                              ],
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                const Icon(Icons.star_rounded,
-                                    color: Color(0xFFFBBC05), size: 13),
-                                const SizedBox(width: 3),
-                                Text(
-                                  rating,
-                                  style: const TextStyle(
-                                    fontSize: 11,
-                                    height: 1.2,
-                                    fontFamily: AppThemeData.semiBold,
-                                    color: Color(0xFF1A1A1A),
+                        if (!open)
+                          Positioned(
+                            bottom: 7,
+                            left: 7,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 6, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFFFEEEE),
+                                borderRadius: BorderRadius.circular(20),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Container(
+                                    width: 5,
+                                    height: 5,
+                                    decoration: const BoxDecoration(
+                                      color: Color(0xFFDC2626),
+                                      shape: BoxShape.circle,
+                                    ),
                                   ),
-                                ),
-                              ],
+                                  const SizedBox(width: 3),
+                                  const Text(
+                                    'Closed',
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      height: 1.2,
+                                      fontFamily: AppThemeData.semiBold,
+                                      color: Color(0xFFDC2626),
+                                    ),
+                                  ),
+                                ],
+                              ),
                             ),
                           ),
-                        ),
-                        Positioned(
-                          bottom: 7,
-                          left: 7,
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 6, vertical: 3),
-                            decoration: BoxDecoration(
-                              color: open
-                                  ? const Color(0xFF16A34A)
-                                  : const Color(0xFFFFEEEE),
-                              borderRadius: BorderRadius.circular(20),
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Container(
-                                  width: 5,
-                                  height: 5,
-                                  decoration: BoxDecoration(
-                                    color: open
-                                        ? Colors.white
-                                        : const Color(0xFFDC2626),
-                                    shape: BoxShape.circle,
-                                  ),
-                                ),
-                                const SizedBox(width: 3),
-                                Text(
-                                  open ? 'Open' : 'Closed',
-                                  style: TextStyle(
-                                    fontSize: 10,
-                                    height: 1.2,
-                                    fontFamily: AppThemeData.semiBold,
-                                    color: open
-                                        ? Colors.white
-                                        : const Color(0xFFDC2626),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
                       ],
                     ),
                     Padding(
@@ -2601,23 +2571,42 @@ class NewArrival extends StatelessWidget {
                           const SizedBox(height: 6),
                           Row(
                             children: [
-                              const Text('⭐', style: TextStyle(fontSize: 11)),
-                              const SizedBox(width: 3),
-                              Text(
-                                rating,
-                                style: const TextStyle(
-                                  fontSize: 11,
-                                  fontFamily: AppThemeData.bold,
-                                  color: Color(0xFF1A1A1A),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 6, vertical: 3),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFDCFCE7),
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border.all(
+                                    color: const Color(0xFF16A34A)
+                                        .withValues(alpha: 0.35),
+                                    width: 1,
+                                  ),
                                 ),
-                              ),
-                              const SizedBox(width: 3),
-                              Text(
-                                '(${vendorModel.reviewsCount})',
-                                style: const TextStyle(
-                                  fontSize: 11,
-                                  fontFamily: AppThemeData.medium,
-                                  color: Color(0xFF888888),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(Icons.star_rounded,
+                                        color: Color(0xFF16A34A), size: 11),
+                                    const SizedBox(width: 3),
+                                    Text(
+                                      rating,
+                                      style: const TextStyle(
+                                        fontSize: 10,
+                                        fontFamily: AppThemeData.bold,
+                                        color: Color(0xFF15803D),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 2),
+                                    Text(
+                                      '(${vendorModel.reviewsCount})',
+                                      style: const TextStyle(
+                                        fontSize: 10,
+                                        fontFamily: AppThemeData.medium,
+                                        color: Color(0xFF166534),
+                                      ),
+                                    ),
+                                  ],
                                 ),
                               ),
                               const Spacer(),
@@ -3649,7 +3638,7 @@ class _RecommendForYouViewState
 // ─────────────────────────────────────────────────────────────────────────────
 // CategoryView
 
-class CategoryView extends StatefulWidget {
+class CategoryView extends StatelessWidget {
   final List<VendorCategoryModel> vendorCategoryList;
 
   const CategoryView({
@@ -3658,51 +3647,30 @@ class CategoryView extends StatefulWidget {
   });
 
   @override
-  State<CategoryView> createState() => _CategoryViewState();
-}
-
-class _CategoryViewState extends State<CategoryView> {
-  bool showAll = false;
-  final int initialItemsToShow = 8;
-
-  @override
   Widget build(BuildContext context) {
-    final itemsToDisplay = showAll
-        ? widget.vendorCategoryList
-        : widget.vendorCategoryList.take(initialItemsToShow).toList();
-
-    return Column(
-      children: [
-        GridView.builder(
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          padding: EdgeInsets.zero,
-          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: 4,
-            childAspectRatio: 0.72,
-            mainAxisSpacing: 10,
-            crossAxisSpacing: 5,
-          ),
-          itemCount: itemsToDisplay.length,
-          itemBuilder: (context, index) {
-            final vendorCategoryModel = itemsToDisplay[index];
-
-            return InkWell(
-              onTap: () {
-                push(
-                  context,
-                  CategoryDetailsScreen(
-                    category: vendorCategoryModel,
-                    isDineIn: false,
-                  ),
-                );
-              },
+    final dark = isDarkMode(context);
+    return SizedBox(
+      height: 90,
+      child: ListView.builder(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        itemCount: vendorCategoryList.length,
+        itemBuilder: (context, index) {
+          final vendorCategoryModel = vendorCategoryList[index];
+          return Padding(
+            padding: const EdgeInsets.only(right: 16),
+            child: GestureDetector(
+              onTap: () => push(
+                context,
+                CategoryDetailsScreen(
+                  category: vendorCategoryModel,
+                  isDineIn: false,
+                ),
+              ),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-
-                  /// Purple circle
                   Container(
                     width: 54,
                     height: 54,
@@ -3718,17 +3686,13 @@ class _CategoryViewState extends State<CategoryView> {
                       padding: const EdgeInsets.all(6),
                       child: ClipOval(
                         child: NetworkImageWidget(
-                          imageUrl:
-                          vendorCategoryModel.photo.toString(),
+                          imageUrl: vendorCategoryModel.photo.toString(),
                           fit: BoxFit.cover,
                         ),
                       ),
                     ),
                   ),
-
                   const SizedBox(height: 6),
-
-                  /// Category text
                   SizedBox(
                     width: 60,
                     height: 28,
@@ -3737,56 +3701,21 @@ class _CategoryViewState extends State<CategoryView> {
                       textAlign: TextAlign.center,
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: Color(0xFF444444),
-                        fontWeight: FontWeight.bold,
+                      style: TextStyle(
+                        color: dark
+                            ? Colors.white.withValues(alpha: 0.85)
+                            : const Color(0xFF444444),
+                        fontFamily: AppThemeData.semiBold,
                         fontSize: 10,
                       ),
                     ),
                   ),
                 ],
               ),
-            );
-          },
-        ),
-
-        /// Show more / less
-        if (widget.vendorCategoryList.length >
-            initialItemsToShow)
-          Padding(
-            padding: const EdgeInsets.only(top: 10),
-            child: InkWell(
-              onTap: () {
-                setState(() {
-                  showAll = !showAll;
-                });
-              },
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  vertical: 6,
-                  horizontal: 14,
-                ),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(
-                    color: AppThemeData.primary500,
-                    width: 1,
-                  ),
-                ),
-                child: Text(
-                  showAll
-                      ? "Show Less".tr()
-                      : "Show More".tr(),
-                  style: TextStyle(
-                    color: AppThemeData.primary500,
-                    fontFamily: AppThemeData.medium,
-                    fontSize: 12,
-                  ),
-                ),
-              ),
             ),
-          ),
-      ],
+          );
+        },
+      ),
     );
   }
 }

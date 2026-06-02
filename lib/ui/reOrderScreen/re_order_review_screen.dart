@@ -5,11 +5,14 @@ import 'package:emartconsumer/model/OrderModel.dart';
 import 'package:emartconsumer/model/ProductModel.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/model/variant_info.dart';
+import 'package:emartconsumer/services/app_dialog.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
+import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/ui/cartScreen/CartScreen.dart';
+import 'package:emartconsumer/ui/container/ContainerScreen.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../constants/typography.dart';
@@ -133,32 +136,15 @@ class _ReOrderReviewScreenState extends State<ReOrderReviewScreen>
 
     if (existing.isNotEmpty &&
         existing.any((p) => p.vendorID != widget.orderModel.vendorID)) {
-      final clear = await showDialog<bool>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          title: Text('Replace Cart?'.tr(),
-              style: AppTypography.h6.copyWith(fontWeight: FontWeight.w700)),
-          content: Text(
-            'Your cart has items from another restaurant. Adding these items will clear your current cart.'
-                .tr(),
-            style: AppTypography.bodyMedium,
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: Text('Cancel'.tr()),
-            ),
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: Text('Clear & Add'.tr(),
-                  style: TextStyle(color: AppThemeData.primary500)),
-            ),
-          ],
-        ),
+      final confirmed = await AppDialog.showConfirm(
+        context,
+        title: 'Replace Cart?'.tr(),
+        message: 'Your cart has items from another restaurant. Adding these items will clear your current cart.'.tr(),
+        confirmLabel: 'Clear & Add'.tr(),
+        cancelLabel: 'Cancel'.tr(),
+        destructive: true,
       );
-      if (clear != true) return;
+      if (!confirmed) return;
       await db.deleteAllProducts();
     }
 
@@ -185,7 +171,17 @@ class _ReOrderReviewScreenState extends State<ReOrderReviewScreen>
     }
 
     if (!mounted) return;
-    pushReplacement(context, const CartScreen());
+    // Open CartScreen inside ContainerScreen so the AppBar, back button, and
+    // drawer are all present — CartScreen has no AppBar of its own.
+    pushAndRemoveUntil(
+      context,
+      ContainerScreen(
+        user: MyAppState.currentUser,
+        currentWidget: const CartScreen(),
+        appBarTitle: 'Your Cart'.tr(),
+        drawerSelection: DrawerSelection.Cart,
+      ),
+    );
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────────

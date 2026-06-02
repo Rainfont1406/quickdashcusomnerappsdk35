@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
@@ -10,6 +11,122 @@ import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/dineInScreen/dine_in_restaurant_details_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
+
+// Auto-sliding card image carousel for dine-in restaurant cards.
+// photos[0] = logo, photos[1..n] = card gallery images (set via add_store).
+class _DineInCardImage extends StatefulWidget {
+  final VendorModel vendor;
+  const _DineInCardImage({required this.vendor});
+  @override
+  State<_DineInCardImage> createState() => _DineInCardImageState();
+}
+
+class _DineInCardImageState extends State<_DineInCardImage> {
+  late PageController _ctrl;
+  Timer? _timer;
+  int _page = 0;
+
+  List<String> get _cardPhotos {
+    final all = widget.vendor.photos
+        .map((e) => e.toString())
+        .where((s) => s.isNotEmpty && s != 'null')
+        .toList();
+    return all.length > 1 ? all.sublist(1) : <String>[];
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = PageController();
+    if (_cardPhotos.length > 1) {
+      _timer = Timer.periodic(const Duration(seconds: 3), (_) {
+        if (!mounted) return;
+        final next = (_page + 1) % _cardPhotos.length;
+        _ctrl.animateToPage(next,
+            duration: const Duration(milliseconds: 400),
+            curve: Curves.easeInOut);
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final imgs = _cardPhotos;
+    final fallback = getImageVAlidUrl(widget.vendor.photo);
+    return Stack(
+      children: [
+        ClipRRect(
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+          child: SizedBox(
+            height: 160,
+            width: double.infinity,
+            child: imgs.isEmpty
+                ? CachedNetworkImage(
+                    imageUrl: fallback,
+                    height: 160,
+                    width: double.infinity,
+                    fit: BoxFit.cover,
+                    placeholder: (_, __) => Container(
+                        height: 160, color: Colors.grey.shade200,
+                        child: const Center(child: CircularProgressIndicator())),
+                    errorWidget: (_, __, ___) => Container(
+                        height: 160, color: Colors.grey.shade200,
+                        child: const Icon(Icons.restaurant, size: 40, color: Colors.grey)),
+                  )
+                : PageView.builder(
+                    controller: _ctrl,
+                    itemCount: imgs.length,
+                    onPageChanged: (i) => setState(() => _page = i),
+                    itemBuilder: (_, i) => CachedNetworkImage(
+                      imageUrl: getImageVAlidUrl(imgs[i]),
+                      height: 160,
+                      width: double.infinity,
+                      fit: BoxFit.cover,
+                      placeholder: (_, __) =>
+                          Container(color: Colors.grey.shade200),
+                      errorWidget: (_, __, ___) => Container(
+                          color: Colors.grey.shade200,
+                          child: const Icon(Icons.restaurant,
+                              size: 40, color: Colors.grey)),
+                    ),
+                  ),
+          ),
+        ),
+        if (imgs.length > 1)
+          Positioned(
+            bottom: 8,
+            left: 0,
+            right: 0,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: List.generate(imgs.length, (i) {
+                final active = i == _page;
+                return AnimatedContainer(
+                  duration: const Duration(milliseconds: 250),
+                  margin: const EdgeInsets.symmetric(horizontal: 3),
+                  width: active ? 18 : 6,
+                  height: 6,
+                  decoration: BoxDecoration(
+                    color: active
+                        ? Colors.white
+                        : Colors.white.withValues(alpha: 0.55),
+                    borderRadius: BorderRadius.circular(3),
+                  ),
+                );
+              }),
+            ),
+          ),
+      ],
+    );
+  }
+}
 
 class DineInScreen extends StatefulWidget {
   final User? user;
@@ -197,26 +314,8 @@ class _DineInScreenState extends State<DineInScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // ── Restaurant Image ───────────────────────────────────
-            ClipRRect(
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
-              child: CachedNetworkImage(
-                imageUrl: getImageVAlidUrl(vendor.photo),
-                height: 160,
-                width: double.infinity,
-                fit: BoxFit.cover,
-                placeholder: (_, __) => Container(
-                  height: 160,
-                  color: Colors.grey.shade200,
-                  child: const Center(child: CircularProgressIndicator()),
-                ),
-                errorWidget: (_, __, ___) => Container(
-                  height: 160,
-                  color: Colors.grey.shade200,
-                  child: const Icon(Icons.restaurant, size: 40, color: Colors.grey),
-                ),
-              ),
-            ),
+            // ── Restaurant Image carousel (photos[1..n]) ───────────
+            _DineInCardImage(vendor: vendor),
 
             Padding(
               padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
@@ -300,19 +399,22 @@ class _DineInScreenState extends State<DineInScreen> {
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
                         decoration: BoxDecoration(
-                          color: AppThemeData.accent50,
+                          color: const Color(0xFFDCFCE7),
                           borderRadius: BorderRadius.circular(6),
+                          border: Border.all(
+                              color: const Color(0xFF16A34A).withValues(alpha: 0.35),
+                              width: 1),
                         ),
                         child: Row(
                           children: [
-                            const Icon(Icons.star_rounded, size: 13, color: AppThemeData.accent500),
+                            const Icon(Icons.star_rounded, size: 13, color: Color(0xFF16A34A)),
                             const SizedBox(width: 3),
                             Text(
                               rating.toStringAsFixed(1),
                               style: const TextStyle(
                                 fontSize: 12,
                                 fontWeight: FontWeight.w600,
-                                color: AppThemeData.accent600,
+                                color: Color(0xFF15803D),
                               ),
                             ),
                           ],
@@ -369,14 +471,14 @@ class _DineInScreenState extends State<DineInScreen> {
   }
 
   String _pricingLabel(VendorModel vendor) {
-    final sym = currencyData?.symbol ?? '₹';
+    final String amt = amountShow(amount: vendor.bookingCharge.toString(), decimals: 0);
     switch (vendor.bookingPricingModel) {
       case 'per_person':
-        return '$sym${vendor.bookingCharge.toStringAsFixed(0)}/person';
+        return '$amt/person';
       case 'table_charge':
-        return '$sym${vendor.bookingCharge.toStringAsFixed(0)} table charge';
+        return '$amt table charge';
       case 'cover_charge':
-        return '$sym${vendor.bookingCharge.toStringAsFixed(0)} cover/person';
+        return '$amt cover/person';
       default:
         return 'Free Booking'.tr();
     }

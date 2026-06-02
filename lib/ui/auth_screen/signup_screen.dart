@@ -22,6 +22,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class SignupScreen extends StatefulWidget {
   final User? userModel;
@@ -48,6 +49,7 @@ class _SignupScreenState extends State<SignupScreen> {
 
   String type = "";
   int phoneMaxLength = 10;
+  bool _showEmailForm = false;
 
   User userModel = User();
 
@@ -59,6 +61,8 @@ class _SignupScreenState extends State<SignupScreen> {
     if (type == "mobileNumber") {
       phoneNUmberEditingController.text = userModel.phoneNumber.toString();
       countryCodeEditingController.text = userModel.countryCode.toString();
+      // Mobile signup arrives with data pre-filled — show the form immediately
+      _showEmailForm = true;
     } else {
       if (countryCodeEditingController.text.isEmpty) {
         countryCodeEditingController.text = '+91';
@@ -161,8 +165,6 @@ class _SignupScreenState extends State<SignupScreen> {
     final nameParts = _splitFullName(fullNameEditingController.text.toString());
     try {
       if (type == "mobileNumber") {
-        // For mobile signup, the email field might be filled in after OTP,
-        // no duplicate phone check needed (Firebase OTP already handled it).
         userModel.firstName = nameParts['firstName']!;
         userModel.lastName = nameParts['lastName']!;
         userModel.email = emailEditingController.text.trim().toLowerCase();
@@ -176,12 +178,15 @@ class _SignupScreenState extends State<SignupScreen> {
         final referralUser = await FireStoreUtils.getReferralUserByCode(
             referralCodeEditingController.text);
         await FireStoreUtils.referralAdd(ReferralModel(
-          id: FireStoreUtils.getCurrentUid(),
+          id: userModel.userID,
           referralBy: referralUser?.id ?? '',
           referralCode: getReferralCode(),
         ));
 
         await FireStoreUtils.updateCurrentUser(userModel);
+        // Persist phone user ID so the session survives app restarts
+        final signupPrefs = await SharedPreferences.getInstance();
+        await signupPrefs.setString(PHONE_AUTH_USER_ID, userModel.userID);
         if (!mounted) return;
         ShowToastDialog.showToast('Welcome to QuickDash! Your account is ready.');
         if (userModel.shippingAddress != null &&
@@ -202,7 +207,6 @@ class _SignupScreenState extends State<SignupScreen> {
         return;
       }
 
-      // Email+password signup — pre-check if phone is already registered as customer
       final phoneSnap = await FirebaseFirestore.instance
           .collection(USERS)
           .where('phoneNumber', isEqualTo: phoneNUmberEditingController.text.trim())
@@ -309,8 +313,10 @@ class _SignupScreenState extends State<SignupScreen> {
         child: Column(
           children: [
             AuthHeader(
-              title: 'Create Account'.tr,
-              subtitle: 'Join QuickDash today'.tr,
+              title: 'Create Your Account'.tr,
+              tagline:
+                  'Live restaurant menus. Direct ordering. No paper menus. Zero waiting time dining with QuickDash.',
+              subtitle: 'Join QuickDash and start enjoying faster dining experiences.'.tr,
               showBackButton: true,
             ),
             Expanded(
@@ -319,163 +325,191 @@ class _SignupScreenState extends State<SignupScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    AuthFieldLabel(text: 'Full Name'.tr),
-                    AuthTextField(
-                      controller: fullNameEditingController,
-                      hint: 'Enter Full Name'.tr,
-                      iconPath: 'assets/icons/ic_user.svg',
+                    AuthOutlinedButton(
+                      label: 'Sign up with Phone Number'.tr,
+                      iconPath: 'assets/icons/ic_phone.svg',
+                      onTap: () => push(context, const PhoneNumberScreen(isSignup: true)),
                     ),
                     const SizedBox(height: 16),
-                    AuthFieldLabel(text: 'Email Address'.tr),
-                    AuthTextField(
-                      controller: emailEditingController,
-                      hint: 'Enter Email Address'.tr,
+                    AuthOutlinedButton(
+                      label: 'Sign up with Email Address'.tr,
                       iconPath: 'assets/icons/ic_mail.svg',
-                      keyboardType: TextInputType.emailAddress,
-                      textCapitalization: TextCapitalization.none,
-                    ),
-                    const SizedBox(height: 16),
-                    AuthFieldLabel(text: 'Phone Number'.tr),
-                    AuthTextField(
-                      controller: phoneNUmberEditingController,
-                      hint: 'Enter Phone Number'.tr,
-                      enabled: type != "mobileNumber",
-                      keyboardType: const TextInputType.numberWithOptions(
-                          signed: true, decimal: true),
-                      textInputAction: TextInputAction.done,
-                      inputFormatters: [
-                        FilteringTextInputFormatter.digitsOnly,
-                        LengthLimitingTextInputFormatter(phoneMaxLength),
-                      ],
-                      prefixWidget: CountryCodePicker(
-                        enabled: type != "mobileNumber",
-                        onChanged: (value) =>
-                            _onCountryCodeChanged(value.dialCode.toString()),
-                        dialogTextStyle: TextStyle(
-                          color: isDarkMode(context)
-                              ? AppThemeData.grey50
-                              : AppThemeData.grey900,
-                          fontWeight: FontWeight.w500,
-                          fontFamily: AppThemeData.medium,
-                        ),
-                        dialogBackgroundColor: isDarkMode(context)
-                            ? AppThemeData.grey800
-                            : AppThemeData.grey100,
-                        initialSelection: 'IN',
-                        favorite: const ['+91'],
-                        comparator: (a, b) =>
-                            b.name!.compareTo(a.name.toString()),
-                        textStyle: TextStyle(
-                          fontSize: 14,
-                          color: isDarkMode(context)
-                              ? AppThemeData.grey50
-                              : AppThemeData.grey900,
-                          fontFamily: AppThemeData.medium,
-                        ),
-                        searchDecoration: InputDecoration(
-                          iconColor: isDarkMode(context)
-                              ? AppThemeData.grey50
-                              : AppThemeData.grey900,
-                        ),
-                        searchStyle: TextStyle(
-                          color: isDarkMode(context)
-                              ? AppThemeData.grey50
-                              : AppThemeData.grey900,
-                          fontWeight: FontWeight.w500,
-                          fontFamily: AppThemeData.medium,
-                        ),
-                      ),
-                    ),
-                    if (type != "mobileNumber") ...[
-                      const SizedBox(height: 16),
-                      AuthFieldLabel(text: 'Password'.tr),
-                      AuthTextField(
-                        controller: passwordEditingController,
-                        hint: 'Enter Password'.tr,
-                        iconPath: 'assets/icons/ic_lock.svg',
-                        obscureText: passwordVisible,
-                        showVisibility: true,
-                        isVisible: passwordVisible,
-                        onToggle: () =>
-                            setState(() => passwordVisible = !passwordVisible),
-                      ),
-                      const SizedBox(height: 16),
-                      AuthFieldLabel(text: 'Confirm Password'.tr),
-                      AuthTextField(
-                        controller: conformPasswordEditingController,
-                        hint: 'Enter Confirm Password'.tr,
-                        iconPath: 'assets/icons/ic_lock.svg',
-                        obscureText: conformPasswordVisible,
-                        showVisibility: true,
-                        isVisible: conformPasswordVisible,
-                        onToggle: () => setState(() =>
-                            conformPasswordVisible = !conformPasswordVisible),
-                      ),
-                    ],
-                    const SizedBox(height: 16),
-                    AuthFieldLabel(text: 'Referral Code (Optional)'.tr),
-                    AuthTextField(
-                      controller: referralCodeEditingController,
-                      hint: 'Enter Referral Code'.tr,
-                      iconPath: 'assets/icons/ic_gift.svg',
-                      textCapitalization: TextCapitalization.characters,
-                    ),
-                    const SizedBox(height: 24),
-                    AuthPrimaryButton(
-                      label: 'Sign Up'.tr,
                       onTap: () {
-                        if (_validateSignupForm()) {
-                          signUpWithEmailAndPassword(context);
-                        }
+                        setState(() => _showEmailForm = !_showEmailForm);
                       },
                     ),
-                    const SizedBox(height: 28),
-                    const AuthOrDivider(),
-                    const SizedBox(height: 28),
-                    AuthOutlinedButton(
-                      label: 'Continue with Mobile Number'.tr,
-                      iconPath: 'assets/icons/ic_phone.svg',
-                      onTap: () => pushReplacement(context, PhoneNumberScreen()),
+                    AnimatedSize(
+                      duration: const Duration(milliseconds: 250),
+                      curve: Curves.easeInOut,
+                      child: _showEmailForm
+                          ? _buildEmailForm(context)
+                          : const SizedBox.shrink(),
                     ),
                   ],
                 ),
               ),
             ),
+            _buildFooter(context),
           ],
         ),
       ),
-      bottomNavigationBar: Padding(
-        padding: EdgeInsets.only(
-          bottom: Platform.isAndroid ? 16 : 32,
-          top: 12,
+    );
+  }
+
+  Widget _buildEmailForm(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SizedBox(height: 24),
+        const AuthOrDivider(),
+        const SizedBox(height: 24),
+        AuthFieldLabel(text: 'Full Name'.tr),
+        AuthTextField(
+          controller: fullNameEditingController,
+          hint: 'Enter Full Name'.tr,
+          iconPath: 'assets/icons/ic_user.svg',
         ),
-        child: Center(
-          child: Text.rich(
-            TextSpan(
-              children: [
-                TextSpan(
-                  text: 'Already have an account?  '.tr,
-                  style: TextStyle(
-                    color: isDarkMode(context)
-                        ? AppThemeData.grey400
-                        : AppThemeData.grey500,
-                    fontFamily: AppThemeData.regular,
-                    fontSize: 14,
-                  ),
-                ),
-                TextSpan(
-                  recognizer: TapGestureRecognizer()
-                    ..onTap = () => pushAndRemoveUntil(
-                        context, const LoginScreen()),
-                  text: 'Login'.tr,
-                  style: const TextStyle(
-                    color: AppThemeData.primary500,
-                    fontFamily: AppThemeData.bold,
-                    fontSize: 14,
-                  ),
-                ),
-              ],
+        const SizedBox(height: 16),
+        AuthFieldLabel(text: 'Email Address'.tr),
+        AuthTextField(
+          controller: emailEditingController,
+          hint: 'Enter Email Address'.tr,
+          iconPath: 'assets/icons/ic_mail.svg',
+          keyboardType: TextInputType.emailAddress,
+          textCapitalization: TextCapitalization.none,
+        ),
+        const SizedBox(height: 16),
+        AuthFieldLabel(text: 'Phone Number'.tr),
+        AuthTextField(
+          controller: phoneNUmberEditingController,
+          hint: 'Enter Phone Number'.tr,
+          enabled: type != "mobileNumber",
+          keyboardType: const TextInputType.numberWithOptions(
+              signed: true, decimal: true),
+          textInputAction: TextInputAction.done,
+          inputFormatters: [
+            FilteringTextInputFormatter.digitsOnly,
+            LengthLimitingTextInputFormatter(phoneMaxLength),
+          ],
+          prefixWidget: CountryCodePicker(
+            enabled: type != "mobileNumber",
+            onChanged: (value) =>
+                _onCountryCodeChanged(value.dialCode.toString()),
+            dialogTextStyle: TextStyle(
+              color: isDarkMode(context)
+                  ? AppThemeData.grey50
+                  : AppThemeData.grey900,
+              fontWeight: FontWeight.w500,
+              fontFamily: AppThemeData.medium,
             ),
+            dialogBackgroundColor: isDarkMode(context)
+                ? AppThemeData.grey800
+                : AppThemeData.grey100,
+            initialSelection: 'IN',
+            favorite: const ['+91'],
+            comparator: (a, b) =>
+                b.name!.compareTo(a.name.toString()),
+            textStyle: TextStyle(
+              fontSize: 14,
+              color: isDarkMode(context)
+                  ? AppThemeData.grey50
+                  : AppThemeData.grey900,
+              fontFamily: AppThemeData.medium,
+            ),
+            searchDecoration: InputDecoration(
+              iconColor: isDarkMode(context)
+                  ? AppThemeData.grey50
+                  : AppThemeData.grey900,
+            ),
+            searchStyle: TextStyle(
+              color: isDarkMode(context)
+                  ? AppThemeData.grey50
+                  : AppThemeData.grey900,
+              fontWeight: FontWeight.w500,
+              fontFamily: AppThemeData.medium,
+            ),
+          ),
+        ),
+        if (type != "mobileNumber") ...[
+          const SizedBox(height: 16),
+          AuthFieldLabel(text: 'Password'.tr),
+          AuthTextField(
+            controller: passwordEditingController,
+            hint: 'Enter Password'.tr,
+            iconPath: 'assets/icons/ic_lock.svg',
+            obscureText: passwordVisible,
+            showVisibility: true,
+            isVisible: passwordVisible,
+            onToggle: () =>
+                setState(() => passwordVisible = !passwordVisible),
+          ),
+          const SizedBox(height: 16),
+          AuthFieldLabel(text: 'Confirm Password'.tr),
+          AuthTextField(
+            controller: conformPasswordEditingController,
+            hint: 'Enter Confirm Password'.tr,
+            iconPath: 'assets/icons/ic_lock.svg',
+            obscureText: conformPasswordVisible,
+            showVisibility: true,
+            isVisible: conformPasswordVisible,
+            onToggle: () => setState(() =>
+                conformPasswordVisible = !conformPasswordVisible),
+          ),
+        ],
+        const SizedBox(height: 16),
+        AuthFieldLabel(text: 'Referral Code (Optional)'.tr),
+        AuthTextField(
+          controller: referralCodeEditingController,
+          hint: 'Enter Referral Code'.tr,
+          iconPath: 'assets/icons/ic_gift.svg',
+          textCapitalization: TextCapitalization.characters,
+        ),
+        const SizedBox(height: 24),
+        AuthPrimaryButton(
+          label: 'Sign Up'.tr,
+          onTap: () {
+            if (_validateSignupForm()) {
+              signUpWithEmailAndPassword(context);
+            }
+          },
+        ),
+        const SizedBox(height: 8),
+      ],
+    );
+  }
+
+  Widget _buildFooter(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(
+        bottom: Platform.isAndroid ? 16 : 32,
+        top: 12,
+      ),
+      child: Center(
+        child: Text.rich(
+          TextSpan(
+            children: [
+              TextSpan(
+                text: 'Already have an account?  '.tr,
+                style: TextStyle(
+                  color: isDarkMode(context)
+                      ? AppThemeData.grey400
+                      : AppThemeData.grey500,
+                  fontFamily: AppThemeData.regular,
+                  fontSize: 14,
+                ),
+              ),
+              TextSpan(
+                recognizer: TapGestureRecognizer()
+                  ..onTap = () => pushAndRemoveUntil(
+                      context, const LoginScreen()),
+                text: 'Login'.tr,
+                style: const TextStyle(
+                  color: AppThemeData.primary500,
+                  fontFamily: AppThemeData.bold,
+                  fontSize: 14,
+                ),
+              ),
+            ],
           ),
         ),
       ),

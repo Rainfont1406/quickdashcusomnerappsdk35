@@ -13,6 +13,7 @@ import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/model/offer_model.dart';
 import 'package:emartconsumer/model/variant_info.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/app_dialog.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
@@ -21,6 +22,7 @@ import 'package:emartconsumer/widget/delivery_type_selector.dart';
 
 import 'package:emartconsumer/ui/productDetailsScreen/ProductDetailsScreen.dart';
 import 'package:emartconsumer/ui/vendorProductsScreen/newVendorProductsScreen.dart';
+import 'package:emartconsumer/widget/product_options_dialog.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -85,6 +87,9 @@ class _CartScreenState extends State<CartScreen> {
   double specialDiscount = 0.0;
   double specialDiscountAmount = 0.0;
   String specialType = "";
+  // When a coupon wins a conflict resolution, suppress the auto special discount
+  // so it doesn't re-activate on the next build cycle.
+  bool _suppressSpecialDiscountForCoupon = false;
 
   Timestamp? scheduleTime;
   bool specialDiscountEnable = false;
@@ -114,6 +119,9 @@ class _CartScreenState extends State<CartScreen> {
   String? _cartGlobalWarning;
 
   OverlayEntry? _notificationOverlay;
+
+  // Notifications queued while the skeleton is active; flushed after transition.
+  final List<Map<String, dynamic>> _pendingNotifications = [];
 
   @override
   void initState() {
@@ -203,6 +211,36 @@ class _CartScreenState extends State<CartScreen> {
     });
   }
 
+  // Queue a notification to show after the skeleton → real-UI transition.
+  // If the cart is already initialised, shows immediately instead.
+  void _queueOrShowNotification({
+    required String message,
+    required Color color,
+    required IconData icon,
+    Duration duration = const Duration(seconds: 4),
+  }) {
+    if (!_isCartInitialized) {
+      _pendingNotifications.add(
+          {'message': message, 'color': color, 'icon': icon, 'duration': duration});
+    } else {
+      _showTopNotification(message: message, color: color, icon: icon, duration: duration);
+    }
+  }
+
+  void _flushPendingNotifications() {
+    if (!mounted || _pendingNotifications.isEmpty) return;
+    final toShow = List<Map<String, dynamic>>.from(_pendingNotifications);
+    _pendingNotifications.clear();
+    for (final n in toShow) {
+      _showTopNotification(
+        message: n['message'] as String,
+        color: n['color'] as Color,
+        icon: n['icon'] as IconData,
+        duration: n['duration'] as Duration,
+      );
+    }
+  }
+
   // Add this method to fetch tax data
   Future<void> getTaxData() async {
     try {
@@ -236,12 +274,15 @@ class _CartScreenState extends State<CartScreen> {
 
   getFoodType() async {
     SharedPreferences sp = await SharedPreferences.getInstance();
-    setState(() {
-      selctedOrderTypeValue =
-          sp.getString("foodType") == "" || sp.getString("foodType") == null
-              ? "Delivery"
-              : sp.getString("foodType");
-    });
+    // Re-orders restore service type from the original order's fields — skip here.
+    if (widget.reOrderModel == null) {
+      setState(() {
+        selctedOrderTypeValue =
+            sp.getString("foodType") == "" || sp.getString("foodType") == null
+                ? "Delivery"
+                : sp.getString("foodType");
+      });
+    }
     await FireStoreUtils.firestore
         .collection(Setting)
         .doc('specialDiscountOffer')
@@ -277,83 +318,7 @@ class _CartScreenState extends State<CartScreen> {
 
   // ── Themed dialog for service-type mismatch / blocked options ────────────────
   void _showServiceMismatchDialog(String title, String message) {
-    final isDark = isDarkMode(context);
-    showDialog(
-      context: context,
-      barrierDismissible: true,
-      builder: (ctx) => Dialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        backgroundColor: isDark ? AppThemeData.darkBgSecondary : Colors.white,
-        insetPadding: const EdgeInsets.symmetric(horizontal: 24),
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 64,
-                height: 64,
-                decoration: BoxDecoration(
-                  color: AppThemeData.error500.withValues(alpha: 0.12),
-                  shape: BoxShape.circle,
-                ),
-                child: const Icon(
-                  Icons.block_rounded,
-                  color: AppThemeData.error500,
-                  size: 30,
-                ),
-              ),
-              const SizedBox(height: 16),
-              Text(
-                title,
-                textAlign: TextAlign.center,
-                style: AppTypography.h6.copyWith(
-                  fontWeight: FontWeight.w700,
-                  color: isDark
-                      ? AppThemeData.darkTextPrimary
-                      : AppThemeData.neutral900,
-                ),
-              ),
-              const SizedBox(height: 10),
-              Text(
-                message,
-                textAlign: TextAlign.center,
-                style: AppTypography.bodyMedium.copyWith(
-                  color: isDark
-                      ? AppThemeData.darkTextSecondary
-                      : AppThemeData.neutral600,
-                  height: 1.55,
-                ),
-              ),
-              const SizedBox(height: 24),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: () => Navigator.of(ctx).pop(),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppThemeData.primary500,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    elevation: 0,
-                  ),
-                  child: Text(
-                    'Got It'.tr(),
-                    style: const TextStyle(
-                      fontSize: 15,
-                      fontFamily: AppThemeData.semiBold,
-                      fontWeight: FontWeight.w600,
-                      color: Colors.white,
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
+    AppDialog.showWarning(context, title: title, message: message);
   }
 
   String _lastPermCartHash = '';
@@ -430,6 +395,23 @@ class _CartScreenState extends State<CartScreen> {
   Future<void> _populateFromReOrder() async {
     final orderModel = widget.reOrderModel!;
 
+    // Restore the original order's service type BEFORE any await so that
+    // getDeliveyData() / _validateCart() later use the correct mode.
+    // takeAway==true means the original order was a DineAway order.
+    final bool wasDineaway = orderModel.takeAway == true;
+    final String restoredOrderType = wasDineaway ? 'Dineaway' : 'Delivery';
+    final String? restoredDineawayType = wasDineaway ? orderModel.orderType : null;
+    if (mounted) {
+      setState(() {
+        selctedOrderTypeValue = restoredOrderType;
+        selectedDineawayType = restoredDineawayType;
+        isDineawaySelected = wasDineaway && restoredDineawayType != null;
+      });
+      // Persist so the restored type survives subsequent SharedPreferences reads.
+      SharedPreferences.getInstance()
+          .then((sp) => sp.setString('foodType', restoredOrderType));
+    }
+
     // Parallel product validation
     final freshList = await Future.wait(
       orderModel.products.map((cp) async {
@@ -488,7 +470,9 @@ class _CartScreenState extends State<CartScreen> {
     setState(() => _reOrderPending = false);
 
     if (skipped > 0) {
-      _showTopNotification(
+      // Queue — the real cart UI is not yet visible (skeleton is still active).
+      // The notification will be flushed by _validateCart() after _isCartInitialized.
+      _queueOrShowNotification(
         message: skipped == 1
             ? 'An item from your previous order is no longer available.'.tr()
             : '$skipped items from your previous order are no longer available.'.tr(),
@@ -500,27 +484,34 @@ class _CartScreenState extends State<CartScreen> {
 
   Future<void> getDeliveyData() async {
     isDeliverFound = true;
-    await _fireStoreUtils
-        .getVendorByVendorID(cartProducts.first.vendorID)
-        .then((value) {
-      vendorModel = value;
-      vendorID = cartProducts.first.vendorID; // Set vendorID here
-    });
+    try {
+      await _fireStoreUtils
+          .getVendorByVendorID(cartProducts.first.vendorID)
+          .then((value) {
+        vendorModel = value;
+        vendorID = cartProducts.first.vendorID;
+      });
 
-    // Get tax data for this vendor/section
-    await getTaxData();
+      // Get tax data for this vendor/section
+      await getTaxData();
 
-    if (selctedOrderTypeValue == "Delivery") {
-      num km = num.parse(getKm(
-          addressModel.location!,
-          UserLocation(
-              latitude: vendorModel!.latitude,
-              longitude: vendorModel!.longitude)));
+      if (selctedOrderTypeValue == "Delivery") {
+        num km = num.parse(getKm(
+            addressModel.location!,
+            UserLocation(
+                latitude: vendorModel!.latitude,
+                longitude: vendorModel!.longitude)));
 
-      getDeliveryCharges(km);
+        getDeliveryCharges(km);
+      }
+
+      _validateCart();
+    } catch (e) {
+      // Vendor fetch failed — exit skeleton so the user isn't stuck.
+      if (mounted && !_isCartInitialized) {
+        setState(() => _isCartInitialized = true);
+      }
     }
-
-    _validateCart();
   }
 
   Future<void> _validateCart() async {
@@ -536,14 +527,20 @@ class _CartScreenState extends State<CartScreen> {
       _canCheckout = true;
     });
 
-    // Vendor status check (data already available from getDeliveyData)
-    if (vendorModel != null && !vendorModel!.reststatus) {
-      setState(() {
-        _cartGlobalWarning =
-            "Restaurant is currently closed. You cannot place orders right now."
-                .tr();
-        _canCheckout = false;
-      });
+    // Vendor status check (data already available from getDeliveyData).
+    // Consistent with home-screen badge and restaurant-detail badge:
+    // open = reststatus AND (no working hours OR current time is within schedule).
+    if (vendorModel != null) {
+      final bool scheduleOpen = vendorModel!.workingHours.isEmpty || vendorModel!.isOpen();
+      final bool restaurantOpen = vendorModel!.reststatus && scheduleOpen;
+      if (!restaurantOpen) {
+        setState(() {
+          _cartGlobalWarning =
+              "Restaurant is currently closed. You cannot place orders right now."
+                  .tr();
+          _canCheckout = false;
+        });
+      }
     }
 
     // ── Fetch all products in parallel ────────────────────────────────────────
@@ -636,22 +633,27 @@ class _CartScreenState extends State<CartScreen> {
       }
 
       // ── Price change — collect for batched DB write ─────────────────────────
-      final freshPrice = productCommissionPrice(
-        product.disPrice != null &&
-                product.disPrice!.isNotEmpty &&
-                double.parse(product.disPrice!) != 0
-            ? product.disPrice!
-            : product.price,
-      );
-      final freshPriceDouble = double.tryParse(freshPrice) ?? 0.0;
-      final cartPriceDouble = double.tryParse(cartProduct.price) ?? 0.0;
-      if ((freshPriceDouble - cartPriceDouble).abs() > 0.001) {
-        priceChanges.add({
-          'name': cartProduct.name,
-          'old': cartProduct.price,
-          'new': freshPrice,
-        });
-        priceUpdates.add(MapEntry(cartProduct, freshPrice));
+      // Skip price override for items with a variant: the cart price reflects
+      // the user's variant selection, which is intentionally different from
+      // the base product price in Firestore.
+      if (cartProduct.variant_info == null) {
+        final freshPrice = productCommissionPrice(
+          product.disPrice != null &&
+                  product.disPrice!.isNotEmpty &&
+                  double.parse(product.disPrice!) != 0
+              ? product.disPrice!
+              : product.price,
+        );
+        final freshPriceDouble = double.tryParse(freshPrice) ?? 0.0;
+        final cartPriceDouble = double.tryParse(cartProduct.price) ?? 0.0;
+        if ((freshPriceDouble - cartPriceDouble).abs() > 0.001) {
+          priceChanges.add({
+            'name': cartProduct.name,
+            'old': cartProduct.price,
+            'new': freshPrice,
+          });
+          priceUpdates.add(MapEntry(cartProduct, freshPrice));
+        }
       }
 
       // ── Variant removed ─────────────────────────────────────────────────────
@@ -681,13 +683,31 @@ class _CartScreenState extends State<CartScreen> {
       }
     }
 
+    // ── Apply vendor-level feature gates (admin flags + vendor pause flags) ─────
+    if (vendorModel != null) {
+      if (!vendorModel!.deliveryEnabled) _freshAllowDelivery = false;
+      if (!vendorModel!.dineAwayEnabled) _freshAllowDineaway = false;
+      // Vendor-controlled pauses — vendor can pause delivery/dineaway from their app
+      if (!vendorModel!.vendorDeliveryOpen) _freshAllowDelivery = false;
+      if (!vendorModel!.vendorDineawayOpen) _freshAllowDineaway = false;
+    }
+
     // ── Refresh top-level permission flags ────────────────────────────────────
-    if (_anyServiceConfigured && mounted) {
+    if (mounted) {
       setState(() {
         _allowDelivery = _freshAllowDelivery;
         _allowDineaway = _freshAllowDineaway;
         _allowDineIn = _freshAllowDineIn;
         _allowDineAwayTakeaway = _freshAllowTakeaway;
+        // If current mode is vendor-disabled, switch to the available mode
+        if (!_freshAllowDelivery && selctedOrderTypeValue == 'Delivery') {
+          selctedOrderTypeValue = 'Dineaway';
+        }
+        if (!_freshAllowDineaway && selctedOrderTypeValue == 'Dineaway') {
+          selctedOrderTypeValue = 'Delivery';
+          selectedDineawayType = null;
+          isDineawaySelected = false;
+        }
         if (selectedDineawayType == 'Dining' && !_freshAllowDineIn) {
           selectedDineawayType = null;
           isDineawaySelected = false;
@@ -718,8 +738,10 @@ class _CartScreenState extends State<CartScreen> {
     ]);
 
     // ── Notifications ─────────────────────────────────────────────────────────
+    // Use _queueOrShowNotification so these appear AFTER the skeleton has
+    // transitioned to the real cart UI (not while the skeleton is still visible).
     if (idsToRemove.isNotEmpty && mounted) {
-      _showTopNotification(
+      _queueOrShowNotification(
         message: "Some items were removed — no longer available.".tr(),
         color: AppThemeData.error500,
         icon: Icons.remove_shopping_cart_outlined,
@@ -729,18 +751,31 @@ class _CartScreenState extends State<CartScreen> {
       final String message = priceChanges.length == 1
           ? "${'Price updated from'.tr()} ${amountShow(amount: priceChanges.first['old']!)} ${'to'.tr()} ${amountShow(amount: priceChanges.first['new']!)}"
           : "${priceChanges.length} ${'items price updated to latest'.tr()}";
-      _showTopNotification(
+      _queueOrShowNotification(
         message: message,
         color: AppThemeData.warning500,
         icon: Icons.price_change_outlined,
       );
     }
 
+    // Stamp the post-removal hash BEFORE setting _isCartInitialized so the
+    // StreamBuilder's hash check doesn't see a changed cart and schedule a
+    // redundant second _validateCart() call right after the skeleton ends.
+    final postRemovalHash = cartSnapshot
+        .where((cp) => !idsToRemove.contains(cp.id))
+        .map((cp) => cp.id)
+        .join(',');
+
     if (mounted)
       setState(() {
+        _lastPermCartHash = postRemovalHash;
         _isValidating = false;
         _isCartInitialized = true; // Skeleton → real cart
       });
+
+    // Flush any notifications that were queued during the skeleton phase.
+    // addPostFrameCallback ensures the real cart is rendered before they appear.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _flushPendingNotifications());
   }
 
   getDeliveryCharges(num km) async {
@@ -852,8 +887,11 @@ class _CartScreenState extends State<CartScreen> {
                   WidgetsBinding.instance.addPostFrameCallback((_) {
                     if (mounted) setState(() => _isCartInitialized = true);
                   });
-                } else if (data.isNotEmpty && !isDeliverFound) {
-                  // Has items — kick off vendor/validation pipeline
+                } else if (data.isNotEmpty && !isDeliverFound && !_reOrderPending) {
+                  // Has items and re-order population (if any) is done — kick off
+                  // vendor/validation pipeline. The !_reOrderPending guard prevents
+                  // a premature _validateCart() while products are still being
+                  // added one-by-one to the cart DB during re-order restore.
                   cartProducts = data;
                   WidgetsBinding.instance.addPostFrameCallback((_) {
                     if (mounted && !isDeliverFound) getDeliveyData();
@@ -876,6 +914,7 @@ class _CartScreenState extends State<CartScreen> {
                       specialDiscount = 0.0;
                       specialDiscountAmount = 0.0;
                       specialType = '';
+                      _suppressSpecialDiscountForCoupon = false;
                       tipValue = 0.0;
                       deliveryCharges = '0.0';
                       isDeliverFound = false;
@@ -1003,6 +1042,7 @@ class _CartScreenState extends State<CartScreen> {
                                             percentage = 0.0;
                                             type = 0.0;
                                             txt.clear();
+                                            _suppressSpecialDiscountForCoupon = false;
                                           });
                                         },
                                         child: Container(
@@ -1028,6 +1068,13 @@ class _CartScreenState extends State<CartScreen> {
                                     ],
                                     GestureDetector(
                                       onTap: () {
+                                        // Refresh coupons each open so newly
+                                        // added/removed vendor coupons and
+                                        // changed cart totals are reflected.
+                                        setState(() {
+                                          coupon = _fireStoreUtils
+                                              .getAllCoupons();
+                                        });
                                         showModalBottomSheet(
                                           isScrollControlled: true,
                                           isDismissible: true,
@@ -1096,116 +1143,102 @@ class _CartScreenState extends State<CartScreen> {
                       ),
                     ),
                   ),
-                  // Place Order Bar
-                  Container(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                        colors: _isValidating || !_canCheckout
-                            ? [AppThemeData.neutral400, AppThemeData.neutral500]
-                            : [
-                                AppThemeData.primary500,
-                                AppThemeData.primary600,
-                              ],
-                      ),
-                      borderRadius: const BorderRadius.only(
-                        topLeft: Radius.circular(28),
-                        topRight: Radius.circular(28),
-                      ),
-                      boxShadow: [
-                        BoxShadow(
-                          color: AppThemeData.primary500.withValues(alpha: 0.40),
-                          blurRadius: 24,
-                          offset: const Offset(0, -8),
+                  // ── Place Order Bar ────────────────────────────────────
+                  Builder(builder: (context) {
+                    final isDark = isDarkMode(context);
+                    final canAct = !_isValidating && _canCheckout;
+                    void _handleTap() {
+                      if (_isValidating) {
+                        _showTopNotification(
+                          message: "Validating cart, please wait...".tr(),
+                          color: AppThemeData.primary500,
+                          icon: Icons.hourglass_top_rounded,
+                          duration: const Duration(seconds: 2),
+                        );
+                        return;
+                      }
+                      if (!_canCheckout) {
+                        _showTopNotification(
+                          message: _cartGlobalWarning ??
+                              "Please resolve cart issues before placing order.".tr(),
+                          color: AppThemeData.error500,
+                          icon: Icons.warning_amber_rounded,
+                        );
+                        return;
+                      }
+                      final serviceMsg = _serviceRestrictionMessage;
+                      if (serviceMsg != null) {
+                        _showServiceMismatchDialog(
+                          'Order Cannot Be Placed'.tr(),
+                          serviceMsg,
+                        );
+                        return;
+                      }
+                      if (selctedOrderTypeValue == "Dineaway" &&
+                          (!isDineawaySelected || selectedDineawayType == null)) {
+                        _showTopNotification(
+                          message: "Please select order type.".tr(),
+                          color: AppThemeData.primary500,
+                          icon: Icons.info_outline_rounded,
+                          duration: const Duration(seconds: 3),
+                        );
+                        return;
+                      }
+                      if (couponId.isEmpty) txt.text = "";
+                      final specialDiscountMap = {
+                        'special_discount': specialDiscountAmount,
+                        'special_discount_label': specialDiscount,
+                        'specialType': specialType,
+                      };
+                      final isDelivery = selctedOrderTypeValue == "Delivery";
+                      final isTakeaway = selctedOrderTypeValue == "Dineaway";
+                      final String? orderTypeToStore =
+                          selctedOrderTypeValue == "Dineaway" ? selectedDineawayType : null;
+                      push(
+                        context,
+                        PaymentScreen(
+                          total: grandtotal,
+                          products: cartProducts,
+                          discount: per == 0.0 ? type : per,
+                          couponCode: txt.text,
+                          couponId: couponId,
+                          notes: noteController.text,
+                          extra_addons: commaSepratedAddOns,
+                          tipValue: isDelivery ? tipValue.toString() : "0",
+                          take_away: isTakeaway,
+                          deliveryCharge: isDelivery ? deliveryCharges : "0",
+                          taxModel: taxList,
+                          specialDiscountMap: specialDiscountMap,
+                          scheduleTime: scheduleTime,
+                          addressModel: addressModel,
+                          orderType: orderTypeToStore,
                         ),
-                      ],
-                    ),
-                    child: SafeArea(
-                      top: false,
-                      child: GestureDetector(
-                        onTap: () {
-                          if (_isValidating) {
-                            _showTopNotification(
-                              message: "Validating cart, please wait...".tr(),
-                              color: AppThemeData.primary500,
-                              icon: Icons.hourglass_top_rounded,
-                              duration: const Duration(seconds: 2),
-                            );
-                            return;
-                          }
-                          if (!_canCheckout) {
-                            _showTopNotification(
-                              message: _cartGlobalWarning ??
-                                  "Please resolve cart issues before placing order.".tr(),
-                              color: AppThemeData.error500,
-                              icon: Icons.warning_amber_rounded,
-                            );
-                            return;
-                          }
-                          // Service restriction — block checkout with themed dialog
-                          final serviceMsg = _serviceRestrictionMessage;
-                          if (serviceMsg != null) {
-                            _showServiceMismatchDialog(
-                              'Order Cannot Be Placed'.tr(),
-                              serviceMsg,
-                            );
-                            return;
-                          }
+                      );
+                    }
 
-                          if (selctedOrderTypeValue == "Dineaway" &&
-                              (!isDineawaySelected || selectedDineawayType == null)) {
-                            _showTopNotification(
-                              message: "Please select order type.".tr(),
-                              color: AppThemeData.primary500,
-                              icon: Icons.info_outline_rounded,
-                              duration: const Duration(seconds: 3),
-                            );
-                            return;
-                          }
-
-                          if (couponId.isEmpty) {
-                            txt.text = "";
-                          }
-                          final specialDiscountMap = {
-                            'special_discount': specialDiscountAmount,
-                            'special_discount_label': specialDiscount,
-                            'specialType': specialType
-                          };
-                          final isDelivery = selctedOrderTypeValue == "Delivery";
-                          final isTakeaway = selctedOrderTypeValue == "Dineaway";
-                          final String? orderTypeToStore =
-                              selctedOrderTypeValue == "Dineaway"
-                                  ? selectedDineawayType
-                                  : null;
-
-                          push(
-                            context,
-                            PaymentScreen(
-                              total: grandtotal,
-                              products: cartProducts,
-                              discount: per == 0.0 ? type : per,
-                              couponCode: txt.text,
-                              couponId: couponId,
-                              notes: noteController.text,
-                              extra_addons: commaSepratedAddOns,
-                              tipValue: isDelivery ? tipValue.toString() : "0",
-                              take_away: isTakeaway,
-                              deliveryCharge: isDelivery ? deliveryCharges : "0",
-                              taxModel: taxList,
-                              specialDiscountMap: specialDiscountMap,
-                              scheduleTime: scheduleTime,
-                              addressModel: addressModel,
-                              orderType: orderTypeToStore,
-                            ),
-                          );
-                        },
+                    return Container(
+                      decoration: BoxDecoration(
+                        color: isDark
+                            ? AppThemeData.darkBgSecondary
+                            : Colors.white,
+                        borderRadius: const BorderRadius.vertical(
+                          top: Radius.circular(24),
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: isDark ? 0.30 : 0.10),
+                            blurRadius: 20,
+                            offset: const Offset(0, -4),
+                          ),
+                        ],
+                      ),
+                      child: SafeArea(
+                        top: false,
                         child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 24, vertical: 16),
+                          padding: const EdgeInsets.fromLTRB(20, 16, 20, 12),
                           child: Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
+                              // ── Left: item count + total price ────────────
                               Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 mainAxisSize: MainAxisSize.min,
@@ -1215,7 +1248,9 @@ class _CartScreenState extends State<CartScreen> {
                                         ? "1 item".tr()
                                         : "${cartProducts.length} ${"items".tr()}",
                                     style: AppTypography.caption.copyWith(
-                                      color: Colors.white.withValues(alpha: 0.70),
+                                      color: isDark
+                                          ? AppThemeData.neutral400
+                                          : AppThemeData.neutral500,
                                       letterSpacing: 0.2,
                                     ),
                                   ),
@@ -1223,64 +1258,104 @@ class _CartScreenState extends State<CartScreen> {
                                   Text(
                                     amountShow(amount: grandtotal.toString()),
                                     style: AppTypography.h5.copyWith(
-                                      color: Colors.white,
+                                      color: isDark
+                                          ? AppThemeData.darkTextPrimary
+                                          : AppThemeData.neutral900,
                                       fontWeight: FontWeight.w800,
-                                      letterSpacing: -0.3,
+                                      letterSpacing: -0.5,
                                     ),
                                   ),
                                 ],
                               ),
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 22, vertical: 13),
-                                decoration: BoxDecoration(
-                                  color: Colors.white.withValues(alpha: 0.18),
-                                  borderRadius: BorderRadius.circular(16),
-                                  border: Border.all(
-                                    color: Colors.white.withValues(alpha: 0.28),
-                                    width: 1,
+
+                              const SizedBox(width: 16),
+
+                              // ── Right: Place Order button ─────────────────
+                              Expanded(
+                                child: Material(
+                                  color: Colors.transparent,
+                                  borderRadius: BorderRadius.circular(14),
+                                  child: InkWell(
+                                    borderRadius: BorderRadius.circular(14),
+                                    onTap: _handleTap,
+                                    child: AnimatedContainer(
+                                      duration: const Duration(milliseconds: 220),
+                                      height: 52,
+                                      decoration: BoxDecoration(
+                                        gradient: canAct
+                                            ? const LinearGradient(
+                                                colors: [
+                                                  AppThemeData.primary500,
+                                                  AppThemeData.primary600,
+                                                ],
+                                                begin: Alignment.centerLeft,
+                                                end: Alignment.centerRight,
+                                              )
+                                            : LinearGradient(
+                                                colors: [
+                                                  AppThemeData.neutral300,
+                                                  AppThemeData.neutral400,
+                                                ],
+                                                begin: Alignment.centerLeft,
+                                                end: Alignment.centerRight,
+                                              ),
+                                        borderRadius: BorderRadius.circular(14),
+                                        boxShadow: canAct
+                                            ? [
+                                                BoxShadow(
+                                                  color: AppThemeData.primary500
+                                                      .withValues(alpha: 0.35),
+                                                  blurRadius: 14,
+                                                  offset: const Offset(0, 5),
+                                                ),
+                                              ]
+                                            : [],
+                                      ),
+                                      child: Center(
+                                        child: _isValidating
+                                            ? const SizedBox(
+                                                width: 22,
+                                                height: 22,
+                                                child: CircularProgressIndicator(
+                                                  strokeWidth: 2.5,
+                                                  valueColor: AlwaysStoppedAnimation(Colors.white),
+                                                ),
+                                              )
+                                            : Row(
+                                                mainAxisAlignment: MainAxisAlignment.center,
+                                                children: [
+                                                  Text(
+                                                    !_canCheckout
+                                                        ? "Issues Found".tr()
+                                                        : "Place Order".tr(),
+                                                    style: AppTypography.labelLarge.copyWith(
+                                                      color: Colors.white,
+                                                      fontWeight: FontWeight.w700,
+                                                      letterSpacing: 0.3,
+                                                    ),
+                                                  ),
+                                                  const SizedBox(width: 8),
+                                                  Icon(
+                                                    !_canCheckout
+                                                        ? Icons.warning_amber_rounded
+                                                        : Icons.arrow_forward_rounded,
+                                                    color: Colors.white,
+                                                    size: 18,
+                                                  ),
+                                                ],
+                                              ),
+                                      ),
+                                    ),
                                   ),
                                 ),
-                                child: _isValidating
-                                    ? const SizedBox(
-                                        width: 22,
-                                        height: 22,
-                                        child: CircularProgressIndicator(
-                                          strokeWidth: 2.5,
-                                          valueColor:
-                                              AlwaysStoppedAnimation(Colors.white),
-                                        ),
-                                      )
-                                    : Row(
-                                        children: [
-                                          Text(
-                                            !_canCheckout
-                                                ? "Issues Found".tr()
-                                                : "Place Order".tr(),
-                                            style:
-                                                AppTypography.labelLarge.copyWith(
-                                              color: Colors.white,
-                                              fontWeight: FontWeight.w700,
-                                              letterSpacing: 0.1,
-                                            ),
-                                          ),
-                                          const SizedBox(width: 8),
-                                          Icon(
-                                            !_canCheckout
-                                                ? Icons.warning_amber_rounded
-                                                : Icons.arrow_forward_rounded,
-                                            color: Colors.white,
-                                            size: 20,
-                                          ),
-                                        ],
-                                      ),
                               ),
                             ],
                           ),
                         ),
                       ),
-                    ),
-                  ),
+                    );
+                  }),
+                  // ──────────────────────────────────────────────────────────
                 ],
               );
             }
@@ -1904,7 +1979,8 @@ class _CartScreenState extends State<CartScreen> {
       discountVal = type;
     }
 
-    if (vendorModel != null && specialDiscountEnable) {
+    if (vendorModel != null && specialDiscountEnable &&
+        !_suppressSpecialDiscountForCoupon) {
       if (vendorModel!.specialDiscountEnable) {
         // Reset special discount amount at the beginning
         specialDiscountAmount = 0.0;
@@ -1969,9 +2045,9 @@ class _CartScreenState extends State<CartScreen> {
                         'discountValue': discountValue,
                         'discountType': discountType,
                         'actualAmount': actualDiscountAmount,
-                        'description': discountType == "percentage" 
-                            ? '${discountValue.toStringAsFixed(0)}% off (₹${actualDiscountAmount.toStringAsFixed(2)})'
-                            : 'Flat ₹${discountValue.toStringAsFixed(2)} off'
+                        'description': discountType == "percentage"
+                            ? '${discountValue.toStringAsFixed(0)}% off (${amountShow(amount: actualDiscountAmount.toStringAsFixed(2))})'
+                            : 'Flat ${amountShow(amount: discountValue.toStringAsFixed(2))} off'
                       });
                       
                       print('✅ Eligible discount found: ${eligibleDiscounts.last['description']}');
@@ -2024,6 +2100,30 @@ class _CartScreenState extends State<CartScreen> {
       specialDiscountAmount = 0.0;
     }
 
+    // Conflict resolution: if both coupon and special discount are active and
+    // their combined value exceeds the subtotal, keep only the larger discount
+    // for this build. The _doApplyCoupon path handles the user-triggered case;
+    // this handles the rare automatic case (special window opens mid-session).
+    final double couponEffective = per != 0.0 ? per : type;
+    String? _discountConflictWarning;
+    if (couponEffective > 0 &&
+        specialDiscountAmount > 0 &&
+        couponEffective + specialDiscountAmount > subTotal) {
+      if (couponEffective <= specialDiscountAmount) {
+        // Coupon is smaller — undo its effect on grandtotal for this frame.
+        grandtotal += couponEffective;
+        _discountConflictWarning =
+            'Coupon discount not applied — special discount gives a higher saving.'
+                .tr();
+      } else {
+        // Special discount is smaller — undo its effect for this frame.
+        grandtotal += specialDiscountAmount;
+        _discountConflictWarning =
+            'Special discount not applied — coupon gives a higher saving.'.tr();
+      }
+    }
+    grandtotal = grandtotal.clamp(0.0, double.infinity);
+
     // Calculate all applicable taxes regardless of visibility
     double totalTaxAmount = 0.0;
     // Track taxes to display in the UI
@@ -2074,10 +2174,41 @@ class _CartScreenState extends State<CartScreen> {
             ? "(-${amountShow(amount: type.toDouble().toString())})"
             : "(-${amountShow(amount: '0.0')})";
 
+    final double totalSavings = discountVal + specialDiscountAmount;
+
     return _sectionCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // ── Discount conflict warning banner ──
+          if (_discountConflictWarning != null)
+            Container(
+              margin: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: Colors.orange.shade50,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: Colors.orange.shade300),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.info_outline_rounded,
+                      color: Colors.orange.shade700, size: 16),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _discountConflictWarning!,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.orange.shade800,
+                        fontFamily: AppThemeData.medium,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           // ── Grand Total header (accordion trigger) ──
           InkWell(
             onTap: () => setState(() => _isBillExpanded = !_isBillExpanded),
@@ -2209,6 +2340,38 @@ class _CartScreenState extends State<CartScreen> {
                   )
                 : const SizedBox.shrink(),
           ),
+          // ── Savings banner (always visible when discount is applied) ──
+          if (totalSavings > 0) ...[
+            Divider(height: 1, color: dividerColor),
+            Container(
+              margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: dark
+                    ? AppThemeData.success400.withValues(alpha: 0.15)
+                    : AppThemeData.success50,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(
+                    Icons.local_offer_rounded,
+                    color: AppThemeData.success400,
+                    size: 15,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    '${'You saved'.tr()} ${amountShow(amount: totalSavings.toStringAsFixed(2))} ${'on this order'.tr()}',
+                    style: AppTypography.labelMedium.copyWith(
+                      color: AppThemeData.success400,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -2252,10 +2415,18 @@ class _CartScreenState extends State<CartScreen> {
   // Modern Dineaway Section
   String? get _serviceRestrictionMessage {
     if (selctedOrderTypeValue == 'Delivery' && !_allowDelivery) {
-      return 'Delivery order is not available.'.tr();
+      final vendorPaused = vendorModel != null && !vendorModel!.vendorDeliveryOpen;
+      return vendorPaused
+          ? 'Delivery is currently paused by the store. Try Dineaway or check back later.'.tr()
+          : 'Delivery order is not available.'.tr();
     }
     if (selctedOrderTypeValue == 'Dineaway') {
-      if (!_allowDineaway) return 'DineAway order is not available.'.tr();
+      if (!_allowDineaway) {
+        final vendorPaused = vendorModel != null && !vendorModel!.vendorDineawayOpen;
+        return vendorPaused
+            ? 'Dineaway is currently paused by the store. Try Delivery or check back later.'.tr()
+            : 'DineAway order is not available.'.tr();
+      }
       if (selectedDineawayType == 'Takeaway' && !_allowDineAwayTakeaway) {
         return 'TakeAway order is not available.'.tr();
       }
@@ -2379,13 +2550,15 @@ class _CartScreenState extends State<CartScreen> {
                 ),
               ],
             ),
-            const SizedBox(height: 12),
-            _dineawayOption(
-              "Bill Pay",
-              "Pay your bill at the restaurant",
-              Icons.receipt_long_rounded,
-              selectedDineawayType == "Bill Pay",
-            ),
+            if (vendorModel?.billPayEnabled == true) ...[
+              const SizedBox(height: 12),
+              _dineawayOption(
+                "Bill Pay",
+                "Pay your bill at the restaurant",
+                Icons.receipt_long_rounded,
+                selectedDineawayType == "Bill Pay",
+              ),
+            ],
           ],
         ),
       ),
@@ -2856,14 +3029,6 @@ class _CartScreenState extends State<CartScreen> {
                     ],
                   ),
                 ),
-                // Inline service-type switcher — respects per-item availability
-                DeliveryTypeSelector(
-                  selectedValue: selctedOrderTypeValue ?? 'Delivery',
-                  isDarkMode: dark,
-                  allowDelivery: _allowDelivery,
-                  allowDineaway: _allowDineaway,
-                  onValueChanged: _onOrderTypeChanged,
-                ),
               ],
             ),
           ),
@@ -3214,27 +3379,35 @@ class _CartScreenState extends State<CartScreen> {
                   const SizedBox(height: 9),
                   GestureDetector(
                     onTap: () async {
-                      showDialog(
-                        context: context,
-                        barrierDismissible: false,
-                        builder: (_) => const Center(
-                            child: CircularProgressIndicator.adaptive()),
-                      );
                       final pid = cartProduct.id.split('~').first;
-                      final pm =
-                          await FireStoreUtils().getProductByID(pid);
-                      VendorModel? vm;
-                      if (pm != null) {
-                        vm = await FireStoreUtils()
-                            .getVendorByVendorID(pm.vendorID);
+                      ProductModel? pm = _productCache[pid];
+                      if (pm == null) {
+                        showDialog(
+                          context: context,
+                          barrierDismissible: false,
+                          builder: (_) => const Center(
+                              child: CircularProgressIndicator.adaptive()),
+                        );
+                        pm = await FireStoreUtils().getProductByID(pid);
+                        if (mounted) Navigator.of(context).pop();
                       }
-                      Navigator.of(context).pop();
-                      if (pm != null && vm != null) {
-                        Navigator.of(context).push(MaterialPageRoute(
-                          builder: (_) => ProductDetailsScreen(
-                              productModel: pm, vendorModel: vm!),
-                        ));
-                      }
+                      if (pm == null || !mounted) return;
+                      await showModalBottomSheet(
+                        context: context,
+                        isScrollControlled: true,
+                        backgroundColor: Colors.transparent,
+                        useSafeArea: true,
+                        builder: (BuildContext ctx) {
+                          return ProductOptionsDialog(
+                            productModel: pm!,
+                            onAddToCart: (ProductModel updatedProduct, double totalPrice) async {
+                              Navigator.of(ctx).pop();
+                              await cartDatabase.removeProduct(cartProduct.id);
+                              await cartDatabase.addProduct(updatedProduct, cartDatabase, true);
+                            },
+                          );
+                        },
+                      );
                     },
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
@@ -3495,15 +3668,6 @@ class _CartScreenState extends State<CartScreen> {
                 )),
           ],
 
-          const SizedBox(height: 10),
-          Text(
-            "Resolve the issues above to place your order.".tr(),
-            style: AppTypography.caption.copyWith(
-              color: dark
-                  ? AppThemeData.darkTextTertiary
-                  : AppThemeData.neutral500,
-            ),
-          ),
         ],
       ),
     );
@@ -3745,6 +3909,7 @@ class _CartScreenState extends State<CartScreen> {
             vendorID = cartProducts.first.vendorID;
           }
 
+          // All coupons for this vendor — used for manual code entry (includes private).
           final allCoupons = (snapshot.data ?? [])
               .where((c) =>
                   vendorID == c.storeId ||
@@ -3752,12 +3917,18 @@ class _CartScreenState extends State<CartScreen> {
                   (c.storeId?.isEmpty ?? true))
               .toList();
 
-          final applicableCoupons = allCoupons.where((c) {
+          // Only publicly listed coupons are shown in the UI.
+          // Private coupons (isPublic == false) are redeemable via manual code only.
+          // Null isPublic means legacy data — show it for backward compatibility.
+          final publicCoupons =
+              allCoupons.where((c) => c.isPublic != false).toList();
+
+          final applicableCoupons = publicCoupons.where((c) {
             final minAmt = double.tryParse(c.applicableAmount ?? '0') ?? 0;
             return subTotal >= minAmt;
           }).toList();
 
-          final otherCoupons = allCoupons.where((c) {
+          final otherCoupons = publicCoupons.where((c) {
             final minAmt = double.tryParse(c.applicableAmount ?? '0') ?? 0;
             return subTotal < minAmt;
           }).toList();
@@ -4369,53 +4540,24 @@ class _CartScreenState extends State<CartScreen> {
     );
   }
 
-  void _applyListCoupon(OfferModel offer, BuildContext sheetCtx) {
+  void _applyListCoupon(OfferModel offer, BuildContext sheetCtx) async {
     if (couponId.isNotEmpty && couponId != offer.offerId) {
-      showDialog(
-        context: context,
-        builder: (dialogCtx) => AlertDialog(
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          title: Text(
-            "Replace Coupon?".tr(),
-            style: AppTypography.h6.copyWith(fontWeight: FontWeight.w700),
-          ),
-          content: Text(
-            "Only one coupon can be used at a time. Replace the current coupon?"
-                .tr(),
-            style: AppTypography.bodySmall,
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogCtx),
-              child: Text(
-                "Cancel".tr(),
-                style: AppTypography.labelMedium
-                    .copyWith(color: AppThemeData.neutral500),
-              ),
-            ),
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: AppThemeData.primary500,
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10)),
-              ),
-              onPressed: () {
-                Navigator.pop(dialogCtx);
-                _doApplyCoupon(offer, sheetCtx);
-              },
-              child: Text("Replace".tr(),
-                  style: const TextStyle(color: Colors.white)),
-            ),
-          ],
-        ),
+      final confirmed = await AppDialog.showConfirm(
+        context,
+        title: 'Replace Coupon?'.tr(),
+        message: 'Only one coupon can be used at a time. Replace the current coupon?'.tr(),
+        confirmLabel: 'Replace'.tr(),
+        cancelLabel: 'Cancel'.tr(),
       );
+      if (confirmed) {
+        _doApplyCoupon(offer, sheetCtx);
+      }
     } else {
       _doApplyCoupon(offer, sheetCtx);
     }
   }
 
-  void _applyManualCoupon(List<OfferModel> coupons, BuildContext sheetCtx) {
+  void _applyManualCoupon(List<OfferModel> coupons, BuildContext sheetCtx) async {
     if (txt.text.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text("Please enter a coupon code".tr()),
@@ -4466,59 +4608,90 @@ class _CartScreenState extends State<CartScreen> {
     }
 
     if (couponId.isNotEmpty && couponId != found.offerId) {
-      showDialog(
-        context: context,
-        builder: (dialogCtx) => AlertDialog(
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-          title: Text(
-            "Replace Coupon?".tr(),
-            style: AppTypography.h6.copyWith(fontWeight: FontWeight.w700),
-          ),
-          content: Text(
-            "Only one coupon can be used at a time. Replace the current coupon?"
-                .tr(),
-            style: AppTypography.bodySmall,
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogCtx),
-              child: Text(
-                "Cancel".tr(),
-                style: AppTypography.labelMedium
-                    .copyWith(color: AppThemeData.neutral500),
-              ),
-            ),
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: AppThemeData.primary500,
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10)),
-              ),
-              onPressed: () {
-                Navigator.pop(dialogCtx);
-                _doApplyCoupon(found!, sheetCtx);
-              },
-              child: Text("Replace".tr(),
-                  style: const TextStyle(color: Colors.white)),
-            ),
-          ],
-        ),
+      final confirmed = await AppDialog.showConfirm(
+        context,
+        title: 'Replace Coupon?'.tr(),
+        message: 'Only one coupon can be used at a time. Replace the current coupon?'.tr(),
+        confirmLabel: 'Replace'.tr(),
+        cancelLabel: 'Cancel'.tr(),
       );
+      if (confirmed) {
+        _doApplyCoupon(found, sheetCtx);
+      }
     } else {
       _doApplyCoupon(found, sheetCtx);
     }
   }
 
   void _doApplyCoupon(OfferModel offer, BuildContext sheetCtx) {
+    final isPercentage = offer.discountTypeOffer == 'Percentage' ||
+        offer.discountTypeOffer == 'Percent';
+    final raw = double.tryParse(offer.discountOffer ?? '0') ?? 0;
+    final couponEffective = isPercentage ? subTotal * raw / 100 : raw;
+
+    // Conflict check: both discounts active and combined > subtotal.
+    if (specialDiscountAmount > 0 &&
+        couponEffective > 0 &&
+        couponEffective + specialDiscountAmount > subTotal) {
+      Navigator.pop(sheetCtx);
+      if (couponEffective <= specialDiscountAmount) {
+        // Coupon is the smaller discount — reject it and keep special discount.
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(
+            'Coupon not applied — special discount '
+            '(${amountShow(amount: specialDiscountAmount.toStringAsFixed(2))}) '
+            'already gives a higher saving. Remove it first to use this coupon.'
+                .tr(),
+          ),
+          backgroundColor: Colors.orange.shade700,
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 4),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ));
+      } else {
+        // Special discount is the smaller one — remove it and apply the coupon.
+        setState(() {
+          _suppressSpecialDiscountForCoupon = true;
+          specialDiscount = 0.0;
+          specialDiscountAmount = 0.0;
+          specialType = 'amount';
+          if (isPercentage) {
+            percentage = raw;
+            type = 0.0;
+          } else {
+            type = raw;
+            percentage = 0.0;
+          }
+          couponId = offer.offerId!;
+          txt.text = offer.offerCode ?? '';
+        });
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(
+            'Special discount removed — coupon saves '
+            '${amountShow(amount: couponEffective.toStringAsFixed(2))}'
+            ', which is more than the special discount\'s '
+            '${amountShow(amount: (couponEffective - specialDiscountAmount).abs().toStringAsFixed(2))} difference.'
+                .tr(),
+          ),
+          backgroundColor: AppThemeData.accent500,
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 4),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ));
+      }
+      return;
+    }
+
+    // No conflict — apply coupon normally.
     setState(() {
-      final isPercentage = offer.discountTypeOffer == 'Percentage' ||
-          offer.discountTypeOffer == 'Percent';
+      _suppressSpecialDiscountForCoupon = false;
       if (isPercentage) {
-        percentage = double.parse(offer.discountOffer!);
+        percentage = raw;
         type = 0.0;
       } else {
-        type = double.parse(offer.discountOffer!);
+        type = raw;
         percentage = 0.0;
       }
       couponId = offer.offerId!;

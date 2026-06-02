@@ -409,7 +409,7 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
 
   Widget _buildRestaurantAndItemsCard(OrderModel order) {
     final DateTime dt = order.createdAt.toDate();
-    final String formattedDate = DateFormat("MMM d, yyyy â€¢ h:mm a").format(dt);
+    final String formattedDate = DateFormat("MMM d, yyyy • h:mm a").format(dt);
     String orderTypeLabel;
     Color badgeColor;
     IconData badgeIcon;
@@ -450,14 +450,33 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Container(
-                  width: 50,
-                  height: 50,
-                  decoration: BoxDecoration(
-                    color: AppThemeData.primary500.withOpacity(0.1),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Icon(Icons.storefront_rounded, color: AppThemeData.primary500, size: 26),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(12),
+                  child: order.vendor.photo.isNotEmpty
+                      ? Image.network(
+                          order.vendor.photo,
+                          width: 50,
+                          height: 50,
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) => Container(
+                            width: 50,
+                            height: 50,
+                            decoration: BoxDecoration(
+                              color: AppThemeData.primary500.withOpacity(0.1),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Icon(Icons.storefront_rounded, color: AppThemeData.primary500, size: 26),
+                          ),
+                        )
+                      : Container(
+                          width: 50,
+                          height: 50,
+                          decoration: BoxDecoration(
+                            color: AppThemeData.primary500.withOpacity(0.1),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Icon(Icons.storefront_rounded, color: AppThemeData.primary500, size: 26),
+                        ),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
@@ -641,7 +660,7 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                             ),
                             const SizedBox(width: 8),
                             Text(
-                              'Ã—${item.quantity}',
+                              '×${item.quantity}',
                               style: TextStyle(
                                 fontFamily: AppThemeData.medium,
                                 fontSize: 13,
@@ -772,7 +791,7 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
     switch (order.status) {
       case ORDER_STATUS_PLACED:
         statusTitle = 'Order Placed'.tr();
-        statusSubtitle = 'Waiting for restaurant responseâ€¦'.tr();
+        statusSubtitle = 'Waiting for restaurant response…'.tr();
         statusColor = const Color(0xFF3B82F6);
         statusIcon = Icons.check_circle_outline_rounded;
         break;
@@ -790,8 +809,8 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
         break;
       case ORDER_STATUS_DRIVER_PENDING:
       case ORDER_STATUS_DRIVER_REJECTED:
-        statusTitle = 'Ready â€“ Finding Driver'.tr();
-        statusSubtitle = 'Your food is ready, locating a driverâ€¦'.tr();
+        statusTitle = 'Ready — Finding Driver'.tr();
+        statusSubtitle = 'Your food is ready, locating a driver…'.tr();
         statusColor = const Color(0xFFF59E0B);
         statusIcon = Icons.delivery_dining_rounded;
         break;
@@ -2002,7 +2021,7 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
     final String driverName = order.driver != null
         ? '${order.driver!.firstName} ${order.driver!.lastName ?? ""}'.trim()
         : 'Your Driver'.tr();
-    final String carInfo = [order.driver?.carName, order.driver?.carNumber].where((s) => s != null && s!.isNotEmpty).join(' Â· ');
+    final String carInfo = [order.driver?.carName, order.driver?.carNumber].where((s) => s != null && s!.isNotEmpty).join(' · ');
 
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 16),

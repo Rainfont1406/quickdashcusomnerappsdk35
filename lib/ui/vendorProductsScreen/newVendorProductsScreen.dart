@@ -30,6 +30,7 @@ import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:collection/collection.dart';
 import 'package:emartconsumer/ui/cartScreen/CartScreen.dart';
 import 'package:emartconsumer/ui/container/ContainerScreen.dart';
+import 'package:emartconsumer/services/app_dialog.dart';
 import 'package:emartconsumer/ui/auth_screen/login_screen.dart';
 import 'package:emartconsumer/ui/vendorProductsScreen/vendor_products_skeleton.dart';
 import 'package:emartconsumer/widget/product_options_dialog.dart';
@@ -105,6 +106,56 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
       foodType == 'Takeaway'.tr() ||
       foodType == 'Dineaway'.tr();
 
+  Widget _buildServicePausedBanner({required bool isDineaway}) {
+    final label = isDineaway ? 'Dineaway' : 'Delivery';
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: Colors.orange.shade50,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.orange.shade300, width: 1.2),
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(7),
+            decoration: BoxDecoration(
+              color: Colors.orange.shade100,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Icon(Icons.pause_circle_outline_rounded,
+                color: Colors.orange.shade700, size: 18),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '$label Paused'.tr(),
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    color: Colors.orange.shade800,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'This store has temporarily paused $label orders.'.tr(),
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Colors.orange.shade700,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _applyDineAwaySubMode() {
     if (_dineAwaySubMode == 'Takeaway') {
       allProductList = _rawDineAwayProducts.where((p) => p.takeaway).toList();
@@ -147,24 +198,21 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
   getVendorCategoryById() async {
     vendorCategoryList.clear();
 
-    for (var element in productList) {
-      FireStoreUtils.getVendorCategoryById(element.categoryID.toString()).then(
-        (value) {
-          if (value != null) {
-            if (vendorCategoryList
-                .where((element) => element.id == value.id)
-                .isEmpty) {
-              vendorCategoryList.add(value);
-            }
-          }
-        },
-      );
-    }
-
-    var seen = <String>{};
-    vendorCategoryList = vendorCategoryList
-        .where((element) => seen.add(element.id.toString()))
+    // Fetch all categories in parallel, then de-dup once all results are in.
+    // The old fire-and-forget .then() pattern caused a race where two futures
+    // completing simultaneously could both pass the "already in list?" check
+    // and add the same category twice.
+    final futures = productList
+        .map((e) =>
+            FireStoreUtils.getVendorCategoryById(e.categoryID.toString()))
         .toList();
+    final results = await Future.wait(futures);
+    final seen = <String>{};
+    for (final value in results) {
+      if (value != null && seen.add(value.id.toString())) {
+        vendorCategoryList.add(value);
+      }
+    }
 
     await FireStoreUtils()
         .getOfferByVendorID(widget.vendorModel.id)
@@ -210,10 +258,19 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
   int currentPage = 0;
   Timer? _sliderTimer;
 
+  // photos[0] = logo, photos[1..n] = card gallery images.
+  List<String> get _cardPhotos {
+    final all = widget.vendorModel.photos
+        .map((e) => e.toString())
+        .where((s) => s.isNotEmpty && s != 'null')
+        .toList();
+    return all.length > 1 ? all.sublist(1) : <String>[];
+  }
+
   void animateSlider() {
-    if (widget.vendorModel.photos.isNotEmpty) {
+    if (_cardPhotos.length > 1) {
       _sliderTimer = Timer.periodic(const Duration(seconds: 2), (Timer timer) {
-        if (currentPage < widget.vendorModel.photos.length - 1) {
+        if (currentPage < _cardPhotos.length - 1) {
           currentPage++;
         } else {
           currentPage = 0;
@@ -320,7 +377,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                     flexibleSpace: FlexibleSpaceBar(
                       background: Stack(
                         children: [
-                          widget.vendorModel.photos.isEmpty
+                          _cardPhotos.isEmpty
                               ? Stack(
                                   children: [
                                     NetworkImageWidget(
@@ -348,17 +405,16 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                   physics: const BouncingScrollPhysics(),
                                   controller: pageController,
                                   scrollDirection: Axis.horizontal,
-                                  itemCount: widget.vendorModel.photos.length,
+                                  itemCount: _cardPhotos.length,
                                   padEnds: false,
                                   pageSnapping: true,
                                   itemBuilder:
                                       (BuildContext context, int index) {
-                                    String image =
-                                        widget.vendorModel.photos[index];
+                                    String image = _cardPhotos[index];
                                     return Stack(
                                       children: [
                                         NetworkImageWidget(
-                                          imageUrl: image.toString(),
+                                          imageUrl: image,
                                           fit: BoxFit.cover,
                                           width: Responsive.width(100, context),
                                           height:
@@ -389,7 +445,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                               mainAxisAlignment: MainAxisAlignment.center,
                               crossAxisAlignment: CrossAxisAlignment.center,
                               children: List.generate(
-                                widget.vendorModel.photos.length,
+                                _cardPhotos.length,
                                 (index) {
                                   return Container(
                                     margin: const EdgeInsets.only(right: 5),
@@ -421,6 +477,10 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                     mainAxisAlignment: MainAxisAlignment.start,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
+                      if (_isDineAwayMode && !widget.vendorModel.vendorDineawayOpen)
+                        _buildServicePausedBanner(isDineaway: true),
+                      if (!_isDineAwayMode && !widget.vendorModel.vendorDeliveryOpen)
+                        _buildServicePausedBanner(isDineaway: false),
                       Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 16),
                         child: Column(
@@ -532,11 +592,11 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                               gradient: LinearGradient(
                                                 colors: [
                                                   isDarkMode(context)
-                                                      ? const Color(0xFF2E3F5C)
-                                                      : const Color(0xFFFFF8E1),
+                                                      ? const Color(0xFF052E16)
+                                                      : const Color(0xFFDCFCE7),
                                                   isDarkMode(context)
-                                                      ? const Color(0xFF1F2B42)
-                                                      : const Color(0xFFFFECB3),
+                                                      ? const Color(0xFF14532D)
+                                                      : const Color(0xFFBBF7D0),
                                                 ],
                                                 begin: Alignment.topLeft,
                                                 end: Alignment.bottomRight,
@@ -553,7 +613,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                                   "assets/icons/ic_star.svg",
                                                   colorFilter:
                                                       const ColorFilter.mode(
-                                                          Color(0xFFFFB300),
+                                                          Color(0xFF16A34A),
                                                           BlendMode.srcIn),
                                                   height: 15,
                                                 ),
@@ -565,9 +625,9 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                                     fontWeight: FontWeight.bold,
                                                     color: isDarkMode(context)
                                                         ? const Color(
-                                                            0xFFFFB300)
+                                                            0xFF4ADE80)
                                                         : const Color(
-                                                            0xFFE65100),
+                                                            0xFF15803D),
                                                     fontFamily:
                                                         AppThemeData.semiBold,
                                                   ),
@@ -575,37 +635,6 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                               ],
                                             ),
                                           ),
-                                        ),
-                                      ],
-                                    ),
-                                    const SizedBox(height: 10),
-                                    Row(
-                                      children: [
-                                        Icon(
-                                          Icons.info_outline_rounded,
-                                          size: 13,
-                                          color: isDarkMode(context)
-                                              ? AppThemeData.grey500
-                                              : AppThemeData.grey400,
-                                        ),
-                                        const SizedBox(width: 4),
-                                        Text(
-                                          'Tap for more details'.tr(),
-                                          style: TextStyle(
-                                            fontSize: 11,
-                                            color: isDarkMode(context)
-                                                ? AppThemeData.grey500
-                                                : AppThemeData.grey400,
-                                            fontFamily: AppThemeData.regular,
-                                          ),
-                                        ),
-                                        const Spacer(),
-                                        Icon(
-                                          Icons.keyboard_arrow_down_rounded,
-                                          size: 16,
-                                          color: isDarkMode(context)
-                                              ? AppThemeData.grey500
-                                              : AppThemeData.grey400,
                                         ),
                                       ],
                                     ),
@@ -683,78 +712,119 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                               ),
                                             ),
                                             const SizedBox(width: 6),
-                                            isClosingSoon
-                                                ? RichText(
-                                                    text: TextSpan(
-                                                      children: [
-                                                        TextSpan(
-                                                          text: 'Closing in ',
+                                            Expanded(
+                                              child: Column(
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.start,
+                                                mainAxisSize: MainAxisSize.min,
+                                                children: [
+                                                  isClosingSoon
+                                                      ? RichText(
+                                                          text: TextSpan(
+                                                            children: [
+                                                              TextSpan(
+                                                                text:
+                                                                    'Closing in ',
+                                                                style: TextStyle(
+                                                                  fontSize: 13,
+                                                                  fontWeight:
+                                                                      FontWeight
+                                                                          .w600,
+                                                                  fontFamily:
+                                                                      AppThemeData
+                                                                          .semiBold,
+                                                                  color:
+                                                                      statusColor,
+                                                                ),
+                                                              ),
+                                                              TextSpan(
+                                                                text:
+                                                                    '$mins:$secs',
+                                                                style: TextStyle(
+                                                                  fontSize: 14,
+                                                                  fontWeight:
+                                                                      FontWeight
+                                                                          .w800,
+                                                                  fontFamily:
+                                                                      AppThemeData
+                                                                          .bold,
+                                                                  color:
+                                                                      statusColor,
+                                                                ),
+                                                              ),
+                                                            ],
+                                                          ),
+                                                        )
+                                                      : Text(
+                                                          isOpen
+                                                              ? "Open Now".tr()
+                                                              : "Currently Closed"
+                                                                  .tr(),
+                                                          textAlign:
+                                                              TextAlign.start,
+                                                          maxLines: 1,
                                                           style: TextStyle(
                                                             fontSize: 13,
                                                             fontWeight:
                                                                 FontWeight.w600,
+                                                            overflow:
+                                                                TextOverflow
+                                                                    .ellipsis,
                                                             fontFamily:
                                                                 AppThemeData
                                                                     .semiBold,
                                                             color: statusColor,
                                                           ),
                                                         ),
-                                                        TextSpan(
-                                                          text: '$mins:$secs',
+                                                  if (!isClosingSoon &&
+                                                      isOpen &&
+                                                      _closingAtLabel != null)
+                                                    Padding(
+                                                      padding:
+                                                          const EdgeInsets.only(
+                                                              top: 2),
+                                                      child: Text(
+                                                        _closingAtLabel!,
+                                                        style: TextStyle(
+                                                          fontSize: 11,
+                                                          color: statusColor
+                                                              .withOpacity(0.75),
+                                                          fontFamily:
+                                                              AppThemeData
+                                                                  .regular,
+                                                        ),
+                                                      ),
+                                                    ),
+                                                  // Closed subtitle — two cases:
+                                                  // • toggle OFF → "not accepting orders"
+                                                  // • toggle ON + outside schedule → next opening time
+                                                  if (!isOpen) ...[
+                                                    if (!widget.vendorModel.reststatus)
+                                                      Padding(
+                                                        padding: const EdgeInsets.only(top: 2),
+                                                        child: Text(
+                                                          'Restaurant is not accepting orders right now'.tr(),
                                                           style: TextStyle(
-                                                            fontSize: 14,
-                                                            fontWeight:
-                                                                FontWeight.w800,
-                                                            fontFamily:
-                                                                AppThemeData
-                                                                    .bold,
-                                                            color: statusColor,
+                                                            fontSize: 11,
+                                                            color: statusColor.withOpacity(0.75),
+                                                            fontFamily: AppThemeData.regular,
                                                           ),
                                                         ),
-                                                      ],
-                                                    ),
-                                                  )
-                                                : Text(
-                                                    isOpen
-                                                        ? "Open Now".tr()
-                                                        : "Currently Closed"
-                                                            .tr(),
-                                                    textAlign: TextAlign.start,
-                                                    maxLines: 1,
-                                                    style: TextStyle(
-                                                      fontSize: 13,
-                                                      fontWeight:
-                                                          FontWeight.w600,
-                                                      overflow:
-                                                          TextOverflow.ellipsis,
-                                                      fontFamily:
-                                                          AppThemeData.semiBold,
-                                                      color: statusColor,
-                                                    ),
-                                                  ),
-                                            const Spacer(),
-                                            InkWell(
-                                              onTap: () {
-                                                if (widget.vendorModel
-                                                    .workingHours.isEmpty) {
-                                                  ShowToastDialog.showToast(
-                                                      "Timing is not added by restaurant");
-                                                } else {
-                                                  timeShowBottomSheet(context);
-                                                }
-                                              },
-                                              child: Text(
-                                                "View Hours".tr(),
-                                                style: TextStyle(
-                                                  fontSize: 12,
-                                                  fontWeight: FontWeight.w600,
-                                                  color:
-                                                      AppThemeData.secondary300,
-                                                  fontFamily:
-                                                      AppThemeData.semiBold,
-                                                  decoration:
-                                                      TextDecoration.underline,
-                                                ),
+                                                      )
+                                                    else if (_nextOpenLabel != null)
+                                                      Padding(
+                                                        padding: const EdgeInsets.only(top: 2),
+                                                        child: Text(
+                                                          _nextOpenLabel!,
+                                                          style: TextStyle(
+                                                            fontSize: 11,
+                                                            color: statusColor.withOpacity(0.75),
+                                                            fontFamily: AppThemeData.regular,
+                                                          ),
+                                                        ),
+                                                      ),
+                                                  ],
+                                                ],
                                               ),
                                             ),
                                           ],
@@ -800,12 +870,6 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                     ],
                                   ),
 
-                            // DineAway Mode Selector
-                            if (_isDineAwayMode) ...[
-                              const SizedBox(height: 16),
-                              _buildDineAwayModeCard(context),
-                            ],
-
                             // Menu Section
                             const SizedBox(height: 16),
                             Container(
@@ -816,236 +880,73 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                     : Colors.white,
                               ),
                               padding: const EdgeInsets.all(12),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  // Search Bar
-                                  Container(
-                                    decoration: BoxDecoration(
-                                      color: isDarkMode(context)
-                                          ? AppThemeData.grey800
-                                          : AppThemeData.grey100,
-                                      borderRadius: BorderRadius.circular(14),
-                                      border: Border.all(
-                                        color: isDarkMode(context)
-                                            ? AppThemeData.grey700
-                                            : AppThemeData.grey200,
-                                        width: 1,
-                                      ),
-                                    ),
-                                    child: TextField(
-                                      onChanged: searchProduct,
-                                      style: TextStyle(
-                                        fontSize: 14,
-                                        color: isDarkMode(context)
-                                            ? AppThemeData.grey50
-                                            : AppThemeData.grey900,
-                                        fontFamily: AppThemeData.regular,
-                                      ),
-                                      decoration: InputDecoration(
-                                        hintText: 'Search dishes...'.tr(),
-                                        hintStyle: TextStyle(
-                                          color: isDarkMode(context)
-                                              ? AppThemeData.grey500
-                                              : AppThemeData.grey400,
-                                          fontFamily: AppThemeData.regular,
-                                          fontSize: 14,
-                                        ),
-                                        prefixIcon: Padding(
-                                          padding: const EdgeInsets.symmetric(
-                                              horizontal: 14, vertical: 13),
-                                          child: SvgPicture.asset(
-                                            "assets/icons/ic_search.svg",
-                                            colorFilter: ColorFilter.mode(
-                                              isDarkMode(context)
-                                                  ? AppThemeData.grey400
-                                                  : AppThemeData.grey500,
-                                              BlendMode.srcIn,
-                                            ),
-                                            height: 18,
-                                            width: 18,
-                                          ),
-                                        ),
-                                        prefixIconConstraints:
-                                            const BoxConstraints(
-                                                minWidth: 46, minHeight: 46),
-                                        border: InputBorder.none,
-                                        enabledBorder: InputBorder.none,
-                                        focusedBorder: InputBorder.none,
-                                        contentPadding:
-                                            const EdgeInsets.symmetric(
-                                                vertical: 14, horizontal: 4),
-                                      ),
-                                    ),
+                              child: Container(
+                                decoration: BoxDecoration(
+                                  color: isDarkMode(context)
+                                      ? AppThemeData.grey800
+                                      : AppThemeData.grey100,
+                                  borderRadius: BorderRadius.circular(14),
+                                  border: Border.all(
+                                    color: isDarkMode(context)
+                                        ? AppThemeData.grey700
+                                        : AppThemeData.grey200,
+                                    width: 1,
                                   ),
-
-                                  // Veg/Non-Veg Filter
-                                  if (sectionConstantModel!.isProductDetails ==
-                                      true)
-                                    Padding(
-                                      padding: const EdgeInsets.only(top: 14),
-                                      child: Row(
-                                        children: [
-                                          Expanded(
-                                            child: GestureDetector(
-                                              onTap: () {
-                                                setState(
-                                                    () => isVag = !isVag);
-                                                filterRecord();
-                                              },
-                                              child: AnimatedContainer(
-                                                duration: const Duration(
-                                                    milliseconds: 200),
-                                                padding:
-                                                    const EdgeInsets.symmetric(
-                                                        vertical: 10,
-                                                        horizontal: 8),
-                                                decoration: BoxDecoration(
-                                                  borderRadius:
-                                                      BorderRadius.circular(24),
-                                                  color: isVag
-                                                      ? AppThemeData.success400
-                                                      : isDarkMode(context)
-                                                          ? AppThemeData.grey800
-                                                          : AppThemeData
-                                                              .grey100,
-                                                  border: Border.all(
-                                                    color: isVag
-                                                        ? AppThemeData.success400
-                                                        : isDarkMode(context)
-                                                            ? AppThemeData
-                                                                .grey700
-                                                            : AppThemeData
-                                                                .grey300,
-                                                    width: 1.5,
-                                                  ),
-                                                ),
-                                                child: Row(
-                                                  mainAxisAlignment:
-                                                      MainAxisAlignment.center,
-                                                  children: [
-                                                    SvgPicture.asset(
-                                                      "assets/icons/ic_veg.svg",
-                                                      height: 16,
-                                                      width: 16,
-                                                      colorFilter: isVag
-                                                          ? const ColorFilter
-                                                              .mode(Colors.white,
-                                                              BlendMode.srcIn)
-                                                          : null,
-                                                    ),
-                                                    const SizedBox(width: 6),
-                                                    Text(
-                                                      'Veg'.tr(),
-                                                      style: TextStyle(
-                                                        fontSize: 13,
-                                                        fontWeight:
-                                                            FontWeight.w700,
-                                                        color: isVag
-                                                            ? Colors.white
-                                                            : isDarkMode(context)
-                                                                ? AppThemeData
-                                                                    .grey300
-                                                                : AppThemeData
-                                                                    .grey700,
-                                                        fontFamily: AppThemeData
-                                                            .semiBold,
-                                                      ),
-                                                    ),
-                                                  ],
-                                                ),
-                                              ),
-                                            ),
-                                          ),
-                                          const SizedBox(width: 10),
-                                          Expanded(
-                                            child: GestureDetector(
-                                              onTap: () {
-                                                setState(() =>
-                                                    isNonVag = !isNonVag);
-                                                filterRecord();
-                                              },
-                                              child: AnimatedContainer(
-                                                duration: const Duration(
-                                                    milliseconds: 200),
-                                                padding:
-                                                    const EdgeInsets.symmetric(
-                                                        vertical: 10,
-                                                        horizontal: 8),
-                                                decoration: BoxDecoration(
-                                                  borderRadius:
-                                                      BorderRadius.circular(24),
-                                                  color: isNonVag
-                                                      ? AppThemeData.danger300
-                                                      : isDarkMode(context)
-                                                          ? AppThemeData.grey800
-                                                          : AppThemeData
-                                                              .grey100,
-                                                  border: Border.all(
-                                                    color: isNonVag
-                                                        ? AppThemeData.danger300
-                                                        : isDarkMode(context)
-                                                            ? AppThemeData
-                                                                .grey700
-                                                            : AppThemeData
-                                                                .grey300,
-                                                    width: 1.5,
-                                                  ),
-                                                ),
-                                                child: Row(
-                                                  mainAxisAlignment:
-                                                      MainAxisAlignment.center,
-                                                  children: [
-                                                    SvgPicture.asset(
-                                                      "assets/icons/ic_nonveg.svg",
-                                                      height: 16,
-                                                      width: 16,
-                                                      colorFilter: isNonVag
-                                                          ? const ColorFilter
-                                                              .mode(Colors.white,
-                                                              BlendMode.srcIn)
-                                                          : null,
-                                                    ),
-                                                    const SizedBox(width: 6),
-                                                    Text(
-                                                      'Non Veg'.tr(),
-                                                      style: TextStyle(
-                                                        fontSize: 13,
-                                                        fontWeight:
-                                                            FontWeight.w700,
-                                                        color: isNonVag
-                                                            ? Colors.white
-                                                            : isDarkMode(context)
-                                                                ? AppThemeData
-                                                                    .grey300
-                                                                : AppThemeData
-                                                                    .grey700,
-                                                        fontFamily: AppThemeData
-                                                            .semiBold,
-                                                      ),
-                                                    ),
-                                                  ],
-                                                ),
-                                              ),
-                                            ),
-                                          ),
-                                        ],
+                                ),
+                                child: TextField(
+                                  onChanged: searchProduct,
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    color: isDarkMode(context)
+                                        ? AppThemeData.grey50
+                                        : AppThemeData.grey900,
+                                    fontFamily: AppThemeData.regular,
+                                  ),
+                                  decoration: InputDecoration(
+                                    hintText: 'Search dishes...'.tr(),
+                                    hintStyle: TextStyle(
+                                      color: isDarkMode(context)
+                                          ? AppThemeData.grey500
+                                          : AppThemeData.grey400,
+                                      fontFamily: AppThemeData.regular,
+                                      fontSize: 14,
+                                    ),
+                                    prefixIcon: Padding(
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 14, vertical: 13),
+                                      child: SvgPicture.asset(
+                                        "assets/icons/ic_search.svg",
+                                        colorFilter: ColorFilter.mode(
+                                          isDarkMode(context)
+                                              ? AppThemeData.grey400
+                                              : AppThemeData.grey500,
+                                          BlendMode.srcIn,
+                                        ),
+                                        height: 18,
+                                        width: 18,
                                       ),
                                     ),
-                                ],
+                                    prefixIconConstraints:
+                                        const BoxConstraints(
+                                            minWidth: 46, minHeight: 46),
+                                    border: InputBorder.none,
+                                    enabledBorder: InputBorder.none,
+                                    focusedBorder: InputBorder.none,
+                                    contentPadding:
+                                        const EdgeInsets.symmetric(
+                                            vertical: 14, horizontal: 4),
+                                  ),
+                                ),
                               ),
                             ),
                           ],
                         ),
                       ),
 
-                      // Nutrition Filter
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
-                        child: _buildNutritionFilterSection(context),
-                      ),
-
-                      const SizedBox(height: 16),
+                      // Compact single-row filter bar
+                      const SizedBox(height: 10),
+                      _buildFilterBar(context),
+                      const SizedBox(height: 12),
 
                       // Product List View
                       Container(
@@ -1199,393 +1100,535 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
     setState(() {});
   }
 
-  Widget _buildDineAwayModeCard(BuildContext context) {
+  // ── Compact horizontal filter bar ───────────────────────────────────────────
+
+  Widget _buildFilterBar(BuildContext context) {
     final isDark = isDarkMode(context);
-    return Container(
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(14),
-        color: isDark ? AppThemeData.darkBgTertiary : Colors.white,
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(isDark ? 0.2 : 0.06),
-            blurRadius: 10,
-            offset: const Offset(0, 3),
-          ),
-        ],
-      ),
-      padding: const EdgeInsets.all(12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+    final hasNutrition =
+        _nutritionFilterType != null && _nutritionFilterLevel != null;
+
+    return SizedBox(
+      height: 34,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 16),
         children: [
-          Row(
-            children: [
-              Icon(
-                Icons.restaurant_menu_rounded,
-                size: 15,
-                color: AppThemeData.primary500,
-              ),
-              const SizedBox(width: 6),
-              Text(
-                'Order Mode'.tr(),
-                style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w700,
-                  fontFamily: AppThemeData.semiBold,
-                  color: isDark ? AppThemeData.grey200 : AppThemeData.grey800,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              Expanded(
-                child: GestureDetector(
-                  onTap: () {
-                    if (_dineAwaySubMode != 'Takeaway') {
-                      setState(() {
-                        _dineAwaySubMode = 'Takeaway';
-                        isVag = false;
-                        isNonVag = false;
-                        _nutritionFilterType = null;
-                        _nutritionFilterLevel = null;
-                        allProductList = _rawDineAwayProducts
-                            .where((p) => p.takeaway)
-                            .toList();
-                        productList = List.from(allProductList);
-                      });
-                      getVendorCategoryById();
-                    }
-                  },
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 200),
-                    padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(24),
-                      color: _dineAwaySubMode == 'Takeaway'
-                          ? AppThemeData.primary500
-                          : isDark ? AppThemeData.grey800 : AppThemeData.grey100,
-                      border: Border.all(
-                        color: _dineAwaySubMode == 'Takeaway'
-                            ? AppThemeData.primary500
-                            : isDark ? AppThemeData.grey700 : AppThemeData.grey300,
-                        width: 1.5,
-                      ),
-                    ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(
-                          Icons.takeout_dining_outlined,
-                          size: 16,
-                          color: _dineAwaySubMode == 'Takeaway'
-                              ? Colors.white
-                              : isDark ? AppThemeData.grey400 : AppThemeData.grey500,
-                        ),
-                        const SizedBox(width: 6),
-                        Text(
-                          'Takeaway'.tr(),
-                          style: TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w700,
-                            fontFamily: AppThemeData.semiBold,
-                            color: _dineAwaySubMode == 'Takeaway'
-                                ? Colors.white
-                                : isDark ? AppThemeData.grey300 : AppThemeData.grey700,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: GestureDetector(
-                  onTap: () {
-                    if (_dineAwaySubMode != 'DineIn') {
-                      setState(() {
-                        _dineAwaySubMode = 'Dining';
-                        isVag = false;
-                        isNonVag = false;
-                        _nutritionFilterType = null;
-                        _nutritionFilterLevel = null;
-                        allProductList = _rawDineAwayProducts
-                            .where((p) => p.dineIn)
-                            .toList();
-                        productList = List.from(allProductList);
-                      });
-                      getVendorCategoryById();
-                    }
-                  },
-                  child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 200),
-                    padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(24),
-                      color: _dineAwaySubMode == 'Dining'
-                          ? AppThemeData.primary500
-                          : isDark ? AppThemeData.grey800 : AppThemeData.grey100,
-                      border: Border.all(
-                        color: _dineAwaySubMode == 'Dining'
-                            ? AppThemeData.primary500
-                            : isDark ? AppThemeData.grey700 : AppThemeData.grey300,
-                        width: 1.5,
-                      ),
-                    ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(
-                          Icons.chair_outlined,
-                          size: 16,
-                          color: _dineAwaySubMode == 'Dining'
-                              ? Colors.white
-                              : isDark ? AppThemeData.grey400 : AppThemeData.grey500,
-                        ),
-                        const SizedBox(width: 6),
-                        Text(
-                          'Dining'.tr(),
-                          style: TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w700,
-                            fontFamily: AppThemeData.semiBold,
-                            color: _dineAwaySubMode == 'Dining'
-                                ? Colors.white
-                                : isDark ? AppThemeData.grey300 : AppThemeData.grey700,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildNutritionFilterSection(BuildContext context) {
-    final isDark = isDarkMode(context);
-    final hasFilter = _nutritionFilterType != null && _nutritionFilterLevel != null;
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Icon(
-              Icons.monitor_heart_outlined,
-              size: 14,
-              color: isDark ? AppThemeData.grey400 : AppThemeData.grey600,
-            ),
-            const SizedBox(width: 6),
-            Text(
-              'Nutrition Filter'.tr(),
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-                color: isDark ? AppThemeData.grey300 : AppThemeData.grey700,
-                fontFamily: AppThemeData.semiBold,
-                letterSpacing: 0.2,
-              ),
-            ),
-            if (hasFilter) ...[
-              const Spacer(),
-              GestureDetector(
-                onTap: () {
+          // Takeaway / Dining chips (DineAway mode only)
+          if (_isDineAwayMode) ...[
+            _filterChip(
+              context: context,
+              label: 'Takeaway'.tr(),
+              icon: Icons.takeout_dining_outlined,
+              isActive: _dineAwaySubMode == 'Takeaway',
+              activeColor: AppThemeData.primary500,
+              onTap: () {
+                if (_dineAwaySubMode != 'Takeaway') {
                   setState(() {
+                    _dineAwaySubMode = 'Takeaway';
+                    isVag = false;
+                    isNonVag = false;
                     _nutritionFilterType = null;
                     _nutritionFilterLevel = null;
+                    allProductList =
+                        _rawDineAwayProducts.where((p) => p.takeaway).toList();
+                    productList = List.from(allProductList);
                   });
-                  filterRecord();
-                },
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: AppThemeData.primary500.withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.close, size: 11, color: AppThemeData.primary500),
-                      const SizedBox(width: 3),
-                      Text(
-                        'Clear'.tr(),
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: AppThemeData.primary500,
-                          fontFamily: AppThemeData.medium,
-                        ),
-                      ),
-                    ],
-                  ),
+                  getVendorCategoryById();
+                }
+              },
+            ),
+            const SizedBox(width: 8),
+            _filterChip(
+              context: context,
+              label: 'Dining'.tr(),
+              icon: Icons.chair_outlined,
+              isActive: _dineAwaySubMode == 'Dining',
+              activeColor: AppThemeData.primary500,
+              onTap: () {
+                if (_dineAwaySubMode != 'Dining') {
+                  setState(() {
+                    _dineAwaySubMode = 'Dining';
+                    isVag = false;
+                    isNonVag = false;
+                    _nutritionFilterType = null;
+                    _nutritionFilterLevel = null;
+                    allProductList =
+                        _rawDineAwayProducts.where((p) => p.dineIn).toList();
+                    productList = List.from(allProductList);
+                  });
+                  getVendorCategoryById();
+                }
+              },
+            ),
+            _filterDivider(isDark),
+          ],
+
+          // Veg / Non-Veg chips
+          if (sectionConstantModel!.isProductDetails == true) ...[
+            _filterChip(
+              context: context,
+              label: 'Veg'.tr(),
+              svgIcon: 'assets/icons/ic_veg.svg',
+              isActive: isVag,
+              activeColor: AppThemeData.success400,
+              onTap: () {
+                setState(() => isVag = !isVag);
+                filterRecord();
+              },
+            ),
+            const SizedBox(width: 8),
+            _filterChip(
+              context: context,
+              label: 'Non-Veg'.tr(),
+              svgIcon: 'assets/icons/ic_nonveg.svg',
+              isActive: isNonVag,
+              activeColor: AppThemeData.danger300,
+              onTap: () {
+                setState(() => isNonVag = !isNonVag);
+                filterRecord();
+              },
+            ),
+            _filterDivider(isDark),
+          ],
+
+          // Nutrition chip
+          _filterChip(
+            context: context,
+            label: hasNutrition
+                ? '$_nutritionFilterType · $_nutritionFilterLevel'
+                : 'Nutrition'.tr(),
+            icon: Icons.monitor_heart_outlined,
+            isActive: hasNutrition,
+            activeColor: AppThemeData.primary500,
+            showDropdownArrow: !hasNutrition,
+            showClear: hasNutrition,
+            onClear: () {
+              setState(() {
+                _nutritionFilterType = null;
+                _nutritionFilterLevel = null;
+              });
+              filterRecord();
+            },
+            onTap: () => _showNutritionSheet(context),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _filterDivider(bool isDark) => Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        child: VerticalDivider(
+          width: 1,
+          thickness: 1,
+          color: isDark ? AppThemeData.grey700 : AppThemeData.grey200,
+          indent: 5,
+          endIndent: 5,
+        ),
+      );
+
+  Widget _filterChip({
+    required BuildContext context,
+    required String label,
+    required bool isActive,
+    required Color activeColor,
+    required VoidCallback onTap,
+    IconData? icon,
+    String? svgIcon,
+    bool showDropdownArrow = false,
+    bool showClear = false,
+    VoidCallback? onClear,
+  }) {
+    final isDark = isDarkMode(context);
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        height: 34,
+        padding: const EdgeInsets.symmetric(horizontal: 11),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(20),
+          color: isActive
+              ? activeColor
+              : (isDark ? AppThemeData.grey800 : AppThemeData.grey100),
+          border: Border.all(
+            color: isActive
+                ? activeColor
+                : (isDark ? AppThemeData.grey700 : AppThemeData.grey300),
+            width: 1,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (svgIcon != null)
+              Padding(
+                padding: const EdgeInsets.only(right: 5),
+                child: SvgPicture.asset(
+                  svgIcon,
+                  height: 13,
+                  width: 13,
+                  colorFilter: isActive
+                      ? const ColorFilter.mode(Colors.white, BlendMode.srcIn)
+                      : null,
                 ),
+              )
+            else if (icon != null)
+              Padding(
+                padding: const EdgeInsets.only(right: 5),
+                child: Icon(
+                  icon,
+                  size: 13,
+                  color: isActive
+                      ? Colors.white
+                      : (isDark ? AppThemeData.grey400 : AppThemeData.grey500),
+                ),
+              ),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 12,
+                fontFamily: AppThemeData.medium,
+                color: isActive
+                    ? Colors.white
+                    : (isDark ? AppThemeData.grey300 : AppThemeData.grey700),
+              ),
+            ),
+            if (showClear && onClear != null) ...[
+              const SizedBox(width: 5),
+              GestureDetector(
+                onTap: onClear,
+                behavior: HitTestBehavior.opaque,
+                child: const Icon(Icons.close_rounded,
+                    size: 13, color: Colors.white),
+              ),
+            ] else if (showDropdownArrow) ...[
+              const SizedBox(width: 3),
+              Icon(
+                Icons.keyboard_arrow_down_rounded,
+                size: 14,
+                color: isDark ? AppThemeData.grey400 : AppThemeData.grey500,
               ),
             ],
           ],
         ),
-        const SizedBox(height: 8),
-        Row(
-          children: [
-            Expanded(
-              child: _buildNutritionDropdown(
-                context: context,
-                hint: 'Nutrition Type'.tr(),
-                value: _nutritionFilterType,
-                items: _nutritionMetrics,
-                onChanged: (val) {
-                  setState(() => _nutritionFilterType = val);
-                  if (_nutritionFilterLevel != null) filterRecord();
-                },
-              ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: _buildNutritionDropdown(
-                context: context,
-                hint: 'Level'.tr(),
-                value: _nutritionFilterLevel,
-                items: _nutritionLevels,
-                onChanged: (val) {
-                  setState(() => _nutritionFilterLevel = val);
-                  if (_nutritionFilterType != null) filterRecord();
-                },
-              ),
-            ),
-          ],
-        ),
-        if (hasFilter) ...[
-          const SizedBox(height: 8),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-            decoration: BoxDecoration(
-              color: isDark ? const Color(0xFF1B3A28) : const Color(0xFFE8F5EE),
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(
-                color: isDark ? const Color(0xFF2D6A4F) : const Color(0xFF95D5B2),
-              ),
-            ),
-            child: Row(
-              children: [
-                Icon(Icons.filter_alt_outlined, size: 14, color: const Color(0xFF2D9A5E)),
-                const SizedBox(width: 6),
-                Text(
-                  '$_nutritionFilterLevel $_nutritionFilterType dishes — ${productList.length} found'.tr(),
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: isDark ? const Color(0xFF81C995) : const Color(0xFF1B6B3A),
-                    fontFamily: AppThemeData.medium,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ],
+      ),
     );
   }
 
-  Widget _buildNutritionDropdown({
-    required BuildContext context,
-    required String hint,
-    required String? value,
-    required List<String> items,
-    required ValueChanged<String?> onChanged,
-  }) {
-    final isDark = isDarkMode(context);
-    return Container(
-      height: 42,
-      decoration: BoxDecoration(
-        color: isDark ? AppThemeData.grey800 : AppThemeData.grey100,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: value != null
-              ? AppThemeData.primary500
-              : (isDark ? AppThemeData.grey700 : AppThemeData.grey200),
-          width: value != null ? 1.5 : 1,
-        ),
-      ),
-      child: DropdownButtonHideUnderline(
-        child: DropdownButton<String>(
-          value: value,
-          hint: Padding(
-            padding: const EdgeInsets.only(left: 12),
-            child: Text(
-              hint,
-              style: TextStyle(
-                fontSize: 12,
-                color: isDark ? AppThemeData.grey500 : AppThemeData.grey400,
-                fontFamily: AppThemeData.regular,
+  void _showNutritionSheet(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: false,
+      builder: (ctx) {
+        String? selectedType = _nutritionFilterType;
+        String? selectedLevel = _nutritionFilterLevel;
+        return StatefulBuilder(
+          builder: (ctx, setSheet) {
+            final isDark = isDarkMode(context);
+            return Container(
+              decoration: BoxDecoration(
+                color: isDark ? AppThemeData.grey900 : Colors.white,
+                borderRadius:
+                    const BorderRadius.vertical(top: Radius.circular(24)),
               ),
-            ),
-          ),
-          icon: Padding(
-            padding: const EdgeInsets.only(right: 8),
-            child: Icon(
-              Icons.keyboard_arrow_down_rounded,
-              size: 18,
-              color: value != null
-                  ? AppThemeData.primary500
-                  : (isDark ? AppThemeData.grey500 : AppThemeData.grey400),
-            ),
-          ),
-          isExpanded: true,
-          dropdownColor: isDark ? AppThemeData.grey800 : Colors.white,
-          borderRadius: BorderRadius.circular(12),
-          items: items.map((item) => DropdownMenuItem<String>(
-            value: item,
-            child: Padding(
-              padding: const EdgeInsets.only(left: 12),
-              child: Text(
-                item,
-                style: TextStyle(
-                  fontSize: 13,
-                  color: isDark ? AppThemeData.grey100 : AppThemeData.grey800,
-                  fontFamily: AppThemeData.medium,
-                ),
+              padding: EdgeInsets.fromLTRB(
+                  20, 16, 20, MediaQuery.of(context).padding.bottom + 24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Handle bar
+                  Center(
+                    child: Container(
+                      width: 36,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color:
+                            isDark ? AppThemeData.grey700 : AppThemeData.grey200,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  // Title row
+                  Row(
+                    children: [
+                      Icon(Icons.monitor_heart_outlined,
+                          size: 18, color: AppThemeData.primary500),
+                      const SizedBox(width: 8),
+                      Text(
+                        'Nutrition Filter'.tr(),
+                        style: TextStyle(
+                          fontSize: 15,
+                          fontFamily: AppThemeData.semiBold,
+                          color: isDark ? Colors.white : AppThemeData.grey900,
+                        ),
+                      ),
+                      const Spacer(),
+                      if (selectedType != null || selectedLevel != null)
+                        GestureDetector(
+                          onTap: () {
+                            setSheet(() {
+                              selectedType = null;
+                              selectedLevel = null;
+                            });
+                            setState(() {
+                              _nutritionFilterType = null;
+                              _nutritionFilterLevel = null;
+                            });
+                            filterRecord();
+                          },
+                          child: Text(
+                            'Clear'.tr(),
+                            style: TextStyle(
+                              fontSize: 13,
+                              color: AppThemeData.primary500,
+                              fontFamily: AppThemeData.medium,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 18),
+                  // Type label
+                  Text(
+                    'Type'.tr(),
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontFamily: AppThemeData.medium,
+                      letterSpacing: 0.6,
+                      color: isDark ? AppThemeData.grey400 : AppThemeData.grey500,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: _nutritionMetrics.map((type) {
+                      final sel = selectedType == type;
+                      return GestureDetector(
+                        onTap: () {
+                          setSheet(() => selectedType = type);
+                          setState(() => _nutritionFilterType = type);
+                          if (selectedLevel != null) filterRecord();
+                        },
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 150),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 14, vertical: 8),
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(20),
+                            color: sel
+                                ? AppThemeData.primary500
+                                : (isDark
+                                    ? AppThemeData.grey800
+                                    : AppThemeData.grey100),
+                            border: Border.all(
+                              color: sel
+                                  ? AppThemeData.primary500
+                                  : (isDark
+                                      ? AppThemeData.grey700
+                                      : AppThemeData.grey200),
+                            ),
+                          ),
+                          child: Text(
+                            type,
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontFamily: AppThemeData.medium,
+                              color: sel
+                                  ? Colors.white
+                                  : (isDark
+                                      ? AppThemeData.grey300
+                                      : AppThemeData.grey700),
+                            ),
+                          ),
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                  const SizedBox(height: 18),
+                  // Level label
+                  Text(
+                    'Level'.tr(),
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontFamily: AppThemeData.medium,
+                      letterSpacing: 0.6,
+                      color: isDark ? AppThemeData.grey400 : AppThemeData.grey500,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: _nutritionLevels.map((level) {
+                      final sel = selectedLevel == level;
+                      final levelColor = level == 'High'
+                          ? AppThemeData.error500
+                          : level == 'Medium'
+                              ? AppThemeData.accent500
+                              : AppThemeData.success400;
+                      return Padding(
+                        padding: const EdgeInsets.only(right: 8),
+                        child: GestureDetector(
+                          onTap: () {
+                            setSheet(() => selectedLevel = level);
+                            setState(() => _nutritionFilterLevel = level);
+                            if (selectedType != null) filterRecord();
+                          },
+                          child: AnimatedContainer(
+                            duration: const Duration(milliseconds: 150),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 16, vertical: 8),
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(20),
+                              color: sel
+                                  ? levelColor
+                                  : (isDark
+                                      ? AppThemeData.grey800
+                                      : AppThemeData.grey100),
+                              border: Border.all(
+                                color: sel
+                                    ? levelColor
+                                    : (isDark
+                                        ? AppThemeData.grey700
+                                        : AppThemeData.grey200),
+                              ),
+                            ),
+                            child: Text(
+                              level,
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontFamily: AppThemeData.medium,
+                                color: sel
+                                    ? Colors.white
+                                    : (isDark
+                                        ? AppThemeData.grey300
+                                        : AppThemeData.grey700),
+                              ),
+                            ),
+                          ),
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                ],
               ),
-            ),
-          )).toList(),
-          onChanged: onChanged,
-        ),
-      ),
+            );
+          },
+        );
+      },
     );
   }
+
 
   bool isOpen = false;
   Duration? _closingIn;
   Timer? _closingCountdownTimer;
+  String? _closingAtLabel;
+  String? _nextOpenLabel;
 
   statusCheck() {
     final now = DateTime.now();
-    var day = DateFormat('EEEE', 'en_US').format(now);
-    var date = DateFormat('dd-MM-yyyy').format(now);
+    final day = DateFormat('EEEE', 'en_US').format(now);
+    final date = DateFormat('dd-MM-yyyy').format(now);
     DateTime? activeEnd;
-    for (var element in widget.vendorModel.workingHours ?? []) {
+    bool scheduleOpen = false;
+    isOpen = false;
+    _closingAtLabel = null;
+    _nextOpenLabel = null;
+
+    // Step 1: Derive schedule-based status from working hours.
+    for (var element in widget.vendorModel.workingHours) {
       if (day == element.day.toString()) {
-        if (element.timeslot!.isNotEmpty) {
+        if ((element.timeslot ?? []).isNotEmpty) {
           for (var slot in element.timeslot!) {
-            var start =
+            if (slot.from == null || slot.to == null) continue;
+            final start =
                 DateFormat("dd-MM-yyyy HH:mm").parse("$date ${slot.from}");
-            var end =
+            final end =
                 DateFormat("dd-MM-yyyy HH:mm").parse("$date ${slot.to}");
             if (isCurrentDateInRange(start, end)) {
               activeEnd = end;
-              setState(() {
-                isOpen = true;
-              });
+              scheduleOpen = true;
+              _closingAtLabel = 'Closes at ${DateFormat('h:mm a').format(end)}';
             }
           }
         }
       }
     }
-    if (activeEnd != null) {
+
+    // No working hours configured → treat as always schedulable (admin toggle
+    // alone decides availability).
+    final bool hasSchedule = widget.vendorModel.workingHours.isNotEmpty;
+    if (!hasSchedule) scheduleOpen = true;
+
+    // Step 2: Final open state = admin toggle AND within schedule.
+    //
+    // Case 1 – inside hours  + toggle ON  → isOpen = true  ("Open • Closes at X")
+    // Case 2 – inside hours  + toggle OFF → isOpen = false ("Currently Closed" + "not accepting orders")
+    // Case 3 – outside hours + toggle ON  → isOpen = false ("Currently Closed" + "Opens at X")
+    // Case 4 – outside hours + toggle OFF → isOpen = false ("Currently Closed" + "not accepting orders")
+    isOpen = widget.vendorModel.reststatus && scheduleOpen;
+
+    // Step 3: Compute the subtitle shown beneath "Currently Closed".
+    if (!isOpen) {
+      _closingAtLabel = null;
+      activeEnd = null;
+      if (widget.vendorModel.reststatus && hasSchedule) {
+        // Case 3: admin ON but outside schedule → tell user when it next opens.
+        _nextOpenLabel = _findNextOpenLabel(now, day, date);
+      }
+      // Cases 2 & 4: _nextOpenLabel stays null; UI shows "not accepting orders".
+    }
+
+    setState(() {});
+    if (activeEnd != null && isOpen) {
       _startClosingCountdown(activeEnd);
     }
+  }
+
+  String? _findNextOpenLabel(
+      DateTime now, String todayName, String todayDateStr) {
+    // Check remaining slots today (start time still in the future)
+    for (var element in widget.vendorModel.workingHours) {
+      if (element.day == todayName) {
+        for (var slot in element.timeslot ?? []) {
+          if (slot.from == null) continue;
+          try {
+            final start = DateFormat("dd-MM-yyyy HH:mm")
+                .parse("$todayDateStr ${slot.from}");
+            if (start.isAfter(now)) {
+              return 'Opens today at ${DateFormat('h:mm a').format(start)}';
+            }
+          } catch (_) {}
+        }
+      }
+    }
+    // Check the next 7 days
+    for (int offset = 1; offset <= 7; offset++) {
+      final nextDate = now.add(Duration(days: offset));
+      final nextDayName = DateFormat('EEEE', 'en_US').format(nextDate);
+      final nextDateStr = DateFormat('dd-MM-yyyy').format(nextDate);
+      for (var element in widget.vendorModel.workingHours) {
+        if (element.day == nextDayName) {
+          final slots = (element.timeslot ?? [])
+              .where((s) => s.from != null)
+              .toList()
+            ..sort((a, b) => (a.from ?? '').compareTo(b.from ?? ''));
+          if (slots.isNotEmpty) {
+            try {
+              final start = DateFormat("dd-MM-yyyy HH:mm")
+                  .parse("$nextDateStr ${slots.first.from}");
+              final dayLabel = offset == 1 ? 'tomorrow' : nextDayName;
+              return 'Opens $dayLabel at ${DateFormat('h:mm a').format(start)}';
+            } catch (_) {}
+          }
+        }
+      }
+    }
+    return null;
   }
 
   void _startClosingCountdown(DateTime closingTime) {
@@ -1961,6 +2004,8 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                       bool hasVariants = productModel.itemAttributes != null &&
                           productModel.itemAttributes!.attributes!.isNotEmpty;
                       bool hasAddOns = productModel.addOnsTitle.isNotEmpty;
+                      bool hasProductAttr = productModel.productAttributes.isNotEmpty &&
+                          productModel.productAttributes.any((c) => c.options.any((o) => o.enabled));
 
                       String unavailabilityMessage = "";
                       if (_pHasRestrictions) {
@@ -2096,78 +2141,92 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                             ),
                                           ),
                                         // Price
-                                        Row(
+                                        Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
                                           children: [
-                                            disPrice == "" || disPrice == "0"
-                                                ? Text(
-                                                    amountShow(amount: price),
-                                                    style: TextStyle(
-                                                      fontSize: 15,
-                                                      fontWeight:
-                                                          FontWeight.w700,
-                                                      color: AppThemeData
-                                                          .primary500,
-                                                    ),
-                                                  )
-                                                : Row(
-                                                    children: [
-                                                      Text(
-                                                        amountShow(
-                                                            amount: disPrice),
+                                            if (productModel.productAttributes.isNotEmpty &&
+                                                productModel.productAttributes.any((c) => c.options.any((o) => o.enabled && o.price > 0)))
+                                              Text(
+                                                'Starts From'.tr(),
+                                                style: TextStyle(
+                                                  fontSize: 10,
+                                                  color: isDarkMode(context) ? AppThemeData.grey400 : AppThemeData.grey500,
+                                                ),
+                                              ),
+                                            Row(
+                                              children: [
+                                                disPrice == "" || disPrice == "0"
+                                                    ? Text(
+                                                        amountShow(amount: price),
                                                         style: TextStyle(
                                                           fontSize: 15,
                                                           fontWeight:
-                                                              FontWeight.bold,
+                                                              FontWeight.w700,
                                                           color: AppThemeData
-                                                              .accent500,
+                                                              .primary500,
                                                         ),
+                                                      )
+                                                    : Row(
+                                                        children: [
+                                                          Text(
+                                                            amountShow(
+                                                                amount: disPrice),
+                                                            style: TextStyle(
+                                                              fontSize: 15,
+                                                              fontWeight:
+                                                                  FontWeight.bold,
+                                                              color: AppThemeData
+                                                                  .primary500,
+                                                            ),
+                                                          ),
+                                                          const SizedBox(width: 5),
+                                                          Text(
+                                                            amountShow(
+                                                                amount: price),
+                                                            style: TextStyle(
+                                                              fontSize: 12,
+                                                              fontWeight:
+                                                                  FontWeight.bold,
+                                                              color: isDarkMode(
+                                                                      context)
+                                                                  ? AppThemeData
+                                                                      .grey400
+                                                                  : AppThemeData
+                                                                      .grey500,
+                                                              decoration:
+                                                                  TextDecoration
+                                                                      .lineThrough,
+                                                            ),
+                                                          ),
+                                                        ],
                                                       ),
-                                                      const SizedBox(width: 5),
-                                                      Text(
-                                                        amountShow(
-                                                            amount: price),
-                                                        style: TextStyle(
-                                                          fontSize: 12,
-                                                          fontWeight:
-                                                              FontWeight.bold,
-                                                          color: isDarkMode(
-                                                                  context)
-                                                              ? AppThemeData
-                                                                  .grey400
-                                                              : AppThemeData
-                                                                  .grey500,
-                                                          decoration:
-                                                              TextDecoration
-                                                                  .lineThrough,
-                                                        ),
+                                                if (disPrice != "" &&
+                                                    disPrice != "0")
+                                                  Container(
+                                                    margin: const EdgeInsets.only(
+                                                        left: 5),
+                                                    padding:
+                                                        const EdgeInsets.symmetric(
+                                                            horizontal: 5,
+                                                            vertical: 2),
+                                                    decoration: BoxDecoration(
+                                                      color: AppThemeData.primary500
+                                                          .withOpacity(0.12),
+                                                      borderRadius:
+                                                          BorderRadius.circular(4),
+                                                    ),
+                                                    child: Text(
+                                                      "${calculateDiscount(price, disPrice)}% OFF",
+                                                      style: TextStyle(
+                                                        color:
+                                                            AppThemeData.primary500,
+                                                        fontSize: 10,
+                                                        fontWeight: FontWeight.bold,
                                                       ),
-                                                    ],
+                                                    ),
                                                   ),
-                                            if (disPrice != "" &&
-                                                disPrice != "0")
-                                              Container(
-                                                margin: const EdgeInsets.only(
-                                                    left: 5),
-                                                padding:
-                                                    const EdgeInsets.symmetric(
-                                                        horizontal: 5,
-                                                        vertical: 2),
-                                                decoration: BoxDecoration(
-                                                  color: AppThemeData.accent500
-                                                      .withOpacity(0.15),
-                                                  borderRadius:
-                                                      BorderRadius.circular(4),
-                                                ),
-                                                child: Text(
-                                                  "${calculateDiscount(price, disPrice)}% OFF",
-                                                  style: TextStyle(
-                                                    color:
-                                                        AppThemeData.accent500,
-                                                    fontSize: 10,
-                                                    fontWeight: FontWeight.bold,
-                                                  ),
-                                                ),
-                                              ),
+                                              ],
+                                            ),
                                           ],
                                         ),
                                         // Unavailability badge
@@ -2367,7 +2426,8 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                                     key: ValueKey(
                                                         'add_${productModel.id}'),
                                                     hasOptions: hasVariants ||
-                                                        hasAddOns,
+                                                        hasAddOns ||
+                                                        hasProductAttr,
                                                     onTap: () =>
                                                         _handleAddToCart(
                                                             productModel),
@@ -2495,43 +2555,31 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
   Future<void> _decrementQuantity(CartProduct cartProduct) async {
     if (!mounted || !_cartReady) return;
 
-    print(
-        'Decrementing quantity for product: ${cartProduct.id}, current quantity: ${cartProduct.quantity}');
-
-    // Find the cart product in the list
     final index = cartProducts.indexWhere((p) => p.id == cartProduct.id);
-    if (index == -1) {
-      print('Cart product not found in list');
-      return;
-    }
+    if (index == -1) return;
 
-    // Immediate UI update
+    // Decide the operation BEFORE mutating the list so the DB call matches.
+    final wasLastItem = cartProducts[index].quantity <= 1;
+
     setState(() {
-      if (cartProducts[index].quantity > 1) {
+      if (!wasLastItem) {
         cartProducts[index].quantity = cartProducts[index].quantity - 1;
       } else {
-        // Remove from local list immediately
         cartProducts.removeAt(index);
       }
     });
 
     try {
-      if (cartProducts.length > index && cartProducts[index].quantity > 1) {
-        // Update in database
+      if (!wasLastItem) {
         await cartDatabase.updateProduct(cartProducts[index]);
-        print('Quantity updated successfully in database');
       } else {
-        // Remove from database
         await cartDatabase.removeProduct(cartProduct.id);
-        print('Product removed successfully from database');
       }
     } catch (e) {
-      print('Error in _decrementQuantity: $e');
-      // Revert UI changes on error
+      // Revert: restore item at its original position, not appended at the end.
       setState(() {
-        if (cartProducts.length <= index) {
-          // Re-add the product if it was removed
-          cartProducts.add(cartProduct.copyWith(quantity: 1));
+        if (wasLastItem) {
+          cartProducts.insert(index, cartProduct.copyWith(quantity: 1));
         } else {
           cartProducts[index].quantity = cartProducts[index].quantity + 1;
         }
@@ -2542,7 +2590,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
           SnackBar(
             content: Text('Failed to update cart. Please try again.'.tr()),
             backgroundColor: AppThemeData.primary500,
-            duration: Duration(seconds: 3),
+            duration: const Duration(seconds: 3),
           ),
         );
       }
@@ -2602,8 +2650,10 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
     bool hasVariants = productModel.itemAttributes != null &&
         productModel.itemAttributes!.attributes!.isNotEmpty;
     bool hasAddOns = productModel.addOnsTitle.isNotEmpty;
+    bool hasProductAttributes = productModel.productAttributes.isNotEmpty &&
+        productModel.productAttributes.any((c) => c.options.any((o) => o.enabled));
 
-    if (hasVariants || hasAddOns) {
+    if (hasVariants || hasAddOns || hasProductAttributes) {
       showModalBottomSheet(
         context: context,
         isScrollControlled: true,
@@ -2730,12 +2780,12 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                   horizontal: 10, vertical: 6),
                               decoration: BoxDecoration(
                                 color: isDarkMode(context)
-                                    ? AppThemeData.grey800
-                                    : const Color(0xFFFFF8E1),
+                                    ? const Color(0xFF052E16)
+                                    : const Color(0xFFDCFCE7),
                                 borderRadius: BorderRadius.circular(10),
                                 border: Border.all(
-                                    color: const Color(0xFFFFB300)
-                                        .withOpacity(0.4)),
+                                    color: const Color(0xFF16A34A)
+                                        .withOpacity(0.35)),
                               ),
                               child: Row(
                                 mainAxisSize: MainAxisSize.min,
@@ -2743,7 +2793,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                   SvgPicture.asset(
                                     "assets/icons/ic_star.svg",
                                     colorFilter: const ColorFilter.mode(
-                                        Color(0xFFFFB300), BlendMode.srcIn),
+                                        Color(0xFF16A34A), BlendMode.srcIn),
                                     height: 14,
                                   ),
                                   const SizedBox(width: 4),
@@ -2752,7 +2802,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                     style: const TextStyle(
                                       fontSize: 14,
                                       fontWeight: FontWeight.bold,
-                                      color: Color(0xFFFFB300),
+                                      color: Color(0xFF15803D),
                                       fontFamily: AppThemeData.semiBold,
                                     ),
                                   ),
@@ -2947,51 +2997,17 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
         String cartVendorID = cartProducts[0].vendorID;
         if (cartVendorID != widget.vendorModel.id) {
           // Show a dialog to confirm if user wants to clear cart and add new product
-          bool? confirmClear = await showDialog<bool>(
-            context: context,
-            builder: (BuildContext context) {
-              return AlertDialog(
-                title: Text("Replace Cart Items?".tr()),
-                content: Text(
-                  "Your cart contains items from a different store. Would you like to clear your cart and add this item?"
-                      .tr(),
-                  style: TextStyle(
-                    fontFamily: AppThemeData.regular,
-                    fontSize: 14,
-                  ),
-                ),
-                actions: <Widget>[
-                  TextButton(
-                    child: Text(
-                      "Cancel".tr(),
-                      style: TextStyle(
-                        color: isDarkMode(context)
-                            ? AppThemeData.grey400
-                            : AppThemeData.grey700,
-                      ),
-                    ),
-                    onPressed: () {
-                      Navigator.of(context).pop(false);
-                    },
-                  ),
-                  TextButton(
-                    child: Text(
-                      "Clear & Add".tr(),
-                      style: TextStyle(
-                        color: AppThemeData.primary500,
-                      ),
-                    ),
-                    onPressed: () {
-                      Navigator.of(context).pop(true);
-                    },
-                  ),
-                ],
-              );
-            },
+          final confirmed = await AppDialog.showConfirm(
+            context,
+            title: 'Replace Cart Items?',
+            message: 'Your cart contains items from a different store. Would you like to clear your cart and add this item?',
+            confirmLabel: 'Clear & Add',
+            cancelLabel: 'Cancel',
+            destructive: true,
           );
 
           // If user cancels, return without adding to cart
-          if (confirmClear == null || !confirmClear) {
+          if (!confirmed) {
             return;
           }
 
@@ -3004,61 +3020,77 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
         }
       }
 
-      // Handle product variants if not already set
-      if (productModel.itemAttributes != null &&
-          productModel.itemAttributes!.attributes!.isNotEmpty &&
-          productModel.variant_info == null) {
-        List<String> selectedVariants = [];
-        for (var element in productModel.itemAttributes!.attributes!) {
-          if (element.attributeOptions!.isNotEmpty) {
-            selectedVariants.add(element.attributeOptions![0].toString());
+      // Handle product variants if not already set.
+      // Save originals so we can restore the shared productModel after use —
+      // mutating it directly would corrupt the displayed price in the listing.
+      final originalPrice = productModel.price;
+      final originalDisPrice = productModel.disPrice;
+      final originalVariantInfo = productModel.variant_info;
+
+      try {
+        if (productModel.itemAttributes != null &&
+            productModel.itemAttributes!.attributes!.isNotEmpty &&
+            productModel.variant_info == null) {
+          List<String> selectedVariants = [];
+          for (var element in productModel.itemAttributes!.attributes!) {
+            if (element.attributeOptions!.isNotEmpty) {
+              selectedVariants.add(element.attributeOptions![0].toString());
+            }
+          }
+
+          final matchingVariants = productModel.itemAttributes!.variants!
+              .where((element) =>
+                  element.variant_sku == selectedVariants.join('-'));
+
+          if (matchingVariants.isNotEmpty) {
+            final selectedVariant = matchingVariants.first;
+            productModel.price = selectedVariant.variant_price.toString();
+            productModel.disPrice = '0';
+            productModel.variant_info = VariantInfo(
+              variant_id: selectedVariant.variant_id,
+              variant_price: selectedVariant.variant_price,
+              variant_image: selectedVariant.variant_image,
+              variant_sku: selectedVariant.variant_sku,
+              variant_options: {},
+            );
           }
         }
 
-        final matchingVariants = productModel.itemAttributes!.variants!
-            .where((element) => element.variant_sku == selectedVariants.join('-'));
+        // Add product to cart
+        bool success =
+            await cartDatabase.addProduct(productModel, cartDatabase, true);
 
-        if (matchingVariants.isNotEmpty) {
-          final selectedVariant = matchingVariants.first;
-          productModel.price = selectedVariant.variant_price.toString();
-          productModel.disPrice = '0';
-          productModel.variant_info = VariantInfo(
-            variant_id: selectedVariant.variant_id,
-            variant_price: selectedVariant.variant_price,
-            variant_image: selectedVariant.variant_image,
-            variant_sku: selectedVariant.variant_sku,
-            variant_options: {},
+        if (success) {
+          final sp = await SharedPreferences.getInstance();
+          await sp.setString(
+            'service_perm_${productModel.id}',
+            jsonEncode({
+              'delivery': productModel.deliveryOption,
+              'dineaway': productModel.dineAway,
+              'dineIn': productModel.dineIn,
+              'takeaway': productModel.takeaway,
+            }),
           );
+          await sp.remove('dineaway_perm_${productModel.id}');
         }
+
+        if (!success) {
+          ShowToastDialog.showToast(
+              "Items from only one restaurant can be added to cart at a time"
+                  .tr());
+          return;
+        }
+
+        if (mounted) {
+          await _refreshCartData();
+        }
+      } finally {
+        // Always restore so the listing continues to show the original price.
+        productModel.price = originalPrice;
+        productModel.disPrice = originalDisPrice;
+        productModel.variant_info = originalVariantInfo;
       }
 
-      // Add product to cart
-      bool success = await cartDatabase.addProduct(productModel, cartDatabase, true);
-
-      if (success) {
-        final sp = await SharedPreferences.getInstance();
-        await sp.setString(
-          'service_perm_${productModel.id}',
-          jsonEncode({
-            'delivery': productModel.deliveryOption,
-            'dineaway': productModel.dineAway,
-            'dineIn': productModel.dineIn,
-            'takeaway': productModel.takeaway,
-          }),
-        );
-        await sp.remove('dineaway_perm_${productModel.id}');
-      }
-
-      if (!success) {
-        // If addProduct returned false, it means there's a different vendor conflict
-        ShowToastDialog.showToast(
-            "Items from only one restaurant can be added to cart at a time".tr());
-        return;
-      }
-
-      if (mounted) {
-        await _refreshCartData();
-      }
     } catch (e) {
       print("Error adding to cart: $e");
       ShowToastDialog.showToast(

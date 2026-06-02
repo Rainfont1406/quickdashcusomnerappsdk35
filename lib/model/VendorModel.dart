@@ -75,6 +75,13 @@ class VendorModel {
   String approvalMode;             // 'auto' | 'manual'
   List<BookingSlotModel> bookingSlots;
   String cuisineType;
+  bool deliveryEnabled;
+  bool dineAwayEnabled;
+  bool billPayEnabled;
+
+  // Vendor-controlled service pause flags
+  bool vendorDeliveryOpen;
+  bool vendorDineawayOpen;
   DeliveryChargeModel? deliveryCharge;
   List<WorkingHoursModel> workingHours;
   List<SpecialDiscountModel> specialDiscount;
@@ -129,6 +136,11 @@ class VendorModel {
       this.approvalMode = 'auto',
       this.bookingSlots = const [],
       this.cuisineType = '',
+      this.deliveryEnabled = true,
+      this.dineAwayEnabled = true,
+      this.billPayEnabled = false,
+      this.vendorDeliveryOpen = true,
+      this.vendorDineawayOpen = true,
       geoFireData,
       this.deliveryCharge})
       : geoFireData = geoFireData ??
@@ -224,6 +236,11 @@ class VendorModel {
           ? (parsedJson['bookingSlots'] as List).map((e) => BookingSlotModel.fromJson(e as Map<String, dynamic>)).toList()
           : [],
       cuisineType: parsedJson['cuisineType'] as String? ?? '',
+      deliveryEnabled: parsedJson['deliveryEnabled'] as bool? ?? true,
+      dineAwayEnabled: parsedJson['dineAwayEnabled'] as bool? ?? true,
+      billPayEnabled: parsedJson['billPayEnabled'] as bool? ?? false,
+      vendorDeliveryOpen: parsedJson['vendorDeliveryOpen'] as bool? ?? true,
+      vendorDineawayOpen: parsedJson['vendorDineawayOpen'] as bool? ?? true,
     );
   }
 
@@ -278,6 +295,11 @@ class VendorModel {
       'approvalMode': approvalMode,
       'bookingSlots': bookingSlots.map((e) => e.toJson()).toList(),
       'cuisineType': cuisineType,
+      'deliveryEnabled': deliveryEnabled,
+      'dineAwayEnabled': dineAwayEnabled,
+      'billPayEnabled': billPayEnabled,
+      'vendorDeliveryOpen': vendorDeliveryOpen,
+      'vendorDineawayOpen': vendorDineawayOpen,
     };
     if (deliveryCharge != null) {
       json.addAll({'deliveryCharge': deliveryCharge!.toJson()});

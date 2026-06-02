@@ -1044,7 +1044,8 @@ class FireStoreUtils {
         try {
           final data = doc.data();
           final storeStatus = data['store_status'] as String?;
-          if (storeStatus == null || storeStatus == 'approved') {
+          if ((storeStatus == null || storeStatus == 'approved') &&
+              data['isActive'] != false) {
             vendors.add(VendorModel.fromJson(data));
           }
         } catch (e) {
@@ -1062,7 +1063,8 @@ class FireStoreUtils {
       try {
         final data = document.data();
         final storeStatus = data['store_status'] as String?;
-        if (storeStatus == null || storeStatus == 'approved') {
+        if ((storeStatus == null || storeStatus == 'approved') &&
+            data['isActive'] != false) {
           vendors.add(VendorModel.fromJson(data));
         }
       } catch (e) {
@@ -1261,7 +1263,8 @@ class FireStoreUtils {
           try {
             final data = document.data() as Map<String, dynamic>;
             final storeStatus = data['store_status'] as String?;
-            if (storeStatus == null || storeStatus == 'approved') {
+            if ((storeStatus == null || storeStatus == 'approved') &&
+                data['isActive'] != false) {
               vendors.add(VendorModel.fromJson(data));
             }
           } catch (e) {

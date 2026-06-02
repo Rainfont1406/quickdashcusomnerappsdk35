@@ -6,7 +6,6 @@ import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
 import 'package:emartconsumer/ui/auth_screen/login_screen.dart';
 import 'package:emartconsumer/ui/container/ContainerScreen.dart';
-import 'package:firebase_auth/firebase_auth.dart' as auth;
 import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/model/SectionModel.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
@@ -78,10 +77,10 @@ class _ServiceListScreenState extends State<ServiceListScreen> {
       SectionModel firstSection = sectionList[0];
       AppThemeData.primary300 = Color(int.parse(firstSection.color!.replaceFirst("#", "0xff")));
 
-      if (auth.FirebaseAuth.instance.currentUser != null && MyAppState.currentUser != null) {
+      if (MyAppState.currentUser != null) {
         User? user = await FireStoreUtils.getCurrentUser(MyAppState.currentUser!.userID);
 
-        if (user!.role == USER_ROLE_CUSTOMER) {
+        if (user != null && user.role == USER_ROLE_CUSTOMER) {
           user.active = true;
           user.role = USER_ROLE_CUSTOMER;
           sectionConstantModel = firstSection;

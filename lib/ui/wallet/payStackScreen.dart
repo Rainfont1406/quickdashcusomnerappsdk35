@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:easy_localization/easy_localization.dart';
+import 'package:emartconsumer/services/app_dialog.dart';
 import 'package:emartconsumer/services/paystack_url_genrater.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:flutter/material.dart';
@@ -88,38 +89,16 @@ class _PayStackScreenState extends State<PayStackScreen> {
   }
 
   Future<void> _showMyDialog() async {
-    return showDialog<void>(
-      context: context,
-      barrierDismissible: true, // user must tap button!
-      builder: (BuildContext context) {
-        return AlertDialog(
-          title: const Text('Cancel Payment').tr(),
-          content: SingleChildScrollView(
-            child: Text("cancelPayment?").tr(),
-          ),
-          actions: <Widget>[
-            TextButton(
-              child: const Text(
-                'Cancel',
-                style: TextStyle(color: AppThemeData.primary500),
-              ).tr(),
-              onPressed: () {
-                Navigator.of(context).pop();
-                Navigator.of(context).pop(false);
-              },
-            ),
-            TextButton(
-              child: const Text(
-                'Continue',
-                style: TextStyle(color: Colors.green),
-              ).tr(),
-              onPressed: () {
-                Navigator.of(context).pop();
-              },
-            ),
-          ],
-        );
-      },
+    final confirmed = await AppDialog.showConfirm(
+      context,
+      title: 'Cancel Payment'.tr(),
+      message: 'cancelPayment?'.tr(),
+      confirmLabel: 'Cancel Payment'.tr(),
+      cancelLabel: 'Continue'.tr(),
+      destructive: true,
     );
+    if (confirmed) {
+      if (mounted) Navigator.of(context).pop(false);
+    }
   }
 }

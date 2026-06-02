@@ -30,12 +30,12 @@ class CurrencyModel {
     return CurrencyModel(
       code: parsedJson['code'] ?? '',
       decimal: parsedJson['decimal_degits'] ?? 0,
-      isactive: parsedJson['isActive'] ?? '',
+      isactive: parsedJson['isActive'] == true,
       id: parsedJson['id'] ?? '',
       name: parsedJson['name'] ?? '',
       rounding: parsedJson['rounding'] ?? 0,
       symbol: parsedJson['symbol'] ?? '',
-      symbolatright: parsedJson['symbolAtRight'] ?? '',
+      symbolatright: parsedJson['symbolAtRight'] == true,
     );
   }
 
