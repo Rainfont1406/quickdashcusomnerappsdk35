@@ -1,23 +1,21 @@
 import 'dart:io';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:country_code_picker/country_code_picker.dart';
+import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
-import 'package:emartconsumer/main.dart';
-import 'package:emartconsumer/model/User.dart';
-import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/helper.dart';
-import 'package:emartconsumer/services/notification_service.dart';
+import 'package:emartconsumer/services/msg91_service.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/auth_screen/auth_widgets.dart';
-import 'package:emartconsumer/ui/auth_screen/phone_number_screen.dart';
+import 'package:emartconsumer/ui/auth_screen/email_login_screen.dart';
+import 'package:emartconsumer/ui/auth_screen/otp_screen.dart';
 import 'package:emartconsumer/ui/auth_screen/signup_screen.dart';
-import 'package:emartconsumer/ui/forgot_password_screen/forgot_password_screen.dart';
-import 'package:emartconsumer/ui/location_permission_screen.dart';
-import 'package:emartconsumer/ui/service_list_screen.dart';
-import 'package:firebase_auth/firebase_auth.dart' as auth;
+import 'package:emartconsumer/utils/country_phone_length.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
-import 'package:get/get.dart';
+import 'package:flutter/services.dart';
 
 class LoginScreen extends StatefulWidget {
   // kept for backwards-compat; callers using startOnSignup:true will land on SignupScreen
@@ -29,11 +27,10 @@ class LoginScreen extends StatefulWidget {
 }
 
 class _LoginScreenState extends State<LoginScreen> {
-  final _loginEmailCtrl = TextEditingController();
-  final _loginPasswordCtrl = TextEditingController();
-  bool _loginPasswordVisible = true;
-  bool _showEmailForm = false;
-  bool _isBusy = false;
+  final _phoneCtrl = TextEditingController();
+  String _countryCode = '+91';
+  int _phoneMaxLength = 10;
+  bool _isSending = false;
 
   @override
   void initState() {
@@ -47,214 +44,178 @@ class _LoginScreenState extends State<LoginScreen> {
 
   @override
   void dispose() {
-    _loginEmailCtrl.dispose();
-    _loginPasswordCtrl.dispose();
+    _phoneCtrl.dispose();
     super.dispose();
   }
 
-  Future<void> _login() async {
-    final email = _loginEmailCtrl.text.trim();
-    final password = _loginPasswordCtrl.text.trim();
-    final emailError = validateEmail(email);
-    if (email.isEmpty || emailError != null) {
-      ShowToastDialog.showToast(emailError ?? 'Please enter a valid email address.'.tr);
+  void _onCountryCodeChanged(String dialCode) {
+    setState(() {
+      _countryCode = dialCode;
+      _phoneMaxLength = CountryPhoneLength.getMaxLength(dialCode);
+    });
+  }
+
+  Future<void> _sendOtp() async {
+    FocusScope.of(context).unfocus();
+    final phone = _phoneCtrl.text.trim();
+
+    if (phone.isEmpty) {
+      ShowToastDialog.showToast('Please enter your mobile number.'.tr());
       return;
     }
-    if (password.isEmpty) {
-      ShowToastDialog.showToast('Please enter your password.'.tr);
+    if (!CountryPhoneLength.isValidLength(_countryCode, phone)) {
+      ShowToastDialog.showToast(
+          CountryPhoneLength.getValidationMessage(_countryCode));
       return;
     }
-    if (_isBusy) return;
-    if (mounted) setState(() => _isBusy = true);
-    ShowToastDialog.showLoader('Verifying your account...');
+    if (_isSending) return;
+    if (mounted) setState(() => _isSending = true);
+
+    ShowToastDialog.showLoader('Checking your account...'.tr());
+    bool isNewUser;
     try {
-      final credential = await auth.FirebaseAuth.instance
-          .signInWithEmailAndPassword(email: email, password: password);
-      if (credential.user == null) {
-        ShowToastDialog.showToast('Login failed. Please try again.');
-        return;
-      }
-
-      User? userModel =
-          await FireStoreUtils.getUserProfile(credential.user!.uid);
-      if (userModel == null) {
-        ShowToastDialog.showToast(
-            'No account found. Please sign up to create an account.');
-        await auth.FirebaseAuth.instance.signOut();
-        return;
-      }
-
-      if (userModel.role != USER_ROLE_CUSTOMER) {
-        ShowToastDialog.showToast(
-            'This account is not registered as a customer. Please use the correct QuickDash app.');
-        await auth.FirebaseAuth.instance.signOut();
-        return;
-      }
-
-      if (userModel.active != true) {
-        ShowToastDialog.showToast(
-            'Your account is temporarily restricted. Please contact support.');
-        await auth.FirebaseAuth.instance.signOut();
-        return;
-      }
-
-      userModel.fcmToken = await NotificationService.getToken();
-      await FireStoreUtils.updateCurrentUser(userModel);
-      if (!mounted) return;
-      if (userModel.shippingAddress != null &&
-          userModel.shippingAddress!.isNotEmpty) {
-        if (userModel.shippingAddress!
-            .where((e) => e.isDefault == true)
-            .isNotEmpty) {
-          MyAppState.selectedPosotion = userModel.shippingAddress!
-              .where((e) => e.isDefault == true)
-              .single;
-        } else {
-          MyAppState.selectedPosotion = userModel.shippingAddress!.first;
-        }
-        pushAndRemoveUntil(context, ServiceListScreen());
-      } else {
-        pushAndRemoveUntil(context, LocationPermissionScreen());
-      }
-    } on auth.FirebaseAuthException catch (e) {
-      switch (e.code) {
-        case 'user-not-found':
-          ShowToastDialog.showToast(
-              'No account found with this email. Please sign up first.');
-          break;
-        case 'wrong-password':
-        case 'invalid-credential':
-          ShowToastDialog.showToast(
-              'Incorrect email or password. Please try again.');
-          break;
-        case 'invalid-email':
-          ShowToastDialog.showToast('Please enter a valid email address.');
-          break;
-        case 'user-disabled':
-          ShowToastDialog.showToast(
-              'Your account has been disabled. Please contact support.');
-          break;
-        case 'too-many-requests':
-          ShowToastDialog.showToast(
-              'Too many failed attempts. Please try again later or reset your password.');
-          break;
-        case 'network-request-failed':
-          ShowToastDialog.showToast(
-              'Unable to connect right now. Please try again.');
-          break;
-        default:
-          ShowToastDialog.showToast(e.message ?? 'Login failed. Please try again.');
-      }
+      final snap = await FirebaseFirestore.instance
+          .collection(USERS)
+          .where('phoneNumber', isEqualTo: phone)
+          .where('countryCode', isEqualTo: _countryCode)
+          .where('role', isEqualTo: USER_ROLE_CUSTOMER)
+          .get();
+      isNewUser = snap.docs.isEmpty;
     } catch (_) {
-      ShowToastDialog.showToast('Something went wrong. Please try again.');
-    } finally {
       ShowToastDialog.closeLoader();
-      if (mounted) setState(() => _isBusy = false);
+      if (mounted) setState(() => _isSending = false);
+      ShowToastDialog.showToast(
+          'Unable to connect right now. Please try again.'.tr());
+      return;
     }
+
+    if (!mounted) {
+      ShowToastDialog.closeLoader();
+      return;
+    }
+
+    if (isNewUser) {
+      ShowToastDialog.closeLoader();
+      if (mounted) setState(() => _isSending = false);
+      ShowToastDialog.showToast(
+          'No account found with this number. Please sign up first.'.tr());
+      return;
+    }
+
+    ShowToastDialog.closeLoader();
+
+    ShowToastDialog.showLoader('Sending verification code...'.tr());
+    final result = await Msg91Service.sendOtp(_countryCode, phone);
+    ShowToastDialog.closeLoader();
+
+    if (!mounted) return;
+    if (mounted) setState(() => _isSending = false);
+
+    if (!result.success) {
+      ShowToastDialog.showToast(result.message);
+      return;
+    }
+
+    ShowToastDialog.showToast(result.message);
+    push(context, OtpScreen(
+      countryCode: _countryCode,
+      phoneNumber: phone,
+      isSignup: false,
+    ));
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: isDarkMode(context)
-          ? AppThemeData.surfaceDark
-          : const Color(0xFFF5F6FA),
-      body: GestureDetector(
-        onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
-        child: Column(
-          children: [
-            AuthHeader(
-              title: 'Welcome Back to QuickDash'.tr,
-              tagline:
-                  'Live restaurant menus. Direct ordering. No paper menus. Zero waiting time dining with QuickDash.',
-              subtitle: 'Sign in to continue your seamless dining experience.'.tr,
-            ),
-            Expanded(
-              child: SingleChildScrollView(
-                padding: EdgeInsets.fromLTRB(
-                    24, 28, 24, Platform.isAndroid ? 24 : 40),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    AuthOutlinedButton(
-                      label: 'Continue with Phone Number'.tr,
-                      iconPath: 'assets/icons/ic_phone.svg',
-                      onTap: () => push(context, PhoneNumberScreen()),
-                    ),
-                    const SizedBox(height: 16),
-                    AuthOutlinedButton(
-                      label: 'Continue with Email Address'.tr,
-                      iconPath: 'assets/icons/ic_mail.svg',
-                      onTap: () {
-                        setState(() => _showEmailForm = !_showEmailForm);
-                      },
-                    ),
-                    AnimatedSize(
-                      duration: const Duration(milliseconds: 250),
-                      curve: Curves.easeInOut,
-                      child: _showEmailForm
-                          ? _buildEmailForm(context)
-                          : const SizedBox.shrink(),
-                    ),
-                  ],
+      backgroundColor: const Color(0xFF0D0620),
+      body: AuthBackground(
+        child: GestureDetector(
+          onTap: () => FocusScope.of(context).unfocus(),
+          child: Column(
+            children: [
+              AuthHeader(
+                title: 'Welcome Back'.tr(),
+                subtitle: 'Sign in to continue your seamless dining experience.'.tr(),
+              ),
+              Expanded(
+               child: AuthFormCard(
+                child: SingleChildScrollView(
+                  padding: EdgeInsets.fromLTRB(24, 28, 24, Platform.isAndroid ? 24 : 40),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      AuthFieldLabel(text: 'Phone Number'.tr()),
+                      AuthTextField(
+                        controller: _phoneCtrl,
+                        hint: 'Enter phone number'.tr(),
+                        keyboardType: const TextInputType.numberWithOptions(
+                            signed: true, decimal: true),
+                        textInputAction: TextInputAction.done,
+                        inputFormatters: [
+                          FilteringTextInputFormatter.digitsOnly,
+                          LengthLimitingTextInputFormatter(_phoneMaxLength),
+                        ],
+                        prefixWidget: CountryCodePicker(
+                          onChanged: (value) =>
+                              _onCountryCodeChanged(value.dialCode.toString()),
+                          dialogTextStyle: const TextStyle(
+                            color: AppThemeData.grey50,
+                            fontWeight: FontWeight.w500,
+                            fontFamily: AppThemeData.medium,
+                          ),
+                          dialogBackgroundColor: AppThemeData.grey800,
+                          initialSelection: 'IN',
+                          favorite: const ['+91'],
+                          comparator: (a, b) => b.name!.compareTo(a.name.toString()),
+                          textStyle: const TextStyle(
+                            fontSize: 14,
+                            color: Colors.white,
+                            fontFamily: AppThemeData.medium,
+                          ),
+                          searchDecoration: const InputDecoration(
+                            iconColor: AppThemeData.grey50,
+                          ),
+                          searchStyle: const TextStyle(
+                            color: AppThemeData.grey50,
+                            fontWeight: FontWeight.w500,
+                            fontFamily: AppThemeData.medium,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 24),
+                      AuthPrimaryButton(
+                        label: _isSending ? 'Sending...'.tr() : 'Get OTP'.tr(),
+                        onTap: _isSending ? () {} : _sendOtp,
+                      ),
+                      const SizedBox(height: 28),
+                      const AuthOrDivider(),
+                      const SizedBox(height: 20),
+                      Center(
+                        child: GestureDetector(
+                          onTap: () => push(context, const EmailLoginScreen()),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 8),
+                            child: Text(
+                              'Login with Email'.tr(),
+                              style: TextStyle(
+                                color: Colors.white.withValues(alpha: 0.88),
+                                fontFamily: AppThemeData.semiBold,
+                                fontSize: 15,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
             _buildFooter(context),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildEmailForm(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        const SizedBox(height: 24),
-        const AuthOrDivider(),
-        const SizedBox(height: 24),
-        AuthFieldLabel(text: 'Email Address'.tr),
-        AuthTextField(
-          controller: _loginEmailCtrl,
-          hint: 'Enter email address'.tr,
-          iconPath: 'assets/icons/ic_mail.svg',
-          keyboardType: TextInputType.emailAddress,
-          textCapitalization: TextCapitalization.none,
-        ),
-        const SizedBox(height: 20),
-        AuthFieldLabel(text: 'Password'.tr),
-        AuthTextField(
-          controller: _loginPasswordCtrl,
-          hint: 'Enter password'.tr,
-          iconPath: 'assets/icons/ic_lock.svg',
-          obscureText: _loginPasswordVisible,
-          showVisibility: true,
-          isVisible: _loginPasswordVisible,
-          onToggle: () =>
-              setState(() => _loginPasswordVisible = !_loginPasswordVisible),
-        ),
-        Align(
-          alignment: Alignment.centerRight,
-          child: GestureDetector(
-            onTap: () => push(context, ForgotPasswordScreen()),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 10),
-              child: Text(
-                'Forgot Password?'.tr,
-                style: const TextStyle(
-                  color: AppThemeData.secondary300,
-                  fontSize: 13,
-                  fontFamily: AppThemeData.medium,
-                ),
-              ),
-            ),
+            ],
           ),
         ),
-        const SizedBox(height: 4),
-        AuthPrimaryButton(label: 'Login'.tr, onTap: _login),
-        const SizedBox(height: 8),
-      ],
+      ),
     );
   }
 
@@ -269,11 +230,9 @@ class _LoginScreenState extends State<LoginScreen> {
           TextSpan(
             children: [
               TextSpan(
-                text: "Don't have an account?  ".tr,
+                text: "Don't have an account?  ".tr(),
                 style: TextStyle(
-                  color: isDarkMode(context)
-                      ? AppThemeData.grey400
-                      : AppThemeData.grey500,
+                  color: Colors.white.withValues(alpha: 0.65),
                   fontFamily: AppThemeData.regular,
                   fontSize: 14,
                 ),
@@ -281,9 +240,9 @@ class _LoginScreenState extends State<LoginScreen> {
               TextSpan(
                 recognizer: TapGestureRecognizer()
                   ..onTap = () => push(context, const SignupScreen()),
-                text: 'Create one'.tr,
+                text: 'Create one'.tr(),
                 style: const TextStyle(
-                  color: AppThemeData.primary500,
+                  color: AppThemeData.primary400,
                   fontFamily: AppThemeData.bold,
                   fontSize: 14,
                 ),

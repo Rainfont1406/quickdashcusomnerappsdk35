@@ -36,6 +36,7 @@ class CheckoutScreen extends StatefulWidget {
   final Map<String, dynamic>? specialDiscountMap;
   final Timestamp? scheduleTime;
   final AddressModel? address;
+  final String? orderType; // "Takeaway" | "Dining" | "Bill Pay" — null for delivery
 
   const CheckoutScreen({
     Key? key,
@@ -59,6 +60,7 @@ class CheckoutScreen extends StatefulWidget {
     this.size,
     this.scheduleTime,
     this.address,
+    this.orderType,
   }) : super(key: key);
 
   @override
@@ -103,13 +105,63 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   void initState() {
     super.initState();
     if (widget.isPaymentDone) {
-      // Payment already collected — place order immediately
-      setState(() => _isPlacingOrder = true);
-      WidgetsBinding.instance.addPostFrameCallback((_) => _placeOrder());
+      // Payment already collected — validate address then place order
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        final bool isTakeaway = widget.take_away ?? false;
+        if (!isTakeaway && widget.address == null) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text('Delivery address is missing. Cannot place order.'.tr()),
+              backgroundColor: AppThemeData.error500,
+              behavior: SnackBarBehavior.floating,
+            ));
+          }
+          return;
+        }
+        if (mounted) setState(() => _isPlacingOrder = true);
+        await _placeOrder();
+      });
     }
   }
 
   // ── UI helpers ──────────────────────────────────────────────────────────────
+
+  // Order-type pill helpers — aware of Dining / Bill Pay sub-types
+  Color _pillColor(bool isTakeaway) {
+    if (!isTakeaway) return AppThemeData.primary500; // delivery
+    switch (widget.orderType) {
+      case 'Dining':
+        return Colors.purple;
+      case 'Bill Pay':
+        return Colors.orange;
+      default:
+        return AppThemeData.info500; // Takeaway
+    }
+  }
+
+  IconData _pillIcon(bool isTakeaway) {
+    if (!isTakeaway) return Icons.delivery_dining_rounded;
+    switch (widget.orderType) {
+      case 'Dining':
+        return Icons.restaurant_rounded;
+      case 'Bill Pay':
+        return Icons.receipt_long_rounded;
+      default:
+        return Icons.shopping_bag_outlined; // Takeaway
+    }
+  }
+
+  String _pillLabel(bool isTakeaway) {
+    if (!isTakeaway) return 'Delivery Order'.tr();
+    switch (widget.orderType) {
+      case 'Dining':
+        return 'Dine-In Order'.tr();
+      case 'Bill Pay':
+        return 'Bill Pay'.tr();
+      default:
+        return 'Takeaway Order'.tr();
+    }
+  }
 
   IconData _paymentIcon(String type) {
     switch (type.toLowerCase()) {
@@ -170,6 +222,58 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
             child: ListView(
               padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
               children: [
+                // ── Payment verified banner (online payments only) ───────────
+                if (widget.paymentType != 'cod') ...[
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: Colors.green.shade50,
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: Colors.green.shade200),
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(7),
+                          decoration: BoxDecoration(
+                            color: Colors.green.shade100,
+                            shape: BoxShape.circle,
+                          ),
+                          child: Icon(Icons.verified_rounded,
+                              color: Colors.green.shade700, size: 18),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Payment Successful'.tr(),
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontFamily: AppThemeData.semiBold,
+                                  color: Colors.green.shade700,
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                'Your payment is verified. Review your order and place it.'
+                                    .tr(),
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: Colors.green.shade600,
+                                  height: 1.3,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                ],
+
                 // ── Order type pill ──────────────────────────────────────────
                 Align(
                   alignment: Alignment.centerLeft,
@@ -178,30 +282,22 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                     padding:
                         const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
                     decoration: BoxDecoration(
-                      color: isTakeaway
-                          ? AppThemeData.info500.withOpacity(0.1)
-                          : AppThemeData.primary500.withOpacity(0.1),
+                      color: _pillColor(isTakeaway).withOpacity(0.1),
                       borderRadius: BorderRadius.circular(20),
                     ),
                     child: Row(mainAxisSize: MainAxisSize.min, children: [
                       Icon(
-                        isTakeaway
-                            ? Icons.shopping_bag_outlined
-                            : Icons.delivery_dining_rounded,
+                        _pillIcon(isTakeaway),
                         size: 14,
-                        color: isTakeaway
-                            ? AppThemeData.info500
-                            : AppThemeData.primary500,
+                        color: _pillColor(isTakeaway),
                       ),
                       const SizedBox(width: 6),
                       Text(
-                        isTakeaway ? 'Takeaway Order'.tr() : 'Delivery Order'.tr(),
+                        _pillLabel(isTakeaway),
                         style: TextStyle(
                           fontSize: 12,
                           fontFamily: AppThemeData.semiBold,
-                          color: isTakeaway
-                              ? AppThemeData.info500
-                              : AppThemeData.primary500,
+                          color: _pillColor(isTakeaway),
                         ),
                       ),
                     ]),
@@ -317,7 +413,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                               ),
                               const SizedBox(height: 4),
                               Text(
-                                DateFormat("EEEE, MMM d 'at' hh:mm a")
+                                DateFormat("EEE, d MMM 'at' hh:mm a")
                                     .format(widget.scheduleTime!.toDate()),
                                 style: TextStyle(
                                   fontSize: 14,
@@ -548,8 +644,138 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     );
   }
 
+  // Returns true if the order can proceed, false if it should be blocked.
+  Future<bool> _validateAndConfirmDelivery() async {
+    final bool isTakeaway = widget.take_away ?? false;
+    if (isTakeaway) return true; // takeaway needs no delivery address
+
+    // ── Case 1: address is null ──────────────────────────────────────────────
+    if (widget.address == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Please add a delivery address to continue.'.tr()),
+          backgroundColor: AppThemeData.error500,
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+      return false;
+    }
+
+    // ── Case 2: confirm the location with the user ───────────────────────────
+    final bool dark = isDarkMode(context);
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: dark ? AppThemeData.darkBgSecondary : Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(
+          children: [
+            Icon(Icons.location_on_rounded,
+                color: AppThemeData.primary500, size: 22),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'Confirm Delivery Location'.tr(),
+                style: TextStyle(
+                  fontSize: 16,
+                  fontFamily: AppThemeData.semiBold,
+                  color: dark ? Colors.white : Colors.black,
+                ),
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Your order will be delivered to:'.tr(),
+              style: TextStyle(
+                fontSize: 13,
+                color: dark ? AppThemeData.grey400 : AppThemeData.grey500,
+              ),
+            ),
+            const SizedBox(height: 10),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: dark
+                    ? AppThemeData.darkBgTertiary
+                    : AppThemeData.grey100,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                  color: dark
+                      ? AppThemeData.darkBorderPrimary
+                      : AppThemeData.grey200,
+                ),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(Icons.pin_drop_rounded,
+                      size: 16, color: AppThemeData.primary500),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      widget.address!.getFullAddress(),
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: dark ? Colors.white : Colors.black87,
+                        height: 1.4,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              'Is this the correct delivery address?'.tr(),
+              style: TextStyle(
+                fontSize: 13,
+                color: dark ? AppThemeData.grey400 : AppThemeData.grey600,
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text(
+              'Change Address'.tr(),
+              style: TextStyle(
+                color: dark ? AppThemeData.grey400 : AppThemeData.grey600,
+                fontFamily: AppThemeData.medium,
+              ),
+            ),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppThemeData.primary500,
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10)),
+              elevation: 0,
+            ),
+            child: Text(
+              'Confirm'.tr(),
+              style: const TextStyle(
+                color: Colors.white,
+                fontFamily: AppThemeData.semiBold,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    return confirmed == true;
+  }
+
   Widget _buildCTA(bool dark) {
-    final bool canPress = !widget.isPaymentDone && !_isPlacingOrder;
+    final bool canPress = !_isPlacingOrder;
 
     return Container(
       padding: EdgeInsets.fromLTRB(
@@ -570,6 +796,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         child: ElevatedButton(
           onPressed: canPress
               ? () async {
+                  if (!await _validateAndConfirmDelivery()) return;
                   setState(() => _isPlacingOrder = true);
                   await _placeOrder();
                 }
@@ -603,9 +830,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                   ],
                 )
               : Text(
-                  widget.isPaymentDone
-                      ? 'Confirming Order...'.tr()
-                      : 'Confirm & Place Order'.tr(),
+                  widget.paymentType == 'cod'
+                      ? 'Confirm & Place Order'.tr()
+                      : 'Place Order'.tr(),
                   style: const TextStyle(
                     color: Colors.white,
                     fontSize: 15,
@@ -633,91 +860,156 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
     await showProgress('Please wait...'.tr(), false);
 
-    final VendorModel vendorModel = await _fireStoreUtils
-        .getVendorByVendorID(tempProducts.first.vendorID)
-        .whenComplete(() => _setPrefData());
+    try {
+      final VendorModel vendorModel = await _fireStoreUtils
+          .getVendorByVendorID(tempProducts.first.vendorID)
+          .whenComplete(() => _setPrefData());
 
-    final OrderModel orderModel = OrderModel(
-      id: widget.id,
-      address: widget.address,
-      author: MyAppState.currentUser,
-      authorID: MyAppState.currentUser!.userID,
-      createdAt: Timestamp.now(),
-      products: tempProducts,
-      status: ORDER_STATUS_PLACED,
-      vendor: vendorModel,
-      vendorID: tempProducts.first.vendorID,
-      discount: widget.discount,
-      couponCode: widget.couponCode,
-      couponId: widget.couponId,
-      notes: widget.notes,
-      payment_method: widget.paymentType,
-      tipValue: widget.tipValue,
-      sectionId: sectionConstantModel!.id,
-      adminCommission: (widget.take_away ?? false)
-          ? sectionConstantModel!.adminCommision!.takeawayCommission.toString()
-          : sectionConstantModel!.adminCommision!.commission.toString(),
-      adminCommissionType: sectionConstantModel!.adminCommision!.type,
-      taxModel: widget.taxModel,
-      takeAway: widget.take_away,
-      deliveryCharge: widget.deliveryCharge,
-      specialDiscount: widget.specialDiscountMap,
-      scheduleTime: widget.scheduleTime,
-    );
+      // ── Live service-type gate ───────────────────────────────────────────
+      final bool _isTakeawayOrder = widget.take_away ?? false;
+      String? _serviceBlockReason;
 
-    final OrderModel placedOrder =
-        await _fireStoreUtils.placeOrder(orderModel);
+      if (!_isTakeawayOrder) {
+        // Layer 0 — section-wide admin gate (the Delivery on/off toggle).
+        // isDeliveryActiveNotifier is kept live by ContainerScreen's
+        // Firestore listener for the whole session, so this reflects the
+        // current state even if the toggle changed after this screen
+        // was already open — this is the backstop catching any browsing
+        // path that reached checkout despite the view-level gates.
+        if (!isDeliveryActiveNotifier.value) {
+          _serviceBlockReason = deliveryOffMessageNotifier.value.trim().isNotEmpty
+              ? deliveryOffMessageNotifier.value
+              : "We're not delivering right now. Please check back soon!".tr();
+        // Layer 1 — admin gate
+        } else if (!vendorModel.deliveryEnabled) {
+          _serviceBlockReason = 'Delivery is not available at this restaurant.'.tr();
+        // Layer 2 — vendor pause
+        } else if (!vendorModel.vendorDeliveryOpen) {
+          _serviceBlockReason = 'This restaurant has temporarily paused delivery orders.'.tr();
+        }
+      } else {
+        // Layer 1 — admin gate (top-level dineaway)
+        if (!vendorModel.dineAwayEnabled) {
+          _serviceBlockReason = 'Dine-away service is not available at this restaurant.'.tr();
+        // Layer 1 — admin gate (sub-type)
+        } else if (widget.orderType == 'Takeaway' && !vendorModel.takeawayEnabled) {
+          _serviceBlockReason = 'Takeaway service is not available at this restaurant.'.tr();
+        } else if (widget.orderType == 'Dining' && !vendorModel.diningEnabled) {
+          _serviceBlockReason = 'Dining service is not available at this restaurant.'.tr();
+        // Layer 2 — vendor pause
+        } else if (!vendorModel.vendorDineawayOpen) {
+          _serviceBlockReason = 'This restaurant has temporarily paused dine-away orders.'.tr();
+        }
+      }
 
-    // Decrement product stock
-    for (final cartProduct in tempProducts) {
-      await FireStoreUtils()
-          .getProductByID(cartProduct.id.split('~').first)
-          .then((value) async {
-        final ProductModel productModel = value;
-        if (cartProduct.variant_info != null) {
-          for (int j = 0;
-              j < (productModel.itemAttributes?.variants?.length ?? 0);
-              j++) {
-            if (productModel.itemAttributes!.variants![j].variant_id ==
-                cartProduct.id.split('~').last) {
-              if (productModel.itemAttributes!.variants![j].variant_quantity !=
-                  '-1') {
-                productModel.itemAttributes!.variants![j].variant_quantity =
-                    (int.parse(productModel
-                                .itemAttributes!
-                                .variants![j]
-                                .variant_quantity
-                                .toString()) -
+      if (_serviceBlockReason != null) {
+        await hideProgress();
+        if (mounted) {
+          setState(() => _isPlacingOrder = false);
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(_serviceBlockReason!),
+            backgroundColor: AppThemeData.error500,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10)),
+            duration: const Duration(seconds: 4),
+          ));
+        }
+        return;
+      }
+      // ────────────────────────────────────────────────────────────────────
+
+      final OrderModel orderModel = OrderModel(
+        id: widget.id,
+        address: widget.address,
+        author: MyAppState.currentUser,
+        authorID: MyAppState.currentUser?.userID ?? '',
+        createdAt: Timestamp.now(),
+        products: tempProducts,
+        status: widget.orderType == 'Bill Pay'
+            ? ORDER_STATUS_COMPLETED
+            : ORDER_STATUS_PLACED,
+        vendor: vendorModel,
+        vendorID: tempProducts.first.vendorID,
+        discount: widget.discount,
+        couponCode: widget.couponCode,
+        couponId: widget.couponId,
+        notes: widget.notes,
+        payment_method: widget.paymentType,
+        tipValue: widget.tipValue,
+        sectionId: sectionConstantModel?.id ?? '',
+        adminCommission: (widget.take_away ?? false)
+            ? (sectionConstantModel?.adminCommision?.takeawayCommission ?? 0).toString()
+            : (sectionConstantModel?.adminCommision?.commission ?? 0).toString(),
+        adminCommissionType: sectionConstantModel?.adminCommision?.type,
+        taxModel: widget.taxModel,
+        takeAway: widget.take_away,
+        deliveryCharge: widget.deliveryCharge,
+        specialDiscount: widget.specialDiscountMap,
+        scheduleTime: widget.scheduleTime,
+      );
+
+      final OrderModel placedOrder =
+          await _fireStoreUtils.placeOrder(orderModel);
+
+      // Decrement product stock — best-effort, never fails the order
+      await Future.wait(tempProducts.map((cartProduct) async {
+        try {
+          final productModel = await FireStoreUtils()
+              .getProductByID(cartProduct.id.split('~').first);
+          if (cartProduct.variant_info != null &&
+              productModel.itemAttributes?.variants != null) {
+            for (final v in productModel.itemAttributes!.variants!) {
+              if (v.variant_id == cartProduct.id.split('~').last &&
+                  v.variant_quantity != '-1') {
+                v.variant_quantity =
+                    (int.parse(v.variant_quantity.toString()) -
                             cartProduct.quantity)
                         .toString();
               }
             }
+          } else if (productModel.quantity != -1) {
+            productModel.quantity -= cartProduct.quantity;
           }
-        } else {
-          if (productModel.quantity != -1) {
-            productModel.quantity =
-                productModel.quantity - cartProduct.quantity;
-          }
+          await FireStoreUtils.updateProduct(productModel);
+        } catch (stockErr) {
+          debugPrint('Stock update error for ${cartProduct.id}: $stockErr');
         }
-        await FireStoreUtils.updateProduct(productModel);
-      });
+      }));
+
+      await hideProgress();
+
+      if (!mounted) return;
+
+      showModalBottomSheet(
+        isScrollControlled: true,
+        isDismissible: false,
+        context: context,
+        enableDrag: false,
+        backgroundColor: Colors.transparent,
+        builder: (context) => ClipRRect(
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+          child: PlaceOrderScreen(
+            orderModel: placedOrder,
+            isPaymentVerified: widget.paymentType != 'cod',
+          ),
+        ),
+      );
+    } catch (e) {
+      await hideProgress();
+      if (mounted) {
+        setState(() => _isPlacingOrder = false);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Failed to place order. Please try again.'.tr()),
+          backgroundColor: AppThemeData.error500,
+          behavior: SnackBarBehavior.floating,
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          duration: const Duration(seconds: 4),
+        ));
+      }
+      debugPrint('_placeOrder error: $e');
     }
-
-    await hideProgress();
-
-    if (!mounted) return;
-
-    showModalBottomSheet(
-      isScrollControlled: true,
-      isDismissible: false,
-      context: context,
-      enableDrag: false,
-      backgroundColor: Colors.transparent,
-      builder: (context) => ClipRRect(
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
-        child: PlaceOrderScreen(orderModel: placedOrder),
-      ),
-    );
   }
 }
 

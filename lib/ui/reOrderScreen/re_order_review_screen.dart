@@ -24,6 +24,7 @@ class _ProductRow {
   final ProductModel? current;
   final String? reason; // null = available
   final bool priceChanged;
+  final String? newPrice; // for variant products: updated price from Firestore
   bool excluded = false; // user dismissed this unavailable item from view
 
   _ProductRow({
@@ -31,12 +32,15 @@ class _ProductRow {
     this.current,
     this.reason,
     this.priceChanged = false,
+    this.newPrice,
   });
 
   bool get isAvailable => reason == null;
 
   String get displayPrice =>
-      (priceChanged && current != null) ? current!.price : original.price;
+      (priceChanged && current != null)
+          ? (newPrice ?? current!.price)
+          : original.price;
 
   double get lineTotal {
     final base = double.tryParse(displayPrice) ?? 0;
@@ -98,7 +102,7 @@ class _ReOrderReviewScreenState extends State<ReOrderReviewScreen>
 
     final results = await Future.wait(futures);
     _vendor = results[0] as VendorModel?;
-    if (_vendor != null && !_vendor!.reststatus && !_vendor!.isVendorOnline) {
+    if (_vendor != null && !_vendor!.isAcceptingOrders) {
       _vendorClosed = true;
     }
 
@@ -108,13 +112,49 @@ class _ReOrderReviewScreenState extends State<ReOrderReviewScreen>
       final fresh = results[i + 1] as ProductModel?;
       String? reason;
       bool priceChanged = false;
+      // Declared outside the if/else so it stays in scope for _ProductRow below.
+      String? newVariantPrice;
 
       if (fresh == null || !fresh.publish) {
         reason = 'No longer available'.tr();
       } else {
-        final oldP = double.tryParse(cp.price) ?? 0;
-        final newP = double.tryParse(fresh.price) ?? 0;
-        if ((oldP - newP).abs() > 0.001) priceChanged = true;
+        // variant_options is always stored as {} (empty map) in the cart, so
+        // checking variant_options.isNotEmpty always returns false and wrongly
+        // treats every variant product as a plain product. Use variant_sku
+        // instead — it IS stored correctly and uniquely identifies the selected
+        // variant combination (e.g. "M-Red").
+        final vi = _getVariantInfo(cp.variant_info);
+        final sku = vi?.variant_sku ?? '';
+
+        if (vi != null) {
+          // Variant product — never compare against the base product price.
+          // variant_sku may be empty if the vendor didn't set SKUs, so guard.
+          if (sku.isNotEmpty) {
+            final freshVariants = fresh.itemAttributes?.variants;
+            if (freshVariants != null && freshVariants.isNotEmpty) {
+              final freshVariant = freshVariants
+                  .where((v) => v.variant_sku == sku)
+                  .firstOrNull;
+              if (freshVariant != null) {
+                final oldP = double.tryParse(cp.price) ?? 0;
+                final newP = double.tryParse(freshVariant.variant_price ?? '0') ?? 0;
+                if ((oldP - newP).abs() > 0.001) {
+                  priceChanged = true;
+                  newVariantPrice = freshVariant.variant_price;
+                }
+              }
+            }
+          }
+          // If sku is empty or variant not found in fresh data, we cannot
+          // determine whether the price changed — keep priceChanged=false and
+          // reuse the original order price rather than falling back to the
+          // wrong base product price.
+        } else {
+          // Plain product (no variant selected) — safe to compare base prices.
+          final oldP = double.tryParse(cp.price) ?? 0;
+          final newP = double.tryParse(fresh.price) ?? 0;
+          if ((oldP - newP).abs() > 0.001) priceChanged = true;
+        }
       }
 
       rows.add(_ProductRow(
@@ -122,6 +162,7 @@ class _ReOrderReviewScreenState extends State<ReOrderReviewScreen>
         current: fresh,
         reason: reason,
         priceChanged: priceChanged,
+        newPrice: newVariantPrice,
       ));
     }
 
@@ -158,8 +199,10 @@ class _ReOrderReviewScreenState extends State<ReOrderReviewScreen>
           category_id: row.original.category_id,
           name: row.original.name,
           photo: row.original.photo,
-          price: row.current!.price,
-          discountPrice: row.current!.disPrice ?? '',
+          // For variant products newPrice is the updated variant price;
+          // for non-variant products fall back to fresh base price.
+          price: row.newPrice ?? row.current!.price,
+          discountPrice: row.newPrice != null ? '' : (row.current!.disPrice ?? ''),
           vendorID: row.original.vendorID,
           quantity: row.original.quantity,
           extras_price: row.original.extras_price,
@@ -218,17 +261,17 @@ class _ReOrderReviewScreenState extends State<ReOrderReviewScreen>
     return [];
   }
 
-  List<MapEntry<String, dynamic>> _parseVariants(dynamic raw) {
-    VariantInfo? vi;
-    if (raw is VariantInfo) {
-      vi = raw;
-    } else if (raw is Map<String, dynamic>) {
-      vi = VariantInfo.fromJson(raw);
-    } else if (raw is String && raw.isNotEmpty && raw != 'null') {
-      try {
-        vi = VariantInfo.fromJson(jsonDecode(raw));
-      } catch (_) {}
+  VariantInfo? _getVariantInfo(dynamic raw) {
+    if (raw is VariantInfo) return raw;
+    if (raw is Map<String, dynamic>) return VariantInfo.fromJson(raw);
+    if (raw is String && raw.isNotEmpty && raw != 'null') {
+      try { return VariantInfo.fromJson(jsonDecode(raw)); } catch (_) {}
     }
+    return null;
+  }
+
+  List<MapEntry<String, dynamic>> _parseVariants(dynamic raw) {
+    final vi = _getVariantInfo(raw);
     return (vi?.variant_options?.isNotEmpty ?? false)
         ? vi!.variant_options!.entries.toList()
         : [];
@@ -819,7 +862,10 @@ class _ReOrderReviewScreenState extends State<ReOrderReviewScreen>
           ),
           const SizedBox(width: 6),
           Text(
-            amountShow(amount: row.current!.price),
+            // displayPrice uses newPrice (updated variant price) for variant
+            // products and current!.price (fresh base price) for plain ones —
+            // never raw current!.price which is always the base product price.
+            amountShow(amount: row.displayPrice),
             style: AppTypography.labelMedium.copyWith(
               fontWeight: FontWeight.w700,
               color: AppThemeData.primary500,

@@ -45,10 +45,11 @@ class _DineInRestaurantDetailsScreenState
   Timer? _headerTimer;
   int _headerPage = 0;
 
-  // vendorMenuPhotos[0..n] = menu/ambience photos set by vendor in AddDineIn
+  // vendorMenuPhotos[0..n] = menu/ambience photos set by vendor in AddDineIn.
+  // Entries may be a legacy URL string or a {original, cover} map.
   List<String> get _menuPhotos =>
       widget.vendorModel.vendorMenuPhotos
-          .map((e) => e.toString())
+          .map((e) => VendorModel.coverPhotoUrl(e))
           .where((s) => s.isNotEmpty && s != 'null')
           .toList();
 

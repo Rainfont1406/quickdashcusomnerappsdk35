@@ -25,13 +25,8 @@ class AddAddressScreen extends StatefulWidget {
 }
 
 class _AddAddressScreenState extends State<AddAddressScreen> {
-  final TextEditingController _address = TextEditingController();
-  final TextEditingController _landmark = TextEditingController();
+  // Only locality is needed here — house/flat details are collected at checkout
   final TextEditingController _locality = TextEditingController();
-
-  final _focusAddress = FocusNode();
-  final _focusLocality = FocusNode();
-  final _focusLandmark = FocusNode();
 
   final List<_LabelOption> _labels = [
     _LabelOption(label: 'Home', icon: Icons.home_rounded),
@@ -53,12 +48,7 @@ class _AddAddressScreenState extends State<AddAddressScreen> {
 
   @override
   void dispose() {
-    _address.dispose();
-    _landmark.dispose();
     _locality.dispose();
-    _focusAddress.dispose();
-    _focusLocality.dispose();
-    _focusLandmark.dispose();
     super.dispose();
   }
 
@@ -68,8 +58,6 @@ class _AddAddressScreenState extends State<AddAddressScreen> {
     }
     if (widget.index != null) {
       _addressModel = _shippingAddress[widget.index!];
-      _address.text = _addressModel.address.toString();
-      _landmark.text = _addressModel.landmark.toString();
       _locality.text = _addressModel.locality.toString();
       _selectedSaveAs = _addressModel.addressAs.toString();
       _userLocation = _addressModel.location;
@@ -85,7 +73,8 @@ class _AddAddressScreenState extends State<AddAddressScreen> {
         if (value != null) {
           setState(() {
             _locality.text = value.displayName.toString();
-            _userLocation = UserLocation(latitude: value.lat, longitude: value.lon);
+            _userLocation =
+                UserLocation(latitude: value.lat, longitude: value.lon);
           });
         }
       });
@@ -132,19 +121,9 @@ class _AddAddressScreenState extends State<AddAddressScreen> {
       ));
       return;
     }
-    if (_address.text.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('Please enter flat / house / floor / building'.tr()),
-        backgroundColor: AppThemeData.primary500,
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        duration: const Duration(seconds: 2),
-      ));
-      return;
-    }
     if (_locality.text.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('Please enter area / sector / locality'.tr()),
+        content: Text('Please select your area on the map'.tr()),
         backgroundColor: AppThemeData.primary500,
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
@@ -157,9 +136,7 @@ class _AddAddressScreenState extends State<AddAddressScreen> {
       _addressModel
         ..location = _userLocation
         ..addressAs = _selectedSaveAs
-        ..locality = _locality.text
-        ..address = _address.text
-        ..landmark = _landmark.text;
+        ..locality = _locality.text;
       _shippingAddress
         ..removeAt(widget.index!)
         ..insert(widget.index!, _addressModel);
@@ -169,14 +146,14 @@ class _AddAddressScreenState extends State<AddAddressScreen> {
         ..location = _userLocation
         ..addressAs = _selectedSaveAs
         ..locality = _locality.text
-        ..address = _address.text
-        ..landmark = _landmark.text
         ..isDefault = false;
       _shippingAddress.add(_addressModel);
     }
     setState(() {});
-    MyAppState.currentUser!.shippingAddress = _shippingAddress;
-    await FireStoreUtils.updateCurrentUser(MyAppState.currentUser!);
+    if (MyAppState.currentUser != null) {
+      MyAppState.currentUser!.shippingAddress = _shippingAddress;
+      await FireStoreUtils.updateCurrentUser(MyAppState.currentUser!);
+    }
     ShowToastDialog.closeLoader();
     if (mounted) Navigator.pop(context, true);
   }
@@ -187,14 +164,18 @@ class _AddAddressScreenState extends State<AddAddressScreen> {
     final isEditing = widget.index != null;
 
     return Scaffold(
-      backgroundColor: dark ? AppThemeData.surfaceDark : const Color(0xFFF2F4F8),
+      backgroundColor:
+          dark ? AppThemeData.surfaceDark : const Color(0xFFF2F4F8),
       appBar: AppBar(
         backgroundColor: dark ? AppThemeData.darkBgSecondary : Colors.white,
         elevation: 0,
         scrolledUnderElevation: 0,
         leading: IconButton(
-          icon: Icon(Icons.arrow_back_ios_new_rounded, size: 20,
-              color: dark ? AppThemeData.darkTextPrimary : AppThemeData.neutral900),
+          icon: Icon(Icons.arrow_back_ios_new_rounded,
+              size: 20,
+              color: dark
+                  ? AppThemeData.darkTextPrimary
+                  : AppThemeData.neutral900),
           onPressed: () => Navigator.pop(context),
         ),
         title: Text(
@@ -202,14 +183,19 @@ class _AddAddressScreenState extends State<AddAddressScreen> {
           style: TextStyle(
             fontSize: 18,
             fontFamily: AppThemeData.semiBold,
-            color: dark ? AppThemeData.darkTextPrimary : AppThemeData.neutral900,
+            color:
+                dark ? AppThemeData.darkTextPrimary : AppThemeData.neutral900,
           ),
         ),
         centerTitle: false,
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(1),
-          child: Divider(height: 1, thickness: 1,
-              color: dark ? AppThemeData.darkBorderSecondary : AppThemeData.neutral200),
+          child: Divider(
+              height: 1,
+              thickness: 1,
+              color: dark
+                  ? AppThemeData.darkBorderSecondary
+                  : AppThemeData.neutral200),
         ),
       ),
       bottomNavigationBar: _buildStickyButton(dark),
@@ -229,12 +215,40 @@ class _AddAddressScreenState extends State<AddAddressScreen> {
             _sectionLabel('Save Address As'.tr(), dark),
             const SizedBox(height: 10),
             _labelChipsRow(dark),
-            const SizedBox(height: 20),
+            const SizedBox(height: 16),
 
-            // Address fields
-            _sectionLabel('Address Details'.tr(), dark),
-            const SizedBox(height: 8),
-            _formCard(dark),
+            // Info note
+            Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: AppThemeData.primary500.withValues(alpha: 0.06),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                    color: AppThemeData.primary500.withValues(alpha: 0.20)),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(Icons.info_outline_rounded,
+                      size: 16, color: AppThemeData.primary500),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'House / flat / building details will be asked when you place a delivery order.'
+                          .tr(),
+                      style: TextStyle(
+                        fontSize: 13,
+                        height: 1.45,
+                        color: dark
+                            ? AppThemeData.darkTextSecondary
+                            : AppThemeData.neutral600,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ],
         ),
       ),
@@ -248,7 +262,8 @@ class _AddAddressScreenState extends State<AddAddressScreen> {
         fontSize: 11,
         fontFamily: AppThemeData.semiBold,
         letterSpacing: 0.8,
-        color: dark ? AppThemeData.darkTextTertiary : AppThemeData.neutral500,
+        color:
+            dark ? AppThemeData.darkTextTertiary : AppThemeData.neutral500,
       ),
     );
   }
@@ -268,12 +283,24 @@ class _AddAddressScreenState extends State<AddAddressScreen> {
           border: Border.all(
             color: hasLocation
                 ? AppThemeData.primary500
-                : (dark ? AppThemeData.darkBorderPrimary : AppThemeData.neutral200),
+                : (dark
+                    ? AppThemeData.darkBorderPrimary
+                    : AppThemeData.neutral200),
             width: hasLocation ? 1.5 : 1,
           ),
           boxShadow: hasLocation
-              ? [BoxShadow(color: AppThemeData.primary500.withValues(alpha: 0.1), blurRadius: 8, offset: const Offset(0, 3))]
-              : [BoxShadow(color: Colors.black.withValues(alpha: dark ? 0 : 0.03), blurRadius: 4, offset: const Offset(0, 2))],
+              ? [
+                  BoxShadow(
+                      color: AppThemeData.primary500.withValues(alpha: 0.1),
+                      blurRadius: 8,
+                      offset: const Offset(0, 3))
+                ]
+              : [
+                  BoxShadow(
+                      color: Colors.black.withValues(alpha: dark ? 0 : 0.03),
+                      blurRadius: 4,
+                      offset: const Offset(0, 2))
+                ],
         ),
         child: Row(
           children: [
@@ -283,12 +310,20 @@ class _AddAddressScreenState extends State<AddAddressScreen> {
               decoration: BoxDecoration(
                 color: hasLocation
                     ? AppThemeData.primary500.withValues(alpha: 0.1)
-                    : (dark ? AppThemeData.darkBgTertiary : AppThemeData.neutral100),
+                    : (dark
+                        ? AppThemeData.darkBgTertiary
+                        : AppThemeData.neutral100),
                 borderRadius: BorderRadius.circular(10),
               ),
               child: Icon(
-                hasLocation ? Icons.location_on_rounded : Icons.location_searching_rounded,
-                color: hasLocation ? AppThemeData.primary500 : (dark ? AppThemeData.darkTextTertiary : AppThemeData.neutral400),
+                hasLocation
+                    ? Icons.location_on_rounded
+                    : Icons.location_searching_rounded,
+                color: hasLocation
+                    ? AppThemeData.primary500
+                    : (dark
+                        ? AppThemeData.darkTextTertiary
+                        : AppThemeData.neutral400),
                 size: 22,
               ),
             ),
@@ -298,13 +333,17 @@ class _AddAddressScreenState extends State<AddAddressScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    hasLocation ? 'Location Selected'.tr() : 'Choose Location'.tr(),
+                    hasLocation
+                        ? 'Location Selected'.tr()
+                        : 'Choose Location'.tr(),
                     style: TextStyle(
                       fontSize: 15,
                       fontFamily: AppThemeData.semiBold,
                       color: hasLocation
                           ? AppThemeData.primary500
-                          : (dark ? AppThemeData.darkTextPrimary : AppThemeData.neutral900),
+                          : (dark
+                              ? AppThemeData.darkTextPrimary
+                              : AppThemeData.neutral900),
                     ),
                   ),
                   if (_locality.text.isNotEmpty) ...[
@@ -314,18 +353,22 @@ class _AddAddressScreenState extends State<AddAddressScreen> {
                       style: TextStyle(
                         fontSize: 12,
                         fontFamily: AppThemeData.regular,
-                        color: dark ? AppThemeData.darkTextTertiary : AppThemeData.neutral500,
+                        color: dark
+                            ? AppThemeData.darkTextTertiary
+                            : AppThemeData.neutral500,
                       ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
                   ] else
                     Text(
-                      'Tap to search for your address'.tr(),
+                      'Tap to search for your area'.tr(),
                       style: TextStyle(
                         fontSize: 12,
                         fontFamily: AppThemeData.regular,
-                        color: dark ? AppThemeData.darkTextTertiary : AppThemeData.neutral400,
+                        color: dark
+                            ? AppThemeData.darkTextTertiary
+                            : AppThemeData.neutral400,
                       ),
                     ),
                 ],
@@ -333,7 +376,9 @@ class _AddAddressScreenState extends State<AddAddressScreen> {
             ),
             Icon(
               Icons.chevron_right_rounded,
-              color: dark ? AppThemeData.darkTextTertiary : AppThemeData.neutral400,
+              color: dark
+                  ? AppThemeData.darkTextTertiary
+                  : AppThemeData.neutral400,
               size: 20,
             ),
           ],
@@ -356,7 +401,8 @@ class _AddAddressScreenState extends State<AddAddressScreen> {
             onTap: () => setState(() => _selectedSaveAs = opt.label),
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 180),
-              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
               decoration: BoxDecoration(
                 color: selected
                     ? AppThemeData.primary500
@@ -365,7 +411,9 @@ class _AddAddressScreenState extends State<AddAddressScreen> {
                 border: Border.all(
                   color: selected
                       ? AppThemeData.primary500
-                      : (dark ? AppThemeData.darkBorderPrimary : AppThemeData.neutral200),
+                      : (dark
+                          ? AppThemeData.darkBorderPrimary
+                          : AppThemeData.neutral200),
                   width: selected ? 1.5 : 1,
                 ),
               ),
@@ -377,17 +425,22 @@ class _AddAddressScreenState extends State<AddAddressScreen> {
                     size: 16,
                     color: selected
                         ? Colors.white
-                        : (dark ? AppThemeData.darkTextSecondary : AppThemeData.neutral500),
+                        : (dark
+                            ? AppThemeData.darkTextSecondary
+                            : AppThemeData.neutral500),
                   ),
                   const SizedBox(width: 6),
                   Text(
                     opt.label.tr(),
                     style: TextStyle(
                       fontSize: 14,
-                      fontFamily: selected ? AppThemeData.semiBold : AppThemeData.medium,
+                      fontFamily:
+                          selected ? AppThemeData.semiBold : AppThemeData.medium,
                       color: selected
                           ? Colors.white
-                          : (dark ? AppThemeData.darkTextSecondary : AppThemeData.neutral700),
+                          : (dark
+                              ? AppThemeData.darkTextSecondary
+                              : AppThemeData.neutral700),
                     ),
                   ),
                 ],
@@ -399,135 +452,10 @@ class _AddAddressScreenState extends State<AddAddressScreen> {
     );
   }
 
-  Widget _formCard(bool dark) {
-    return Container(
-      decoration: BoxDecoration(
-        color: dark ? AppThemeData.darkBgSecondary : Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: dark ? AppThemeData.darkBorderPrimary : AppThemeData.neutral200,
-          width: 1,
-        ),
-      ),
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _fieldLabel('Flat / House / Floor / Building'.tr(), required: true, dark: dark),
-          const SizedBox(height: 6),
-          _buildField(
-            controller: _address,
-            focusNode: _focusAddress,
-            hint: 'e.g. Flat 4B, Green Towers'.tr(),
-            prefixIcon: Icons.home_work_rounded,
-            dark: dark,
-            nextFocus: _focusLocality,
-          ),
-          const SizedBox(height: 16),
-          _fieldLabel('Area / Sector / Locality'.tr(), required: true, dark: dark),
-          const SizedBox(height: 6),
-          _buildField(
-            controller: _locality,
-            focusNode: _focusLocality,
-            hint: 'e.g. Koramangala, Sector 5'.tr(),
-            prefixIcon: Icons.map_rounded,
-            dark: dark,
-            nextFocus: _focusLandmark,
-          ),
-          const SizedBox(height: 16),
-          _fieldLabel('Nearby Landmark'.tr(), dark: dark),
-          const SizedBox(height: 6),
-          _buildField(
-            controller: _landmark,
-            focusNode: _focusLandmark,
-            hint: 'Optional – e.g. Near City Mall'.tr(),
-            prefixIcon: Icons.place_rounded,
-            dark: dark,
-            textInputAction: TextInputAction.done,
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _fieldLabel(String text, {bool required = false, required bool dark}) {
-    return RichText(
-      text: TextSpan(
-        text: text,
-        style: TextStyle(
-          fontSize: 13,
-          fontFamily: AppThemeData.medium,
-          color: dark ? AppThemeData.darkTextSecondary : AppThemeData.neutral600,
-        ),
-        children: required
-            ? [
-                const TextSpan(
-                  text: ' *',
-                  style: TextStyle(color: AppThemeData.error500),
-                ),
-              ]
-            : [],
-      ),
-    );
-  }
-
-  Widget _buildField({
-    required TextEditingController controller,
-    required FocusNode focusNode,
-    required String hint,
-    required IconData prefixIcon,
-    required bool dark,
-    FocusNode? nextFocus,
-    TextInputAction textInputAction = TextInputAction.next,
-  }) {
-    return TextFormField(
-      controller: controller,
-      focusNode: focusNode,
-      textCapitalization: TextCapitalization.sentences,
-      textInputAction: textInputAction,
-      onFieldSubmitted: (_) {
-        if (nextFocus != null) FocusScope.of(context).requestFocus(nextFocus);
-      },
-      style: TextStyle(
-        fontSize: 15,
-        fontFamily: AppThemeData.medium,
-        color: dark ? AppThemeData.darkTextPrimary : AppThemeData.neutral900,
-      ),
-      decoration: InputDecoration(
-        hintText: hint,
-        hintStyle: TextStyle(
-          fontSize: 14,
-          fontFamily: AppThemeData.regular,
-          color: dark ? AppThemeData.darkTextTertiary : AppThemeData.neutral400,
-        ),
-        prefixIcon: Icon(prefixIcon, size: 19,
-            color: dark ? AppThemeData.darkTextTertiary : AppThemeData.neutral400),
-        filled: true,
-        fillColor: dark ? AppThemeData.darkBgTertiary : AppThemeData.neutral50,
-        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-          borderSide: BorderSide(
-            color: dark ? AppThemeData.darkBorderPrimary : AppThemeData.neutral200,
-          ),
-        ),
-        enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-          borderSide: BorderSide(
-            color: dark ? AppThemeData.darkBorderPrimary : AppThemeData.neutral200,
-          ),
-        ),
-        focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-          borderSide: const BorderSide(color: AppThemeData.primary500, width: 1.5),
-        ),
-      ),
-    );
-  }
-
   Widget _buildStickyButton(bool dark) {
     return Container(
-      padding: EdgeInsets.fromLTRB(16, 12, 16, MediaQuery.of(context).padding.bottom + 12),
+      padding: EdgeInsets.fromLTRB(
+          16, 12, 16, MediaQuery.of(context).padding.bottom + 12),
       decoration: BoxDecoration(
         color: dark ? AppThemeData.darkBgSecondary : Colors.white,
         boxShadow: [
@@ -546,7 +474,8 @@ class _AddAddressScreenState extends State<AddAddressScreen> {
           style: ElevatedButton.styleFrom(
             backgroundColor: AppThemeData.primary500,
             elevation: 0,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
           ),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.center,

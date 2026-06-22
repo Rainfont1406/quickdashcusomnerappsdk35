@@ -21,6 +21,7 @@ import 'package:emartconsumer/theme/responsive.dart';
 import 'package:emartconsumer/ui/productDetailsScreen/ProductDetailsScreen.dart';
 import 'package:emartconsumer/ui/review_list_screen/review_list_screen.dart';
 import 'package:emartconsumer/utils/network_image_widget.dart';
+import 'package:emartconsumer/widget/coming_soon_view.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -33,6 +34,7 @@ import 'package:emartconsumer/ui/container/ContainerScreen.dart';
 import 'package:emartconsumer/services/app_dialog.dart';
 import 'package:emartconsumer/ui/auth_screen/login_screen.dart';
 import 'package:emartconsumer/ui/vendorProductsScreen/vendor_products_skeleton.dart';
+import 'package:emartconsumer/ui/vendorProductsScreen/vendor_location_screen.dart';
 import 'package:emartconsumer/widget/product_options_dialog.dart';
 
 class NewVendorProductsScreen extends StatefulWidget {
@@ -79,6 +81,23 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
         if (mounted) setState(() => cartProducts = products);
       });
     }
+  }
+
+  // Precaches a list of network image URLs concurrently. Individual failures
+  // are swallowed; a 5-second hard timeout ensures the skeleton never blocks
+  // indefinitely on slow or unavailable images.
+  Future<void> _precacheBatch(List<String> urls) async {
+    if (!mounted || urls.isEmpty) return;
+    final futures = urls
+        .where((u) => u.isNotEmpty)
+        .map((url) =>
+            precacheImage(NetworkImage(url), context).catchError((_) {}))
+        .toList();
+    if (futures.isEmpty) return;
+    await Future.wait(futures).timeout(
+      const Duration(seconds: 5),
+      onTimeout: () => [],
+    );
   }
 
   // Refresh cart data — kept for explicit call sites; stream handles most cases
@@ -183,8 +202,13 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
       await fireStoreUtils
           .getVendorProductsDelivery(widget.vendorModel.id)
           .then((value) {
-        allProductList = value;
-        productList = value;
+        // Firestore's deliveryOption filter is commented out server-side
+        // (see FireStoreUtils.getVendorProductsDelivery), so it must be
+        // filtered here too — otherwise delivery-unavailable items show as
+        // addable here and only get caught later by CartScreen's validation.
+        final filtered = value.where((p) => p.deliveryOption).toList();
+        allProductList = filtered;
+        productList = filtered;
         getVendorCategoryById();
         setState(() {});
       });
@@ -240,9 +264,26 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
         },
       );
     }
-    setState(() {
-      isLoading = false;
-    });
+    // Precache the vendor banner and first page of product images before
+    // hiding the skeleton so the user never sees blank image containers.
+    if (mounted) {
+      await _precacheBatch([
+        if (widget.vendorModel.photo.isNotEmpty) widget.vendorModel.photo,
+        ...widget.vendorModel.photos
+            .take(3)
+            .map((p) => VendorModel.coverPhotoUrl(p))
+            .where((s) => s.isNotEmpty && s != 'null'),
+        ...allProductList
+            .take(15)
+            .where((p) => p.photo.isNotEmpty)
+            .map((p) => p.photo),
+      ]);
+    }
+    if (mounted) {
+      setState(() {
+        isLoading = false;
+      });
+    }
   }
 
   @override
@@ -261,7 +302,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
   // photos[0] = logo, photos[1..n] = card gallery images.
   List<String> get _cardPhotos {
     final all = widget.vendorModel.photos
-        .map((e) => e.toString())
+        .map((e) => VendorModel.coverPhotoUrl(e))
         .where((s) => s.isNotEmpty && s != 'null')
         .toList();
     return all.length > 1 ? all.sublist(1) : <String>[];
@@ -290,6 +331,18 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
 
   @override
   Widget build(BuildContext context) {
+    return ValueListenableBuilder<bool>(
+      valueListenable: isDeliveryActiveNotifier,
+      builder: (context, deliveryActive, _) {
+        if (currentOrderTypeGlobal == 'Delivery'.tr() && !deliveryActive) {
+          return ComingSoonScreen(message: deliveryOffMessageNotifier.value);
+        }
+        return _buildScreen(context);
+      },
+    );
+  }
+
+  Widget _buildScreen(BuildContext context) {
     double cartTotal = 0;
     for (final cartProduct in cartProducts) {
       double price = double.tryParse(cartProduct.price) ?? 0;
@@ -488,10 +541,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             // Restaurant Name and Rating Section
-                            InkWell(
-                              borderRadius: BorderRadius.circular(16),
-                              onTap: () => _showRestaurantInfoSheet(context),
-                              child: Container(
+                            Container(
                                 decoration: BoxDecoration(
                                   borderRadius: BorderRadius.circular(16),
                                   color: isDarkMode(context)
@@ -548,9 +598,13 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                                   const SizedBox(width: 3),
                                                   Expanded(
                                                     child: Text(
-                                                      widget.vendorModel
-                                                          .location
-                                                          .toString(),
+                                                      () {
+                                                        final loc = widget.vendorModel.locality.trim();
+                                                        final lm = widget.vendorModel.landmark.trim();
+                                                        if (loc.isEmpty) return widget.vendorModel.location;
+                                                        if (lm.isEmpty) return loc;
+                                                        return '$loc, $lm';
+                                                      }(),
                                                       textAlign: TextAlign.start,
                                                       maxLines: 1,
                                                       overflow:
@@ -641,7 +695,6 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                   ],
                                 ),
                               ),
-                            ),
 
                             // Open/Close Status Section
                             sectionConstantModel!.serviceTypeFlag ==
@@ -968,7 +1021,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
       bottomNavigationBar: cartProducts.isNotEmpty
           ? Container(
               color: AppThemeData.primary500,
-              padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 30),
+              padding: EdgeInsets.fromLTRB(30, 10, 30, 10 + MediaQuery.of(context).padding.bottom),
               child: Row(
                 children: [
                   Expanded(
@@ -1533,6 +1586,9 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
     final now = DateTime.now();
     final day = DateFormat('EEEE', 'en_US').format(now);
     final date = DateFormat('dd-MM-yyyy').format(now);
+    final yesterday = now.subtract(const Duration(days: 1));
+    final yesterdayDay = DateFormat('EEEE', 'en_US').format(yesterday);
+    final yesterdayDate = DateFormat('dd-MM-yyyy').format(yesterday);
     DateTime? activeEnd;
     bool scheduleOpen = false;
     isOpen = false;
@@ -1540,15 +1596,52 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
     _nextOpenLabel = null;
 
     // Step 1: Derive schedule-based status from working hours.
+    //
+    // Mirrors VendorModel.isOpen() (used by the home screen restaurant
+    // card) so both screens agree on overnight hours. The previous version
+    // here parsed both ends of a slot against the *same* calendar date with
+    // no midnight-crossing adjustment at all, so an overnight slot like
+    // 22:00–02:00 produced an inverted (end before start) range that could
+    // never match — that slot could never show as "open", even minutes
+    // after it started. It also never checked yesterday's slots, so a
+    // currently-active overnight slot that began the day before (e.g. it's
+    // 1am and the slot opened at 10pm yesterday) was invisible here even
+    // though the home screen correctly recognized it as open.
     for (var element in widget.vendorModel.workingHours) {
       if (day == element.day.toString()) {
-        if ((element.timeslot ?? []).isNotEmpty) {
-          for (var slot in element.timeslot!) {
+        for (var slot in (element.timeslot ?? [])) {
+          if (slot.from == null || slot.to == null) continue;
+          final start =
+              DateFormat("dd-MM-yyyy HH:mm").parse("$date ${slot.from}");
+          var end =
+              DateFormat("dd-MM-yyyy HH:mm").parse("$date ${slot.to}");
+          if (!end.isAfter(start)) {
+            // Slot crosses midnight — it actually ends tomorrow.
+            end = end.add(const Duration(days: 1));
+          }
+          if (isCurrentDateInRange(start, end)) {
+            activeEnd = end;
+            scheduleOpen = true;
+            _closingAtLabel = 'Closes at ${DateFormat('h:mm a').format(end)}';
+          }
+        }
+      }
+    }
+    if (!scheduleOpen) {
+      // Check yesterday's slots that cross midnight into today.
+      for (var element in widget.vendorModel.workingHours) {
+        if (yesterdayDay == element.day.toString()) {
+          for (var slot in (element.timeslot ?? [])) {
             if (slot.from == null || slot.to == null) continue;
-            final start =
-                DateFormat("dd-MM-yyyy HH:mm").parse("$date ${slot.from}");
-            final end =
-                DateFormat("dd-MM-yyyy HH:mm").parse("$date ${slot.to}");
+            final start = DateFormat("dd-MM-yyyy HH:mm")
+                .parse("$yesterdayDate ${slot.from}");
+            var end = DateFormat("dd-MM-yyyy HH:mm")
+                .parse("$yesterdayDate ${slot.to}");
+            if (end.isAfter(start)) {
+              // Doesn't cross midnight, so it never reaches today.
+              continue;
+            }
+            end = end.add(const Duration(days: 1));
             if (isCurrentDateInRange(start, end)) {
               activeEnd = end;
               scheduleOpen = true;
@@ -2748,6 +2841,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                   ),
                                   const SizedBox(height: 4),
                                   Row(
+                                    crossAxisAlignment: CrossAxisAlignment.center,
                                     children: [
                                       Icon(Icons.location_on,
                                           size: 14,
@@ -2755,8 +2849,13 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                       const SizedBox(width: 3),
                                       Expanded(
                                         child: Text(
-                                          widget.vendorModel.location
-                                              .toString(),
+                                          () {
+                                            final locality = widget.vendorModel.locality.trim();
+                                            final landmark = widget.vendorModel.landmark.trim();
+                                            if (locality.isEmpty) return widget.vendorModel.location;
+                                            if (landmark.isEmpty) return locality;
+                                            return '$locality, $landmark';
+                                          }(),
                                           style: TextStyle(
                                             fontSize: 13,
                                             color: isDarkMode(context)
@@ -2766,6 +2865,32 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                           ),
                                           maxLines: 2,
                                           overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 6),
+                                      // Map button
+                                      GestureDetector(
+                                        onTap: () => Navigator.push(
+                                          context,
+                                          MaterialPageRoute(
+                                            builder: (_) => VendorLocationScreen(
+                                              vendorModel: widget.vendorModel,
+                                            ),
+                                          ),
+                                        ),
+                                        child: Container(
+                                          padding: const EdgeInsets.all(6),
+                                          decoration: BoxDecoration(
+                                            color: AppThemeData.primary500
+                                                .withOpacity(0.10),
+                                            borderRadius:
+                                                BorderRadius.circular(8),
+                                          ),
+                                          child: const Icon(
+                                            Icons.map_rounded,
+                                            size: 16,
+                                            color: AppThemeData.primary500,
+                                          ),
                                         ),
                                       ),
                                     ],
@@ -3066,7 +3191,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
             'service_perm_${productModel.id}',
             jsonEncode({
               'delivery': productModel.deliveryOption,
-              'dineaway': productModel.dineAway,
+              'dineaway': productModel.dineIn || productModel.takeaway,
               'dineIn': productModel.dineIn,
               'takeaway': productModel.takeaway,
             }),

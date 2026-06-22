@@ -18,7 +18,10 @@ import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/deliveryAddressScreen/DeliveryAddressScreen.dart';
+import 'package:emartconsumer/widget/coming_soon_view.dart';
 import 'package:emartconsumer/widget/delivery_type_selector.dart';
+import 'package:emartconsumer/widget/place_picker_osm.dart';
+import 'package:uuid/uuid.dart';
 
 import 'package:emartconsumer/ui/productDetailsScreen/ProductDetailsScreen.dart';
 import 'package:emartconsumer/ui/vendorProductsScreen/newVendorProductsScreen.dart';
@@ -96,6 +99,16 @@ class _CartScreenState extends State<CartScreen> {
   bool _isBillExpanded = false;
   AddressModel addressModel = AddressModel();
 
+  // Delivery house/flat + landmark — inline fields in the address card,
+  // mutated directly into addressModel as the user types.
+  final TextEditingController _houseCtrl = TextEditingController();
+  final TextEditingController _landmarkCtrl = TextEditingController();
+  bool _houseFieldError = false;
+
+  bool get _deliveryAddressComplete =>
+      (addressModel.locality?.isNotEmpty ?? false) &&
+      (addressModel.address?.isNotEmpty ?? false);
+
   List<TaxModel>? taxList = []; // Initialize as empty list
 
   // Stable stream reference — must not change between rebuilds to prevent scroll resets
@@ -123,15 +136,45 @@ class _CartScreenState extends State<CartScreen> {
   // Notifications queued while the skeleton is active; flushed after transition.
   final List<Map<String, dynamic>> _pendingNotifications = [];
 
+  // Variant items whose price changed — dialog shown after skeleton clears.
+  final List<MapEntry<CartProduct, ProductModel>> _pendingVariantDialogs = [];
+
+  // True while _flushVariantDialogs is showing dialogs — suppresses hash-change
+  // re-validation so the banner doesn't flash when the user re-adds an item.
+  bool _dialogsFlushInProgress = false;
+
+  // Offset between device clock and Firestore server clock.
+  // Fetched once on init; used to prevent device-clock manipulation of
+  // time-limited special discounts.
+  Duration _serverTimeOffset = Duration.zero;
+
+  DateTime get _serverAdjustedNow => DateTime.now().add(_serverTimeOffset);
+
+  Future<void> _fetchServerTimeOffset() async {
+    final deviceBefore = DateTime.now();
+    final serverTime = await FireStoreUtils.getServerTime();
+    final elapsed = DateTime.now().difference(deviceBefore);
+    // Compensate for round-trip latency using the midpoint of the request window.
+    final deviceMidpoint = deviceBefore.add(elapsed ~/ 2);
+    if (mounted) {
+      setState(() {
+        _serverTimeOffset = serverTime.difference(deviceMidpoint);
+      });
+    }
+  }
+
   @override
   void initState() {
     super.initState();
     addressModel = MyAppState.selectedPosotion;
+    _houseCtrl.text = addressModel.address ?? '';
+    _landmarkCtrl.text = addressModel.landmark ?? '';
     _reOrderPending = widget.reOrderModel != null;
 
     coupon = _fireStoreUtils.getAllCoupons();
     getFoodType();
-    getTaxData(); // Add this line
+    getTaxData();
+    _fetchServerTimeOffset();
 
     // Initialize Dineaway state
     selectedDineawayType = null;
@@ -142,6 +185,8 @@ class _CartScreenState extends State<CartScreen> {
   void dispose() {
     _notificationOverlay?.remove();
     _notificationOverlay = null;
+    _houseCtrl.dispose();
+    _landmarkCtrl.dispose();
     super.dispose();
   }
 
@@ -156,50 +201,83 @@ class _CartScreenState extends State<CartScreen> {
     _notificationOverlay = null;
 
     final entry = OverlayEntry(
-      builder: (_) => Positioned(
-        top: MediaQuery.of(context).padding.top + 14,
-        left: 16,
-        right: 16,
-        child: Material(
-          color: Colors.transparent,
-          child: Container(
-            padding:
-                const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
-            decoration: BoxDecoration(
-              color: color,
-              borderRadius: BorderRadius.circular(14),
-              boxShadow: [
-                BoxShadow(
+      builder: (_) {
+        final dark = isDarkMode(context);
+        return Positioned(
+          // Place below the AppBar so it never overlaps the "Your Cart" title
+          top: MediaQuery.of(context).padding.top + kToolbarHeight + 8,
+          left: 16,
+          right: 16,
+          child: Material(
+            color: Colors.transparent,
+            child: Container(
+              decoration: BoxDecoration(
+                color: dark ? const Color(0xFF1E1E2E) : Colors.white,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(
                   color: color.withValues(alpha: 0.35),
-                  blurRadius: 16,
-                  offset: const Offset(0, 6),
+                  width: 1.2,
                 ),
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.10),
-                  blurRadius: 8,
-                  offset: const Offset(0, 2),
-                ),
-              ],
-            ),
-            child: Row(
-              children: [
-                Icon(icon, color: Colors.white, size: 18),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    message,
-                    style: AppTypography.labelSmall.copyWith(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w600,
-                      height: 1.4,
-                    ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: dark ? 0.40 : 0.14),
+                    blurRadius: 24,
+                    offset: const Offset(0, 8),
+                  ),
+                  BoxShadow(
+                    color: color.withValues(alpha: 0.12),
+                    blurRadius: 12,
+                    offset: const Offset(0, 3),
+                  ),
+                ],
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(14),
+                child: IntrinsicHeight(
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      // Colored left accent stripe
+                      Container(width: 4, color: color),
+                      const SizedBox(width: 12),
+                      // Icon badge
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        child: Container(
+                          padding: const EdgeInsets.all(7),
+                          decoration: BoxDecoration(
+                            color: color.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Icon(icon, color: color, size: 16),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      // Message text
+                      Expanded(
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 13),
+                          child: Text(
+                            message,
+                            style: AppTypography.labelSmall.copyWith(
+                              color: dark
+                                  ? Colors.white
+                                  : AppThemeData.neutral900,
+                              fontWeight: FontWeight.w600,
+                              height: 1.4,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                    ],
                   ),
                 ),
-              ],
+              ),
             ),
           ),
-        ),
-      ),
+        );
+      },
     );
 
     _notificationOverlay = entry;
@@ -288,7 +366,7 @@ class _CartScreenState extends State<CartScreen> {
         .doc('specialDiscountOffer')
         .get()
         .then((value) {
-      specialDiscountEnable = value.data()!['isEnable'];
+      specialDiscountEnable = value.data()?['isEnable'] ?? false;
     });
   }
 
@@ -303,15 +381,15 @@ class _CartScreenState extends State<CartScreen> {
       isDineawaySelected = false;
       deliveryCharges = '0.0';
     });
-    if (newValue == 'Delivery' && vendorModel != null) {
-      final km = num.parse(getKm(
+    if (newValue == 'Delivery' && vendorModel != null && addressModel.location != null) {
+      final kmStr = await getRoadDistanceKm(
         addressModel.location!,
         UserLocation(
           latitude: vendorModel!.latitude,
           longitude: vendorModel!.longitude,
         ),
-      ));
-      getDeliveryCharges(km);
+      );
+      getDeliveryCharges(num.parse(kmStr));
     }
     _validateCart();
   }
@@ -391,13 +469,83 @@ class _CartScreenState extends State<CartScreen> {
     });
   }
 
+  // ── Helper: resolve current variant price from fresh Firestore product ───────
+  // Returns the commission-adjusted price string, or null if the variant cannot
+  // be matched (conservative — we only act when we can confirm a real change).
+  String? _computeFreshVariantPrice(CartProduct cp, ProductModel fresh) {
+    VariantInfo? vi;
+    try {
+      final raw = cp.variant_info;
+      if (raw is VariantInfo) {
+        vi = raw;
+      } else if (raw is Map<String, dynamic>) {
+        vi = VariantInfo.fromJson(raw);
+      } else if (raw is String && raw.isNotEmpty && raw != 'null') {
+        vi = VariantInfo.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+      }
+    } catch (_) {
+      return null;
+    }
+    if (vi == null) return null;
+
+    // Derive SKU; fall back to joining option values when sku is absent.
+    String sku = vi.variant_sku ?? '';
+    if (sku.isEmpty && (vi.variant_options?.isNotEmpty ?? false)) {
+      sku = vi.variant_options!.values.join('-');
+    }
+
+    // Old itemAttributes/variants system — match by SKU.
+    if (sku.isNotEmpty && fresh.itemAttributes?.variants != null) {
+      final match = fresh.itemAttributes!.variants!
+          .where((v) => v.variant_sku == sku)
+          .firstOrNull;
+      if (match != null) {
+        return productCommissionPrice(match.variant_price ?? '0');
+      }
+    }
+
+    // New productAttributes system — sum effectivePrice for stored selections.
+    if (fresh.productAttributes.isNotEmpty &&
+        (vi.variant_options?.isNotEmpty ?? false)) {
+      double total = 0;
+      bool allFound = true;
+      for (final cfg in fresh.productAttributes) {
+        final selName = vi.variant_options![cfg.attributeTitle];
+        if (selName == null) {
+          allFound = false;
+          break;
+        }
+        final enabledOpts = cfg.options.where((o) => o.enabled).toList();
+        if (cfg.type == 'SS') {
+          final opt = enabledOpts.where((o) => o.name == selName).firstOrNull;
+          if (opt == null) {
+            allFound = false;
+            break;
+          }
+          total += opt.effectivePrice;
+        } else {
+          // MS options are stored as comma-joined names.
+          final names = selName.split(', ').map((s) => s.trim()).toSet();
+          for (final name in names) {
+            final opt = enabledOpts.where((o) => o.name == name).firstOrNull;
+            if (opt != null) total += opt.effectivePrice;
+          }
+        }
+      }
+      if (allFound && total > 0) {
+        return productCommissionPrice(total.toStringAsFixed(2));
+      }
+    }
+
+    return null;
+  }
+
   // ── Re-order: validate products in parallel, populate cart ───────────────────
   Future<void> _populateFromReOrder() async {
     final orderModel = widget.reOrderModel!;
 
     // Restore the original order's service type BEFORE any await so that
     // getDeliveyData() / _validateCart() later use the correct mode.
-    // takeAway==true means the original order was a DineAway order.
     final bool wasDineaway = orderModel.takeAway == true;
     final String restoredOrderType = wasDineaway ? 'Dineaway' : 'Delivery';
     final String? restoredDineawayType = wasDineaway ? orderModel.orderType : null;
@@ -407,12 +555,11 @@ class _CartScreenState extends State<CartScreen> {
         selectedDineawayType = restoredDineawayType;
         isDineawaySelected = wasDineaway && restoredDineawayType != null;
       });
-      // Persist so the restored type survives subsequent SharedPreferences reads.
       SharedPreferences.getInstance()
           .then((sp) => sp.setString('foodType', restoredOrderType));
     }
 
-    // Parallel product validation
+    // Fetch fresh product data for all items in parallel.
     final freshList = await Future.wait(
       orderModel.products.map((cp) async {
         try {
@@ -426,27 +573,70 @@ class _CartScreenState extends State<CartScreen> {
     int skipped = 0;
     for (var i = 0; i < orderModel.products.length; i++) {
       final cp = orderModel.products[i];
-      final fresh = freshList[i] as ProductModel?;
+      final fresh = freshList[i];
 
       if (fresh == null || !fresh.publish) {
         skipped++;
         continue;
       }
 
-      // Mirror the price computation used by _validateCart so prices match
-      final freshPrice = productCommissionPrice(
-        fresh.disPrice != null &&
-                fresh.disPrice!.isNotEmpty &&
-                (double.tryParse(fresh.disPrice!) ?? 0) != 0
-            ? fresh.disPrice!
-            : fresh.price,
-      );
+      // Determine if this product needs variant/add-on selection.
+      final hasVariant = cp.variant_info != null;
+      final hasAddOns = (double.tryParse(cp.extras_price ?? '0') ?? 0) > 0;
 
-      CartProduct cartProduct = cp;
-      final freshDouble = double.tryParse(freshPrice) ?? 0.0;
-      final origDouble = double.tryParse(cp.price) ?? 0.0;
-      if ((freshDouble - origDouble).abs() > 0.001) {
-        cartProduct = CartProduct(
+      if (hasVariant || hasAddOns) {
+        // ── Variant / add-on product ──────────────────────────────────────────
+        // Parse the old variant_info so we can pre-populate the dialog.
+        VariantInfo? oldVariantInfo;
+        try {
+          final raw = cp.variant_info;
+          if (raw is VariantInfo) {
+            oldVariantInfo = raw;
+          } else if (raw is Map<String, dynamic>) {
+            oldVariantInfo = VariantInfo.fromJson(raw);
+          } else if (raw is String && raw.isNotEmpty && raw != 'null') {
+            oldVariantInfo = VariantInfo.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+          }
+        } catch (_) {}
+
+        if (!mounted) continue;
+
+        // Show ProductOptionsDialog with the FRESH product (current Firestore prices)
+        // and pre-populated with the previously chosen variant/add-ons.
+        // The dialog reads prices directly from the fresh ProductModel — no manual
+        // price calculation needed.
+        // Pass the chosen product back via Navigator.pop so addProduct is
+        // awaited after the modal closes — ensuring all items are in the DB
+        // before _reOrderPending = false triggers validation.
+        final reOrderResult = await showModalBottomSheet<ProductModel>(
+          context: context,
+          isScrollControlled: true,
+          backgroundColor: Colors.transparent,
+          useSafeArea: true,
+          builder: (ctx) => ProductOptionsDialog(
+            productModel: fresh,
+            initialVariantInfo: oldVariantInfo,
+            onAddToCart: (ProductModel updatedProduct, double totalPrice) async {
+              Navigator.of(ctx).pop(updatedProduct);
+            },
+          ),
+        );
+        if (reOrderResult != null && mounted) {
+          final qty = cp.quantity > 0 ? cp.quantity : 1;
+          for (int q = 0; q < qty; q++) {
+            await cartDatabase.addProduct(reOrderResult, cartDatabase, true);
+          }
+        }
+      } else {
+        // ── Plain product — add directly with fresh base price ────────────────
+        final freshPrice = productCommissionPrice(
+          fresh.disPrice != null &&
+                  fresh.disPrice!.isNotEmpty &&
+                  (double.tryParse(fresh.disPrice!) ?? 0) != 0
+              ? fresh.disPrice!
+              : fresh.price,
+        );
+        final cartProduct = CartProduct(
           id: cp.id,
           category_id: cp.category_id,
           name: cp.name,
@@ -459,24 +649,21 @@ class _CartScreenState extends State<CartScreen> {
           extras: cp.extras,
           variant_info: cp.variant_info,
         );
+        try {
+          await cartDatabase.reAddProduct(cartProduct);
+        } catch (_) {}
       }
-
-      try {
-        await cartDatabase.reAddProduct(cartProduct);
-      } catch (_) {}
     }
 
     if (!mounted) return;
     setState(() => _reOrderPending = false);
 
     if (skipped > 0) {
-      // Queue — the real cart UI is not yet visible (skeleton is still active).
-      // The notification will be flushed by _validateCart() after _isCartInitialized.
       _queueOrShowNotification(
         message: skipped == 1
             ? 'An item from your previous order is no longer available.'.tr()
             : '$skipped items from your previous order are no longer available.'.tr(),
-        color: AppThemeData.warning500,
+        color: const Color(0xFFF59E0B),
         icon: Icons.info_outline_rounded,
       );
     }
@@ -495,19 +682,18 @@ class _CartScreenState extends State<CartScreen> {
       // Get tax data for this vendor/section
       await getTaxData();
 
-      if (selctedOrderTypeValue == "Delivery") {
-        num km = num.parse(getKm(
+      if (selctedOrderTypeValue == "Delivery" && addressModel.location != null) {
+        final kmStr = await getRoadDistanceKm(
             addressModel.location!,
             UserLocation(
                 latitude: vendorModel!.latitude,
-                longitude: vendorModel!.longitude)));
-
-        getDeliveryCharges(km);
+                longitude: vendorModel!.longitude));
+        getDeliveryCharges(num.parse(kmStr));
       }
 
-      _validateCart();
+      await _validateCart();
     } catch (e) {
-      // Vendor fetch failed — exit skeleton so the user isn't stuck.
+      // Vendor or validation fetch failed — exit skeleton so the user isn't stuck.
       if (mounted && !_isCartInitialized) {
         setState(() => _isCartInitialized = true);
       }
@@ -515,7 +701,7 @@ class _CartScreenState extends State<CartScreen> {
   }
 
   Future<void> _validateCart() async {
-    if (!mounted || cartProducts.isEmpty) return;
+    if (!mounted || cartProducts.isEmpty || _isValidating) return;
     // Stamp the hash now so the StreamBuilder doesn't schedule a redundant
     // re-validation when it rebuilds after _isCartInitialized becomes true.
     _lastPermCartHash = cartProducts.map((p) => p.id).join(',');
@@ -527,13 +713,12 @@ class _CartScreenState extends State<CartScreen> {
       _canCheckout = true;
     });
 
+    try {
     // Vendor status check (data already available from getDeliveyData).
-    // Consistent with home-screen badge and restaurant-detail badge:
-    // open = reststatus AND (no working hours OR current time is within schedule).
+    // Consistent with home-screen badge and restaurant-detail badge via the
+    // shared VendorModel.isAcceptingOrders getter.
     if (vendorModel != null) {
-      final bool scheduleOpen = vendorModel!.workingHours.isEmpty || vendorModel!.isOpen();
-      final bool restaurantOpen = vendorModel!.reststatus && scheduleOpen;
-      if (!restaurantOpen) {
+      if (!vendorModel!.isAcceptingOrders) {
         setState(() {
           _cartGlobalWarning =
               "Restaurant is currently closed. You cannot place orders right now."
@@ -560,6 +745,8 @@ class _CartScreenState extends State<CartScreen> {
     final List<String> idsToRemove = [];
     final List<Map<String, String>> priceChanges = [];
     final List<MapEntry<CartProduct, String>> priceUpdates = [];
+    final List<MapEntry<CartProduct, ProductModel>> variantPriceChanged = [];
+    final List<String> variantPriceChangedIds = [];
 
     bool _freshAllowDelivery = true;
     bool _freshAllowDineaway = true;
@@ -577,30 +764,29 @@ class _CartScreenState extends State<CartScreen> {
       }
 
       // ── Aggregate permission flags ──────────────────────────────────────────
-      if (product.deliveryOption || product.dineAway) {
+      // dineAway is not a standalone service — it is the parent of Dining and Takeaway.
+      // A product supports dineaway only when it supports at least one child sub-type.
+      final bool productSupportsDineaway = product.dineIn || product.takeaway;
+      if (product.deliveryOption || productSupportsDineaway) {
         _anyServiceConfigured = true;
         if (!product.deliveryOption) _freshAllowDelivery = false;
-        if (!product.dineAway) _freshAllowDineaway = false;
-        if (product.dineAway && (product.dineIn || product.takeaway)) {
-          if (!product.dineIn) _freshAllowDineIn = false;
-          if (!product.takeaway) _freshAllowTakeaway = false;
-        }
+        if (!productSupportsDineaway) _freshAllowDineaway = false;
+        if (!product.dineIn) _freshAllowDineIn = false;
+        if (!product.takeaway) _freshAllowTakeaway = false;
       }
 
       // ── Service type compatibility ──────────────────────────────────────────
-      if (product.deliveryOption || product.dineAway) {
+      if (product.deliveryOption || productSupportsDineaway) {
         final isDineaway = selctedOrderTypeValue == 'Dineaway';
         bool serviceBlocked = false;
         String serviceMsg = '';
         if (!isDineaway && !product.deliveryOption) {
           serviceMsg = 'Delivery order is not available for this item.'.tr();
           serviceBlocked = true;
-        } else if (isDineaway && !product.dineAway) {
+        } else if (isDineaway && !productSupportsDineaway) {
           serviceMsg = 'DineAway order is not available for this item.'.tr();
           serviceBlocked = true;
-        } else if (isDineaway &&
-            product.dineAway &&
-            (product.dineIn || product.takeaway)) {
+        } else if (isDineaway) {
           if (selectedDineawayType == 'Takeaway' && !product.takeaway) {
             serviceMsg = 'TakeAway order is not available for this item.'.tr();
             serviceBlocked = true;
@@ -656,6 +842,50 @@ class _CartScreenState extends State<CartScreen> {
         }
       }
 
+      // ── Variant price change — remove stale item; re-add via dialog ──────────
+      if (cartProduct.variant_info != null &&
+          !variantPriceChangedIds.contains(cartProduct.id)) {
+        final freshVariantPrice = _computeFreshVariantPrice(cartProduct, product);
+        if (freshVariantPrice != null) {
+          final freshDouble = double.tryParse(freshVariantPrice) ?? 0;
+          final cartDouble = double.tryParse(cartProduct.price) ?? 0;
+          if ((freshDouble - cartDouble).abs() > 0.001) {
+            variantPriceChanged.add(MapEntry(cartProduct, product));
+            variantPriceChangedIds.add(cartProduct.id);
+          }
+        }
+      }
+
+      // ── Add-on price change — remove stale item; re-add via dialog ──────────
+      if (!variantPriceChangedIds.contains(cartProduct.id)) {
+        final extrasPrice = double.tryParse(cartProduct.extras_price ?? '0') ?? 0;
+        if (extrasPrice > 0 &&
+            cartProduct.extras != null &&
+            cartProduct.extras!.isNotEmpty) {
+          final addOnNames = cartProduct.extras!
+              .split(',')
+              .map((s) => s.trim())
+              .where((s) => s.isNotEmpty)
+              .toList();
+          double freshExtrasTotal = 0;
+          bool allFound = true;
+          for (final name in addOnNames) {
+            final idx = product.addOnsTitle.indexWhere((t) => t.toString() == name);
+            if (idx >= 0 && idx < product.addOnsPrice.length) {
+              freshExtrasTotal += double.tryParse(
+                    productCommissionPrice(product.addOnsPrice[idx].toString())) ?? 0;
+            } else {
+              allFound = false;
+              break;
+            }
+          }
+          if (allFound && (freshExtrasTotal - extrasPrice).abs() > 0.001) {
+            variantPriceChanged.add(MapEntry(cartProduct, product));
+            variantPriceChangedIds.add(cartProduct.id);
+          }
+        }
+      }
+
       // ── Variant removed ─────────────────────────────────────────────────────
       if (cartProduct.variant_info != null &&
           product.itemAttributes != null &&
@@ -683,11 +913,14 @@ class _CartScreenState extends State<CartScreen> {
       }
     }
 
-    // ── Apply vendor-level feature gates (admin flags + vendor pause flags) ─────
+    // ── Apply vendor-level feature gates ─────────────────────────────────────
     if (vendorModel != null) {
+      // Layer 1: admin-controlled master switches
       if (!vendorModel!.deliveryEnabled) _freshAllowDelivery = false;
       if (!vendorModel!.dineAwayEnabled) _freshAllowDineaway = false;
-      // Vendor-controlled pauses — vendor can pause delivery/dineaway from their app
+      if (!vendorModel!.takeawayEnabled) _freshAllowTakeaway = false;
+      if (!vendorModel!.diningEnabled)   _freshAllowDineIn   = false;
+      // Layer 2: vendor-controlled temporary pause
       if (!vendorModel!.vendorDeliveryOpen) _freshAllowDelivery = false;
       if (!vendorModel!.vendorDineawayOpen) _freshAllowDineaway = false;
     }
@@ -699,43 +932,31 @@ class _CartScreenState extends State<CartScreen> {
         _allowDineaway = _freshAllowDineaway;
         _allowDineIn = _freshAllowDineIn;
         _allowDineAwayTakeaway = _freshAllowTakeaway;
-        // If current mode is vendor-disabled, switch to the available mode
-        if (!_freshAllowDelivery && selctedOrderTypeValue == 'Delivery') {
-          selctedOrderTypeValue = 'Dineaway';
-        }
-        if (!_freshAllowDineaway && selctedOrderTypeValue == 'Dineaway') {
-          selctedOrderTypeValue = 'Delivery';
-          selectedDineawayType = null;
-          isDineawaySelected = false;
-        }
-        if (selectedDineawayType == 'Dining' && !_freshAllowDineIn) {
-          selectedDineawayType = null;
-          isDineawaySelected = false;
-        }
-        if (selectedDineawayType == 'Takeaway' && !_freshAllowTakeaway) {
-          selectedDineawayType = null;
-          isDineawaySelected = false;
-        }
       });
     }
 
     // ── Batched DB writes (parallel — each targets a different row) ───────────
-    await Future.wait([
-      ...idsToRemove.map((id) => cartDatabase.removeProduct(id)),
-      ...priceUpdates.map((u) => cartDatabase.updateProduct(CartProduct(
-            id: u.key.id,
-            category_id: u.key.category_id,
-            name: u.key.name,
-            photo: u.key.photo,
-            price: u.value,
-            vendorID: u.key.vendorID,
-            quantity: u.key.quantity,
-            extras: u.key.extras,
-            extras_price: u.key.extras_price,
-            variant_info: u.key.variant_info,
-            discountPrice: u.key.discountPrice,
-          ))),
-    ]);
+    try {
+      await Future.wait([
+        ...idsToRemove.map((id) => cartDatabase.removeProduct(id)),
+        ...variantPriceChangedIds.map((id) => cartDatabase.removeProduct(id)),
+        ...priceUpdates.map((u) => cartDatabase.updateProduct(CartProduct(
+              id: u.key.id,
+              category_id: u.key.category_id,
+              name: u.key.name,
+              photo: u.key.photo,
+              price: u.value,
+              vendorID: u.key.vendorID,
+              quantity: u.key.quantity,
+              extras: u.key.extras,
+              extras_price: u.key.extras_price,
+              variant_info: u.key.variant_info,
+              discountPrice: u.key.discountPrice,
+            ))),
+      ]);
+    } catch (e) {
+      debugPrint('[ValidateCart] DB write error: $e');
+    }
 
     // ── Notifications ─────────────────────────────────────────────────────────
     // Use _queueOrShowNotification so these appear AFTER the skeleton has
@@ -753,7 +974,7 @@ class _CartScreenState extends State<CartScreen> {
           : "${priceChanges.length} ${'items price updated to latest'.tr()}";
       _queueOrShowNotification(
         message: message,
-        color: AppThemeData.warning500,
+        color: const Color(0xFFF59E0B),
         icon: Icons.price_change_outlined,
       );
     }
@@ -762,28 +983,133 @@ class _CartScreenState extends State<CartScreen> {
     // StreamBuilder's hash check doesn't see a changed cart and schedule a
     // redundant second _validateCart() call right after the skeleton ends.
     final postRemovalHash = cartSnapshot
-        .where((cp) => !idsToRemove.contains(cp.id))
+        .where((cp) =>
+            !idsToRemove.contains(cp.id) &&
+            !variantPriceChangedIds.contains(cp.id))
         .map((cp) => cp.id)
         .join(',');
 
-    if (mounted)
+    if (mounted) {
+      // Clear _isValidating immediately so the skeleton stops "loading",
+      // but defer _isCartInitialized by one frame so the SQLite stream can
+      // deliver post-write emissions before the hash-check runs in the real
+      // cart UI — preventing a spurious second validation trigger.
       setState(() {
         _lastPermCartHash = postRemovalHash;
         _isValidating = false;
-        _isCartInitialized = true; // Skeleton → real cart
       });
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && !_isCartInitialized) {
+          setState(() => _isCartInitialized = true);
+        }
+      });
+    }
+
+    // Queue variant-price dialogs to show after the cart UI is visible.
+    if (variantPriceChanged.isNotEmpty) {
+      _pendingVariantDialogs.addAll(variantPriceChanged);
+    }
 
     // Flush any notifications that were queued during the skeleton phase.
     // addPostFrameCallback ensures the real cart is rendered before they appear.
-    WidgetsBinding.instance.addPostFrameCallback((_) => _flushPendingNotifications());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _flushPendingNotifications();
+      _flushVariantDialogs();
+    });
+    } catch (e, st) {
+      debugPrint('[ValidateCart] unhandled error: $e\n$st');
+    } finally {
+      // Guarantee _isValidating is always cleared — even when an exception
+      // escapes (e.g. vendorModel.isOpen() throws on malformed timeslot data).
+      if (mounted && _isValidating) {
+        setState(() {
+          _isValidating = false;
+          if (!_isCartInitialized) _isCartInitialized = true;
+        });
+      }
+    }
+  }
+
+  // ── Show ProductOptionsDialog for each variant whose price changed ─────────
+  Future<void> _flushVariantDialogs() async {
+    if (!mounted || _pendingVariantDialogs.isEmpty) return;
+    final toShow = List<MapEntry<CartProduct, ProductModel>>.from(_pendingVariantDialogs);
+    _pendingVariantDialogs.clear();
+    _dialogsFlushInProgress = true;
+
+    _showTopNotification(
+      message: toShow.length == 1
+          ? 'A variant item price has changed — please confirm your selection.'.tr()
+          : '${toShow.length} ${'variant item prices changed — please re-confirm your selections.'.tr()}',
+      color: const Color(0xFFF59E0B),
+      icon: Icons.price_change_outlined,
+      duration: const Duration(seconds: 5),
+    );
+
+    for (final entry in toShow) {
+      if (!mounted) break;
+      final cp = entry.key;
+      final fresh = entry.value;
+      VariantInfo? vi;
+      try {
+        final raw = cp.variant_info;
+        if (raw is VariantInfo) {
+          vi = raw;
+        } else if (raw is Map<String, dynamic>) {
+          vi = VariantInfo.fromJson(raw);
+        } else if (raw is String && raw.isNotEmpty && raw != 'null') {
+          vi = VariantInfo.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+        }
+      } catch (_) {}
+
+      // Pass the chosen product back via Navigator.pop so addProduct is
+      // awaited here — after the modal closes — not fire-and-forget inside
+      // the callback.  This guarantees the stream has emitted before we stamp
+      // _lastPermCartHash, avoiding a spurious hash-mismatch revalidation.
+      final result = await showModalBottomSheet<ProductModel>(
+        context: context,
+        isScrollControlled: true,
+        backgroundColor: Colors.transparent,
+        useSafeArea: true,
+        isDismissible: false,
+        enableDrag: false,
+        builder: (ctx) => ProductOptionsDialog(
+          productModel: fresh,
+          initialVariantInfo: vi,
+          onAddToCart: (ProductModel updatedProduct, double totalPrice) async {
+            Navigator.of(ctx).pop(updatedProduct);
+          },
+        ),
+      );
+      if (result != null && mounted) {
+        final qty = cp.quantity > 0 ? cp.quantity : 1;
+        for (int q = 0; q < qty; q++) {
+          await cartDatabase.addProduct(result, cartDatabase, true);
+        }
+      }
+    }
+
+    // Defer by one frame so the SQLite stream delivers the just-written items
+    // into cartProducts before we stamp _lastPermCartHash — eliminating the
+    // race that caused a spurious second _validateCart() after dialogs.
+    if (mounted) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          setState(() {
+            _dialogsFlushInProgress = false;
+            _lastPermCartHash = cartProducts.map((p) => p.id).join(',');
+          });
+        }
+      });
+    }
   }
 
   getDeliveryCharges(num km) async {
     deliverExec = true;
     String newDeliveryCharges = "0.0";
 
-    if (sectionConstantModel!.serviceTypeFlag == "ecommerce-service") {
-      newDeliveryCharges = sectionConstantModel!.delivery_charge!;
+    if (sectionConstantModel?.serviceTypeFlag == "ecommerce-service") {
+      newDeliveryCharges = sectionConstantModel?.delivery_charge ?? "0.0";
     } else {
       DeliveryChargeModel? deliveryChargeModel =
           await _fireStoreUtils.getDeliveryCharges();
@@ -864,6 +1190,18 @@ class _CartScreenState extends State<CartScreen> {
 
   @override
   Widget build(BuildContext context) {
+    return ValueListenableBuilder<bool>(
+      valueListenable: isDeliveryActiveNotifier,
+      builder: (context, deliveryActive, _) {
+        if (selctedOrderTypeValue == 'Delivery'.tr() && !deliveryActive) {
+          return ComingSoonScreen(message: deliveryOffMessageNotifier.value);
+        }
+        return _buildScreen(context);
+      },
+    );
+  }
+
+  Widget _buildScreen(BuildContext context) {
     return Scaffold(
       backgroundColor:
           isDarkMode(context) ? AppThemeData.surfaceDark : AppThemeData.surface,
@@ -887,23 +1225,29 @@ class _CartScreenState extends State<CartScreen> {
                   WidgetsBinding.instance.addPostFrameCallback((_) {
                     if (mounted) setState(() => _isCartInitialized = true);
                   });
-                } else if (data.isNotEmpty && !isDeliverFound && !_reOrderPending) {
-                  // Has items and re-order population (if any) is done — kick off
-                  // vendor/validation pipeline. The !_reOrderPending guard prevents
-                  // a premature _validateCart() while products are still being
-                  // added one-by-one to the cart DB during re-order restore.
+                } else if (data.isNotEmpty && !_reOrderPending) {
+                  // Keep the skeleton visible while validation runs.
+                  // _validateCart() sets _isCartInitialized = true when it
+                  // finishes, so the cart only appears fully checked.
                   cartProducts = data;
-                  WidgetsBinding.instance.addPostFrameCallback((_) {
-                    if (mounted && !isDeliverFound) getDeliveyData();
-                  });
+                  if (!isDeliverFound) {
+                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                      if (!mounted || isDeliverFound) return;
+                      getDeliveyData();
+                    });
+                  }
                 }
               }
               return const CartSkeletonLoader();
             }
 
             if (!snapshot.hasData || (snapshot.data?.isEmpty ?? true)) {
-              // Cart was just cleared (e.g. section switch) — reset all billing state
-              if (cartProducts.isNotEmpty) {
+              // Cart was just cleared (e.g. section switch) — reset all billing state.
+              // Skip when _pendingVariantDialogs is non-empty: the cart is temporarily
+              // empty because validation just removed stale-price items that are about
+              // to be re-added via ProductOptionsDialog — resetting vendor state here
+              // would trigger unnecessary re-validation cycles.
+              if (cartProducts.isNotEmpty && _pendingVariantDialogs.isEmpty) {
                 WidgetsBinding.instance.addPostFrameCallback((_) {
                   if (mounted) {
                     setState(() {
@@ -942,18 +1286,20 @@ class _CartScreenState extends State<CartScreen> {
               final cartHash = cartProducts.map((p) => p.id).join(',');
               if (_lastPermCartHash != cartHash) {
                 _lastPermCartHash = cartHash;
-                if (_isCartInitialized && !_isValidating) {
+                if (_isCartInitialized && !_isValidating && !_dialogsFlushInProgress) {
                   // Cart items changed after initial load — re-validate from Firestore
                   WidgetsBinding.instance.addPostFrameCallback((_) {
-                    if (mounted) _validateCart();
+                    if (mounted && !_isValidating && !_dialogsFlushInProgress) _validateCart();
                   });
                 } else {
                   // Still initialising — use cached SharedPreferences permissions
                   _computeServicePermissions(cartProducts);
                 }
               }
-              if (!isDeliverFound) {
-                getDeliveyData();
+              if (!isDeliverFound && !_isValidating) {
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (mounted && !isDeliverFound && !_isValidating) getDeliveyData();
+                });
               }
               return Column(
                 children: [
@@ -1023,7 +1369,7 @@ class _CartScreenState extends State<CartScreen> {
                                                 .copyWith(
                                               fontWeight: FontWeight.w500,
                                               color: couponId.isNotEmpty
-                                                  ? AppThemeData.accent500
+                                                  ? AppThemeData.primary500
                                                   : (isDarkMode(context)
                                                       ? AppThemeData
                                                           .darkTextTertiary
@@ -1087,9 +1433,7 @@ class _CartScreenState extends State<CartScreen> {
                                       },
                                       child: Container(
                                         decoration: BoxDecoration(
-                                          color: couponId.isNotEmpty
-                                              ? AppThemeData.accent500
-                                              : AppThemeData.primary500,
+                                          color: AppThemeData.primary500,
                                           borderRadius:
                                               BorderRadius.circular(10),
                                         ),
@@ -1116,7 +1460,7 @@ class _CartScreenState extends State<CartScreen> {
                             ],
 
                             // ── Schedule ──
-                            if (sectionConstantModel!.serviceTypeFlag !=
+                            if ((sectionConstantModel?.serviceTypeFlag ?? '') !=
                                 "ecommerce-service") ...[
                               _modernScheduleSection(),
                               const SizedBox(height: 12),
@@ -1146,7 +1490,7 @@ class _CartScreenState extends State<CartScreen> {
                   // ── Place Order Bar ────────────────────────────────────
                   Builder(builder: (context) {
                     final isDark = isDarkMode(context);
-                    final canAct = !_isValidating && _canCheckout;
+                    final canAct = !_isValidating && _canCheckout && _serviceRestrictionMessage == null;
                     void _handleTap() {
                       if (_isValidating) {
                         _showTopNotification(
@@ -1184,7 +1528,19 @@ class _CartScreenState extends State<CartScreen> {
                         );
                         return;
                       }
+                      if (selctedOrderTypeValue == "Delivery" && !_deliveryAddressComplete) {
+                        setState(() => _houseFieldError = true);
+                        _showTopNotification(
+                          message: (addressModel.locality?.isEmpty ?? true)
+                              ? "Please pick your delivery location.".tr()
+                              : "Please enter your house / flat details.".tr(),
+                          color: AppThemeData.error500,
+                          icon: Icons.warning_amber_rounded,
+                        );
+                        return;
+                      }
                       if (couponId.isEmpty) txt.text = "";
+
                       final specialDiscountMap = {
                         'special_discount': specialDiscountAmount,
                         'special_discount_label': specialDiscount,
@@ -1270,7 +1626,7 @@ class _CartScreenState extends State<CartScreen> {
 
                               const SizedBox(width: 16),
 
-                              // ── Right: Place Order button ─────────────────
+                              // ── Right: Place Order / Select Address button ──
                               Expanded(
                                 child: Material(
                                   color: Colors.transparent,
@@ -1325,9 +1681,11 @@ class _CartScreenState extends State<CartScreen> {
                                                 mainAxisAlignment: MainAxisAlignment.center,
                                                 children: [
                                                   Text(
-                                                    !_canCheckout
-                                                        ? "Issues Found".tr()
-                                                        : "Place Order".tr(),
+                                                    _serviceRestrictionMessage != null
+                                                        ? "Service Paused".tr()
+                                                        : !_canCheckout
+                                                            ? "Issues Found".tr()
+                                                            : "Place Order".tr(),
                                                     style: AppTypography.labelLarge.copyWith(
                                                       color: Colors.white,
                                                       fontWeight: FontWeight.w700,
@@ -1336,9 +1694,11 @@ class _CartScreenState extends State<CartScreen> {
                                                   ),
                                                   const SizedBox(width: 8),
                                                   Icon(
-                                                    !_canCheckout
-                                                        ? Icons.warning_amber_rounded
-                                                        : Icons.arrow_forward_rounded,
+                                                    _serviceRestrictionMessage != null
+                                                        ? Icons.pause_circle_outline_rounded
+                                                        : !_canCheckout
+                                                            ? Icons.warning_amber_rounded
+                                                            : Icons.arrow_forward_rounded,
                                                     color: Colors.white,
                                                     size: 18,
                                                   ),
@@ -1409,81 +1769,233 @@ class _CartScreenState extends State<CartScreen> {
     );
   }
 
-  // Modern Address Section
+  // Delivery location section — locality picker + inline house/flat + landmark
   Widget _modernAddressSection() {
+    final dark = isDarkMode(context);
+    final hasArea = addressModel.locality != null &&
+        addressModel.locality!.isNotEmpty;
+    final areaText = hasArea
+        ? addressModel.locality!
+        : 'Tap to pick your location'.tr();
+
+    Future<void> pickAddress() async {
+      final result = await Navigator.of(context).push<AddressModel>(
+        MaterialPageRoute(builder: (_) => const DeliveryAddressScreen()),
+      );
+      if (result != null && mounted) {
+        // A new location means the old house/flat + landmark no longer
+        // apply — clear both so the user re-enters them for this address.
+        result.address = '';
+        result.landmark = '';
+        _houseCtrl.clear();
+        _landmarkCtrl.clear();
+        clearRoadDistanceCache();
+        setState(() {
+          addressModel = result;
+          MyAppState.selectedPosotion = result;
+        });
+        getDeliveyData();
+      }
+    }
+
+    return _sectionCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          ListTile(
+            contentPadding:
+                const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+            leading: _iconBadge(Icons.location_on_rounded),
+            title: Text(
+              'Select Location'.tr(),
+              style: AppTypography.labelLarge.copyWith(
+                fontWeight: FontWeight.w700,
+                letterSpacing: -0.1,
+                color: dark
+                    ? AppThemeData.darkTextPrimary
+                    : AppThemeData.neutral900,
+              ),
+            ),
+            subtitle: Text(
+              areaText.length > 50
+                  ? '${areaText.substring(0, 50)}...'
+                  : areaText,
+              style: AppTypography.bodySmall.copyWith(
+                color: dark
+                    ? AppThemeData.darkTextSecondary
+                    : AppThemeData.neutral600,
+              ),
+            ),
+            trailing: GestureDetector(
+              onTap: pickAddress,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: AppThemeData.primary500.withValues(alpha: 0.10),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text(
+                  hasArea ? 'Change'.tr() : 'Pick'.tr(),
+                  style: AppTypography.labelSmall.copyWith(
+                    fontWeight: FontWeight.bold,
+                    color: AppThemeData.primary500,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          if (hasArea) ...[
+            const SizedBox(height: 4),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+              child: TextField(
+                controller: _houseCtrl,
+                textCapitalization: TextCapitalization.words,
+                style: TextStyle(
+                  color: dark ? AppThemeData.darkTextPrimary : AppThemeData.neutral900,
+                  fontSize: 14,
+                ),
+                onChanged: (value) {
+                  addressModel.address = value.trim();
+                  if (_houseFieldError && value.trim().isNotEmpty) {
+                    setState(() => _houseFieldError = false);
+                  }
+                },
+                decoration: InputDecoration(
+                  hintText: 'House / Flat / Floor / Building (required)'.tr(),
+                  hintStyle: TextStyle(
+                    color: dark ? AppThemeData.darkTextTertiary : AppThemeData.neutral400,
+                    fontSize: 13,
+                  ),
+                  prefixIcon: Icon(Icons.home_work_rounded, size: 18, color: AppThemeData.primary500),
+                  filled: true,
+                  fillColor: dark ? AppThemeData.darkBgTertiary : AppThemeData.neutral50,
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(
+                      color: _houseFieldError
+                          ? AppThemeData.error500
+                          : (dark ? AppThemeData.darkBorderSecondary : AppThemeData.neutral200),
+                    ),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(
+                      color: _houseFieldError
+                          ? AppThemeData.error500
+                          : (dark ? AppThemeData.darkBorderSecondary : AppThemeData.neutral200),
+                    ),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(
+                      color: _houseFieldError ? AppThemeData.error500 : AppThemeData.primary500,
+                      width: 1.5,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: TextField(
+                controller: _landmarkCtrl,
+                textCapitalization: TextCapitalization.words,
+                style: TextStyle(
+                  color: dark ? AppThemeData.darkTextPrimary : AppThemeData.neutral900,
+                  fontSize: 14,
+                ),
+                onChanged: (value) => addressModel.landmark = value.trim(),
+                decoration: InputDecoration(
+                  hintText: 'Landmark (optional)'.tr(),
+                  hintStyle: TextStyle(
+                    color: dark ? AppThemeData.darkTextTertiary : AppThemeData.neutral400,
+                    fontSize: 13,
+                  ),
+                  prefixIcon: Icon(Icons.place_rounded, size: 18, color: AppThemeData.neutral400),
+                  filled: true,
+                  fillColor: dark ? AppThemeData.darkBgTertiary : AppThemeData.neutral50,
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(color: dark ? AppThemeData.darkBorderSecondary : AppThemeData.neutral200),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(color: dark ? AppThemeData.darkBorderSecondary : AppThemeData.neutral200),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(color: AppThemeData.primary500, width: 1.5),
+                  ),
+                ),
+              ),
+            ),
+          ] else
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: Row(
+                children: [
+                  Icon(Icons.info_outline_rounded,
+                      size: 13,
+                      color: dark
+                          ? AppThemeData.darkTextTertiary
+                          : AppThemeData.neutral400),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      'Pick your location first to enter house / flat details'.tr(),
+                      style: AppTypography.caption.copyWith(
+                        color: dark
+                            ? AppThemeData.darkTextTertiary
+                            : AppThemeData.neutral400,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  // ── Dineaway area picker card ──────────────────────────────────────────────
+  Widget _dineawayLocationSection() {
+    final dark = isDarkMode(context);
+    final area = (addressModel.locality != null && addressModel.locality!.isNotEmpty)
+        ? addressModel.locality!
+        : 'Tap to set your area'.tr();
+
     return _sectionCard(
       child: ListTile(
         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-        leading: _iconBadge(Icons.location_on_rounded),
+        leading: _iconBadge(Icons.my_location_rounded),
         title: Text(
-          "Delivery Address".tr(),
+          'Your Area'.tr(),
           style: AppTypography.labelLarge.copyWith(
             fontWeight: FontWeight.w700,
             letterSpacing: -0.1,
-            color: isDarkMode(context)
-                ? AppThemeData.darkTextPrimary
-                : AppThemeData.neutral900,
+            color: dark ? AppThemeData.darkTextPrimary : AppThemeData.neutral900,
           ),
         ),
         subtitle: GestureDetector(
-          onTap: () {
-            showModalBottomSheet(
-              context: context,
-              isScrollControlled: true,
-              shape: const RoundedRectangleBorder(
-                borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-              ),
-              builder: (context) => Padding(
-                padding: const EdgeInsets.all(20.0),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      "Delivery Address".tr(),
-                      style: AppTypography.h5.copyWith(fontWeight: FontWeight.bold),
-                    ),
-                    const SizedBox(height: 12),
-                    Text(
-                      addressModel.getFullAddress(),
-                      style: AppTypography.bodyMedium,
-                      textAlign: TextAlign.center,
-                    ),
-                    const SizedBox(height: 24),
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: AppThemeData.primary500,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          padding: const EdgeInsets.symmetric(vertical: 14),
-                        ),
-                        onPressed: () => Navigator.pop(context),
-                        child: Text("Close".tr(), style: const TextStyle(color: Colors.white)),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                  ],
-                ),
-              ),
-            );
-          },
+          onTap: () => _showDineawayAreaSheet(),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                addressModel.getFullAddress().length > 45
-                    ? "${addressModel.getFullAddress().substring(0, 45)}..."
-                    : addressModel.getFullAddress(),
+                area.length > 45 ? '${area.substring(0, 45)}...' : area,
                 style: AppTypography.bodySmall.copyWith(
-                  color: isDarkMode(context)
+                  color: dark
                       ? AppThemeData.darkTextSecondary
                       : AppThemeData.neutral600,
                 ),
               ),
               Text(
-                "Tap to view full address".tr(),
+                'Tap to pick area'.tr(),
                 style: AppTypography.labelSmall.copyWith(
                   color: AppThemeData.primary500,
                   fontWeight: FontWeight.w500,
@@ -1493,16 +2005,7 @@ class _CartScreenState extends State<CartScreen> {
           ),
         ),
         trailing: GestureDetector(
-          onTap: () async {
-            await Navigator.of(context)
-                .push(MaterialPageRoute(
-                    builder: (context) => DeliveryAddressScreen()))
-                .then((value) {
-              addressModel = value;
-              getDeliveyData();
-              setState(() {});
-            });
-          },
+          onTap: () => _showDineawayAreaSheet(),
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             decoration: BoxDecoration(
@@ -1510,13 +2013,164 @@ class _CartScreenState extends State<CartScreen> {
               borderRadius: BorderRadius.circular(10),
             ),
             child: Text(
-              "Change".tr(),
+              'Change'.tr(),
               style: AppTypography.labelSmall.copyWith(
                 fontWeight: FontWeight.bold,
                 color: AppThemeData.primary500,
               ),
             ),
           ),
+        ),
+      ),
+    );
+  }
+
+  void _showDineawayAreaSheet() {
+    final dark = isDarkMode(context);
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (sheetCtx) => Container(
+        decoration: BoxDecoration(
+          color: dark ? AppThemeData.darkBgSecondary : Colors.white,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Handle bar
+            Center(
+              child: Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: dark
+                      ? AppThemeData.darkBorderPrimary
+                      : AppThemeData.neutral300,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            const SizedBox(height: 20),
+            Row(
+              children: [
+                _iconBadge(Icons.my_location_rounded),
+                const SizedBox(width: 12),
+                Text(
+                  'Your Area'.tr(),
+                  style: AppTypography.h5.copyWith(
+                    fontWeight: FontWeight.w700,
+                    color: dark
+                        ? AppThemeData.darkTextPrimary
+                        : AppThemeData.neutral900,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Only your area is needed — no house or flat number required for dine-away orders.'
+                  .tr(),
+              style: AppTypography.bodySmall.copyWith(
+                color: dark
+                    ? AppThemeData.darkTextTertiary
+                    : AppThemeData.neutral500,
+                height: 1.4,
+              ),
+            ),
+            const SizedBox(height: 14),
+            // Current area display
+            if (addressModel.locality != null &&
+                addressModel.locality!.isNotEmpty)
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: dark
+                      ? AppThemeData.darkBgTertiary
+                      : AppThemeData.neutral50,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                    color: dark
+                        ? AppThemeData.darkBorderSecondary
+                        : AppThemeData.neutral200,
+                  ),
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(Icons.pin_drop_rounded,
+                        size: 16, color: AppThemeData.primary500),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        addressModel.locality!,
+                        style: AppTypography.bodyMedium.copyWith(
+                          color: dark
+                              ? AppThemeData.darkTextPrimary
+                              : AppThemeData.neutral800,
+                          height: 1.5,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            const SizedBox(height: 20),
+            // Pick on Map button
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppThemeData.primary500,
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14)),
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                ),
+                icon: const Icon(Icons.map_rounded,
+                    size: 18, color: Colors.white),
+                label: Text(
+                  'Pick on Map'.tr(),
+                  style: const TextStyle(
+                      color: Colors.white, fontWeight: FontWeight.w700),
+                ),
+                onPressed: () async {
+                  Navigator.pop(sheetCtx);
+                  final result = await Navigator.of(context)
+                      .push(MaterialPageRoute(
+                          builder: (_) => const LocationPicker()));
+                  if (result != null && mounted) {
+                    clearRoadDistanceCache();
+                    setState(() {
+                      addressModel.locality = result.displayName.toString();
+                      addressModel.location = UserLocation(
+                        latitude: result.lat,
+                        longitude: result.lon,
+                      );
+                    });
+                    getDeliveyData();
+                  }
+                },
+              ),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(sheetCtx),
+              child: Center(
+                child: Text(
+                  'Close'.tr(),
+                  style: AppTypography.labelMedium.copyWith(
+                    color: dark
+                        ? AppThemeData.darkTextSecondary
+                        : AppThemeData.neutral500,
+                  ),
+                ),
+              ),
+            ),
+            SafeArea(top: false, child: const SizedBox(height: 4)),
+          ],
         ),
       ),
     );
@@ -1540,8 +2194,14 @@ class _CartScreenState extends State<CartScreen> {
         ),
         subtitle: Text(
           scheduleTime == null
-              ? "Deliver as soon as possible".tr()
-              : DateFormat("EEE dd MMM, hh:mm a").format(scheduleTime!.toDate()),
+              ? (selctedOrderTypeValue == "Delivery"
+                  ? "Delivery as soon as possible".tr()
+                  : selectedDineawayType == "Takeaway"
+                      ? "Takeaway as soon as possible".tr()
+                      : selectedDineawayType == "Dining"
+                          ? "Dine-in as soon as possible".tr()
+                          : "Ready as soon as possible".tr())
+              : DateFormat("EEE, d MMM 'at' hh:mm a").format(scheduleTime!.toDate()),
           style: AppTypography.bodySmall.copyWith(
             color: isDarkMode(context)
                 ? AppThemeData.darkTextSecondary
@@ -1586,20 +2246,55 @@ class _CartScreenState extends State<CartScreen> {
     );
   }
 
+  // Parses "HH:mm" into total minutes since midnight. Returns -1 on error.
+  int _parseHHMM(String t) {
+    final p = t.split(':');
+    if (p.length != 2) return -1;
+    final h = int.tryParse(p[0]) ?? -1;
+    final m = int.tryParse(p[1]) ?? -1;
+    return (h < 0 || m < 0) ? -1 : h * 60 + m;
+  }
+
   // Generates 30-minute time slots for the given day offset (0=today, 1=tomorrow).
-  // For today, slots at least 30 min in the future are included.
+  // Slot range is derived from vendor's working hours for that day; falls back to
+  // 08:00–23:00 when no working-hours entry is configured.
+  // For today, only slots at least 30 min from now are included.
   List<DateTime> _generateTimeSlots(int dateIndex) {
     final now = DateTime.now();
-    final base =
-        dateIndex == 0 ? now : now.add(const Duration(days: 1));
+    final base = dateIndex == 0 ? now : now.add(const Duration(days: 1));
     final date = DateTime(base.year, base.month, base.day);
+    final dayName = DateFormat('EEEE', 'en_US').format(date);
 
-    const int startHour = 8;
-    const int endHour = 23;
+    // Determine slot window from vendor working hours for this day
+    int startMinutes = 8 * 60;   // fallback: 08:00
+    int endMinutes   = 23 * 60;  // fallback: 23:00
+    if (vendorModel != null && vendorModel!.workingHours.isNotEmpty) {
+      for (final wh in vendorModel!.workingHours) {
+        if (wh.day == dayName && wh.timeslot?.isNotEmpty == true) {
+          int minStart = 24 * 60;
+          int maxEnd   = 0;
+          for (final ts in wh.timeslot!) {
+            if (ts.from?.isNotEmpty == true && ts.to?.isNotEmpty == true) {
+              final f = _parseHHMM(ts.from!);
+              final t = _parseHHMM(ts.to!);
+              if (f >= 0 && f < minStart) minStart = f;
+              if (t >= 0 && t > maxEnd)  maxEnd   = t;
+            }
+          }
+          if (minStart < 24 * 60 && maxEnd >= 0) {
+            startMinutes = minStart;
+            endMinutes   = maxEnd;
+            // Midnight-crossing slot (e.g. 22:00→02:00): end < start in raw minutes
+            if (endMinutes <= startMinutes) endMinutes += 1440;
+          }
+          break;
+        }
+      }
+    }
+
     final List<DateTime> slots = [];
-    for (int h = startHour; h <= endHour; h++) {
-      slots.add(date.add(Duration(hours: h)));
-      if (h < endHour) slots.add(date.add(Duration(hours: h, minutes: 30)));
+    for (int m = startMinutes; m <= endMinutes; m += 30) {
+      slots.add(date.add(Duration(hours: m ~/ 60, minutes: m % 60)));
     }
 
     if (dateIndex == 0) {
@@ -1678,7 +2373,13 @@ class _CartScreenState extends State<CartScreen> {
                           ),
                           const SizedBox(height: 4),
                           Text(
-                            "Choose a delivery date and time".tr(),
+                            selctedOrderTypeValue == "Delivery"
+                                ? "Choose a delivery date and time".tr()
+                                : selectedDineawayType == "Takeaway"
+                                    ? "Choose a pickup date and time".tr()
+                                    : selectedDineawayType == "Dining"
+                                        ? "Choose a dining date and time".tr()
+                                        : "Choose a date and time".tr(),
                             style: AppTypography.bodySmall.copyWith(
                               color: dark
                                   ? AppThemeData.darkTextSecondary
@@ -1769,6 +2470,10 @@ class _CartScreenState extends State<CartScreen> {
                                   onTap: () {
                                     setState(() {
                                       scheduleTime = Timestamp.fromDate(slot);
+                                      if (selectedDineawayType == "Bill Pay") {
+                                        selectedDineawayType = null;
+                                        isDineawaySelected = false;
+                                      }
                                     });
                                     setSheetState(() {});
                                   },
@@ -1825,7 +2530,7 @@ class _CartScreenState extends State<CartScreen> {
                         20,
                         8,
                         20,
-                        MediaQuery.of(context).viewInsets.bottom + 20),
+                        MediaQuery.of(context).viewInsets.bottom + MediaQuery.of(context).padding.bottom + 20),
                     child: Column(
                       children: [
                         SizedBox(
@@ -1843,7 +2548,21 @@ class _CartScreenState extends State<CartScreen> {
                             ),
                             onPressed: scheduleTime == null
                                 ? null
-                                : () => Navigator.pop(ctx),
+                                : () {
+                                    final cutoff = DateTime.now().add(const Duration(minutes: 30));
+                                    if (scheduleTime!.toDate().isBefore(cutoff)) {
+                                      // Slot became stale while the picker was open
+                                      setState(() => scheduleTime = null);
+                                      setSheetState(() {});
+                                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                                        content: Text('Selected time is no longer available. Please choose a new slot.'.tr()),
+                                        backgroundColor: AppThemeData.warning400,
+                                        behavior: SnackBarBehavior.floating,
+                                      ));
+                                    } else {
+                                      Navigator.pop(ctx);
+                                    }
+                                  },
                             child: Text(
                               "Confirm Schedule".tr(),
                               style: AppTypography.labelLarge.copyWith(
@@ -1859,7 +2578,13 @@ class _CartScreenState extends State<CartScreen> {
                             Navigator.pop(ctx);
                           },
                           child: Text(
-                            "Clear & Deliver ASAP".tr(),
+                            selctedOrderTypeValue == "Delivery"
+                                ? "Clear & Deliver ASAP".tr()
+                                : selectedDineawayType == "Takeaway"
+                                    ? "Clear & Pickup ASAP".tr()
+                                    : selectedDineawayType == "Dining"
+                                        ? "Clear & Dine-in ASAP".tr()
+                                        : "Clear & Order ASAP".tr(),
                             style: AppTypography.labelMedium.copyWith(
                               color: dark
                                   ? AppThemeData.darkTextSecondary
@@ -1984,7 +2709,7 @@ class _CartScreenState extends State<CartScreen> {
       if (vendorModel!.specialDiscountEnable) {
         // Reset special discount amount at the beginning
         specialDiscountAmount = 0.0;
-        final now = new DateTime.now();
+        final now = _serverAdjustedNow;
         var day = DateFormat('EEEE', 'en_US').format(now);
         var date = DateFormat('dd-MM-yyyy').format(now);
         
@@ -1999,66 +2724,71 @@ class _CartScreenState extends State<CartScreen> {
           if (day == dayDiscount.day.toString()) {
             print('✅ Found discount rules for $day');
             
-            if (dayDiscount.timeslot!.isNotEmpty) {
-              dayDiscount.timeslot!.forEach((timeSlot) {
-                if (timeSlot.discount_type == "delivery") {
-                  var start = DateFormat("dd-MM-yyyy HH:mm")
-                      .parse(date + " " + timeSlot.from.toString());
-                  var end = DateFormat("dd-MM-yyyy HH:mm")
-                      .parse(date + " " + timeSlot.to.toString());
-                  
-                  print('⏰ Checking timeslot: ${timeSlot.from} - ${timeSlot.to}');
-                  
-                  if (isCurrentDateInRange(start, end)) {
-                    print('✅ Time condition met');
-                    
-                    // Check if subtotal meets the applicable amount condition
-                    bool subtotalCondition = true;
-                    if (timeSlot.applicableAmount != null && timeSlot.applicableAmount!.isNotEmpty) {
-                      double applicableAmount = double.parse(timeSlot.applicableAmount!);
-                      subtotalCondition = subTotal >= applicableAmount;
-                      print('💰 Min amount: ₹$applicableAmount, Condition: ${subtotalCondition ? "✅ Met" : "❌ Not met"}');
-                    }
-                    
-                    // Check if order type matches
-                    bool orderTypeCondition = true;
-                    if (timeSlot.orderType != null && timeSlot.orderType!.isNotEmpty) {
-                      String currentOrderType = selctedOrderTypeValue == "Delivery" ? "Delivery" : "Takeaway";
-                      orderTypeCondition = timeSlot.orderType == currentOrderType;
-                      print('🚚 Order type: ${timeSlot.orderType}, Condition: ${orderTypeCondition ? "✅ Met" : "❌ Not met"}');
-                    }
-                    
-                    // Add to eligible list if both conditions are met
-                    if (subtotalCondition && orderTypeCondition) {
-                      double discountValue = double.parse(timeSlot.discount.toString());
-                      String discountType = timeSlot.type.toString();
-                      
-                      // Calculate actual discount amount for comparison
-                      double actualDiscountAmount;
-                      if (discountType == "percentage") {
-                        actualDiscountAmount = subTotal * discountValue / 100;
-                      } else {
-                        actualDiscountAmount = discountValue;
-                      }
-                      
-                      eligibleDiscounts.add({
-                        'discountValue': discountValue,
-                        'discountType': discountType,
-                        'actualAmount': actualDiscountAmount,
-                        'description': discountType == "percentage"
-                            ? '${discountValue.toStringAsFixed(0)}% off (${amountShow(amount: actualDiscountAmount.toStringAsFixed(2))})'
-                            : 'Flat ${amountShow(amount: discountValue.toStringAsFixed(2))} off'
-                      });
-                      
-                      print('✅ Eligible discount found: ${eligibleDiscounts.last['description']}');
-                    } else {
-                      print('❌ Discount not eligible - conditions not met');
-                    }
-                  } else {
-                    print('❌ Time condition not met');
-                  }
+            if (dayDiscount.timeslot?.isNotEmpty == true) {
+              for (final timeSlot in dayDiscount.timeslot!) {
+                // Skip incomplete slots (BUG-2 guard: timeslot can be null in old data)
+                if ((timeSlot.from?.isEmpty ?? true) || (timeSlot.to?.isEmpty ?? true)) continue;
+                var start = DateFormat("dd-MM-yyyy HH:mm")
+                    .parse(date + " " + timeSlot.from!);
+                var end = DateFormat("dd-MM-yyyy HH:mm")
+                    .parse(date + " " + timeSlot.to!);
+                // Midnight-crossing slot: if end ≤ start the window spans into
+                // the next calendar day (e.g. 22:00 → 02:00).
+                if (!end.isAfter(start)) {
+                  end = end.add(const Duration(days: 1));
                 }
-              });
+
+                print('⏰ Checking timeslot: ${timeSlot.from} - ${timeSlot.to}');
+
+                if (isCurrentDateInRange(start, end)) {
+                  print('✅ Time condition met');
+
+                  // Check if subtotal meets the applicable amount condition
+                  bool subtotalCondition = true;
+                  if (timeSlot.applicableAmount != null && timeSlot.applicableAmount!.isNotEmpty) {
+                    double applicableAmount = double.parse(timeSlot.applicableAmount!);
+                    subtotalCondition = subTotal >= applicableAmount;
+                    print('💰 Min amount: ₹$applicableAmount, Condition: ${subtotalCondition ? "✅ Met" : "❌ Not met"}');
+                  }
+
+                  // Check if order type matches
+                  bool orderTypeCondition = true;
+                  if (timeSlot.orderType != null && timeSlot.orderType!.isNotEmpty) {
+                    String currentOrderType = selctedOrderTypeValue == "Delivery" ? "Delivery" : "Takeaway";
+                    orderTypeCondition = timeSlot.orderType == currentOrderType;
+                    print('🚚 Order type: ${timeSlot.orderType}, Condition: ${orderTypeCondition ? "✅ Met" : "❌ Not met"}');
+                  }
+
+                  // Add to eligible list if both conditions are met
+                  if (subtotalCondition && orderTypeCondition) {
+                    double discountValue = double.parse(timeSlot.discount.toString());
+                    String discountType = timeSlot.type.toString();
+
+                    // Calculate actual discount amount for comparison
+                    double actualDiscountAmount;
+                    if (discountType == "percentage") {
+                      actualDiscountAmount = subTotal * discountValue / 100;
+                    } else {
+                      actualDiscountAmount = discountValue;
+                    }
+
+                    eligibleDiscounts.add({
+                      'discountValue': discountValue,
+                      'discountType': discountType,
+                      'actualAmount': actualDiscountAmount,
+                      'description': discountType == "percentage"
+                          ? '${discountValue.toStringAsFixed(0)}% off (${amountShow(amount: actualDiscountAmount.toStringAsFixed(2))})'
+                          : 'Flat ${amountShow(amount: discountValue.toStringAsFixed(2))} off'
+                    });
+
+                    print('✅ Eligible discount found: ${eligibleDiscounts.last['description']}');
+                  } else {
+                    print('❌ Discount not eligible - conditions not met');
+                  }
+                } else {
+                  print('❌ Time condition not met');
+                }
+              }
             }
           }
         });
@@ -2073,8 +2803,14 @@ class _CartScreenState extends State<CartScreen> {
           
           specialDiscount = maxDiscount['discountValue'];
           specialType = maxDiscount['discountType'];
-          specialDiscountAmount = maxDiscount['actualAmount'];
-          
+          // Percentage is already bounded to <=100% vendor-side (so it can
+          // never exceed subtotal), but a flat-amount special discount has
+          // no such guarantee if the vendor left "Minimum Order Amount" at
+          // 0 — cap it here as a cart-side backstop.
+          final double rawSpecialAmount = maxDiscount['actualAmount'];
+          specialDiscountAmount =
+              rawSpecialAmount > subTotal ? subTotal : rawSpecialAmount;
+
           print('🎯 Selected: ${maxDiscount['description']} - Final amount: ₹${specialDiscountAmount.toStringAsFixed(2)}');
           
           // Apply the maximum discount to grand total
@@ -2104,7 +2840,13 @@ class _CartScreenState extends State<CartScreen> {
     // their combined value exceeds the subtotal, keep only the larger discount
     // for this build. The _doApplyCoupon path handles the user-triggered case;
     // this handles the rare automatic case (special window opens mid-session).
+    //
+    // effectiveDiscountVal / effectiveSpecialDiscountAmount are LOCAL — they
+    // hold the actually-applied amounts after resolution. Class-level variables
+    // are NOT mutated here so the next build cycle isn't corrupted.
     final double couponEffective = per != 0.0 ? per : type;
+    double effectiveDiscountVal = discountVal;
+    double effectiveSpecialDiscountAmount = specialDiscountAmount;
     String? _discountConflictWarning;
     if (couponEffective > 0 &&
         specialDiscountAmount > 0 &&
@@ -2112,23 +2854,31 @@ class _CartScreenState extends State<CartScreen> {
       if (couponEffective <= specialDiscountAmount) {
         // Coupon is smaller — undo its effect on grandtotal for this frame.
         grandtotal += couponEffective;
+        effectiveDiscountVal = 0;
         _discountConflictWarning =
             'Coupon discount not applied — special discount gives a higher saving.'
                 .tr();
       } else {
         // Special discount is smaller — undo its effect for this frame.
         grandtotal += specialDiscountAmount;
+        effectiveSpecialDiscountAmount = 0;
         _discountConflictWarning =
             'Special discount not applied — coupon gives a higher saving.'.tr();
       }
     }
     grandtotal = grandtotal.clamp(0.0, double.infinity);
 
+    // Tax base: net product cost after the discounts that were actually applied.
+    // Clamped to 0 so a very large discount never produces negative tax.
+    final double taxBase =
+        (subTotal - effectiveDiscountVal - effectiveSpecialDiscountAmount)
+            .clamp(0.0, double.infinity);
+
     // Calculate all applicable taxes regardless of visibility
     double totalTaxAmount = 0.0;
     // Track taxes to display in the UI
     List<TaxModel> taxesToDisplay = [];
-    
+
     if (taxList != null) {
       for (var element in taxList!) {
         // Check if the tax applies to the current order type
@@ -2140,8 +2890,7 @@ class _CartScreenState extends State<CartScreen> {
 
         if (shouldApplyTax) {
           double taxAmount = getTaxValue(
-              amount:
-                  (subTotal - discountVal - specialDiscountAmount).toString(),
+              amount: taxBase.toString(),
               taxModel: element);
           totalTaxAmount += taxAmount;
 
@@ -2174,7 +2923,7 @@ class _CartScreenState extends State<CartScreen> {
             ? "(-${amountShow(amount: type.toDouble().toString())})"
             : "(-${amountShow(amount: '0.0')})";
 
-    final double totalSavings = discountVal + specialDiscountAmount;
+    final double totalSavings = effectiveDiscountVal + effectiveSpecialDiscountAmount;
 
     return _sectionCard(
       child: Column(
@@ -2268,7 +3017,7 @@ class _CartScreenState extends State<CartScreen> {
                       fontWeight: FontWeight.w800,
                       fontSize: 22,
                       letterSpacing: -0.5,
-                      color: AppThemeData.accent500,
+                      color: AppThemeData.primary500,
                     ),
                   ),
                 ],
@@ -2290,18 +3039,20 @@ class _CartScreenState extends State<CartScreen> {
                             _billRow('Subtotal'.tr(),
                                 amountShow(amount: subTotal.toString()),
                                 labelColor, valueColor),
-                            _billRow('Discount'.tr(), discountDisplay,
-                                labelColor, AppThemeData.accent500),
+                            if (effectiveDiscountVal > 0)
+                              _billRow('Discount'.tr(), discountDisplay,
+                                  labelColor, AppThemeData.primary500),
                             if (vendorModel != null &&
                                 specialDiscountEnable &&
                                 vendorModel!.specialDiscountEnable &&
-                                specialDiscountAmount > 0.0)
+                                effectiveSpecialDiscountAmount > 0.0)
                               _billRow(
                                   'Special Discount'.tr(),
-                                  '(-${amountShow(amount: specialDiscountAmount.toString())})',
+                                  '(-${amountShow(amount: effectiveSpecialDiscountAmount.toString())})',
                                   labelColor,
-                                  AppThemeData.accent500),
-                            if (selctedOrderTypeValue == 'Delivery')
+                                  AppThemeData.primary500),
+                            if (selctedOrderTypeValue == 'Delivery' &&
+                                (double.tryParse(deliveryCharges) ?? 0) > 0)
                               _billRow(
                                   'Delivery Charges'.tr(),
                                   amountShow(amount: deliveryCharges.toString()),
@@ -2311,10 +3062,7 @@ class _CartScreenState extends State<CartScreen> {
                                   taxModel.title.toString(),
                                   amountShow(
                                       amount: getTaxValue(
-                                    amount: (double.parse(subTotal.toString()) -
-                                            discountVal -
-                                            specialDiscountAmount)
-                                        .toString(),
+                                    amount: taxBase.toString(),
                                     taxModel: taxModel,
                                   ).toString()),
                                   labelColor,
@@ -2323,15 +3071,15 @@ class _CartScreenState extends State<CartScreen> {
                             if (tipValue > 0)
                               _billRow('Tip amount'.tr(),
                                   amountShow(amount: tipValue.toString()),
-                                  labelColor, AppThemeData.warning500),
+                                  labelColor, const Color(0xFFF59E0B)),
                             const SizedBox(height: 10),
                             Divider(height: 1, color: dividerColor),
                             const SizedBox(height: 10),
                             _billRow(
                                 'Grand Total'.tr(),
                                 amountShow(amount: grandtotal.toString()),
-                                AppThemeData.accent500,
-                                AppThemeData.accent500,
+                                AppThemeData.primary500,
+                                AppThemeData.primary500,
                                 isBold: true),
                           ],
                         ),
@@ -2557,6 +3305,11 @@ class _CartScreenState extends State<CartScreen> {
                 "Pay your bill at the restaurant",
                 Icons.receipt_long_rounded,
                 selectedDineawayType == "Bill Pay",
+                enabled: scheduleTime == null,
+                disabledSubtitle: "Not available for scheduled orders".tr(),
+                disabledDialogTitle: "Bill Pay Unavailable".tr(),
+                disabledDialogMessage:
+                    "Bill Pay is for immediate in-restaurant payments only. Remove the scheduled time to use Bill Pay.".tr(),
               ),
             ],
           ],
@@ -2565,18 +3318,34 @@ class _CartScreenState extends State<CartScreen> {
     );
   }
 
-  Widget _dineawayOption(String title, String subtitle, IconData icon, bool isSelected, {bool enabled = true}) {
+  Widget _dineawayOption(
+    String title,
+    String subtitle,
+    IconData icon,
+    bool isSelected, {
+    bool enabled = true,
+    String? disabledSubtitle,
+    String? disabledDialogTitle,
+    String? disabledDialogMessage,
+  }) {
     final isDark = isDarkMode(context);
     return GestureDetector(
       onTap: () {
         if (!enabled) {
-          final isDineIn = title == 'Dining';
-          _showServiceMismatchDialog(
-            isDineIn ? 'Dine-In Unavailable'.tr() : 'Takeaway Unavailable'.tr(),
-            isDineIn
-                ? 'One or more items in your cart are not available for Dine-In. Please choose Takeaway or remove those items.'.tr()
-                : 'One or more items in your cart are not available for Takeaway. Please choose Dining or remove those items.'.tr(),
-          );
+          if (disabledDialogTitle != null) {
+            _showServiceMismatchDialog(
+              disabledDialogTitle,
+              disabledDialogMessage ?? '',
+            );
+          } else {
+            final isDineIn = title == 'Dining';
+            _showServiceMismatchDialog(
+              isDineIn ? 'Dine-In Unavailable'.tr() : 'Takeaway Unavailable'.tr(),
+              isDineIn
+                  ? 'One or more items in your cart are not available for Dine-In. Please choose Takeaway or remove those items.'.tr()
+                  : 'One or more items in your cart are not available for Takeaway. Please choose Dining or remove those items.'.tr(),
+            );
+          }
           return;
         }
         setState(() {
@@ -2650,7 +3419,9 @@ class _CartScreenState extends State<CartScreen> {
             ),
             const SizedBox(height: 2),
             Text(
-              !enabled ? 'Not available for this order'.tr() : subtitle,
+              !enabled
+                  ? (disabledSubtitle ?? 'Not available for this order'.tr())
+                  : subtitle,
               style: AppTypography.bodySmall.copyWith(
                 color: !enabled
                     ? (isDark ? AppThemeData.neutral700 : AppThemeData.neutral300)
@@ -2750,15 +3521,12 @@ class _CartScreenState extends State<CartScreen> {
             const SizedBox(height: 16),
             Row(
               children: [
-                Expanded(
-                    child: _tipCard(10, Icons.local_cafe_rounded, isTipSelected)),
+                Expanded(child: _tipCard(10, isTipSelected)),
+                const SizedBox(width: 8),
+                Expanded(child: _tipCard(20, isTipSelected1)),
                 const SizedBox(width: 8),
                 Expanded(
-                    child: _tipCard(20, Icons.icecream_rounded, isTipSelected1)),
-                const SizedBox(width: 8),
-                Expanded(
-                    child: _tipCard(30, Icons.fastfood_rounded, isTipSelected2,
-                        label: "Popular")),
+                    child: _tipCard(30, isTipSelected2, label: "Popular")),
                 const SizedBox(width: 8),
                 Expanded(child: _tipCardCustom()),
               ],
@@ -2769,7 +3537,12 @@ class _CartScreenState extends State<CartScreen> {
     );
   }
 
-  Widget _tipCard(int value, IconData icon, bool selected, {String? label}) {
+  // Single consistent icon for every preset tip amount — a heart communicates
+  // "tip" on its own, unlike the old per-card food icons that had no relation
+  // to the amount and made the row feel arbitrary.
+  static const IconData _tipIcon = Icons.favorite_rounded;
+
+  Widget _tipCard(int value, bool selected, {String? label}) {
     final dark = isDarkMode(context);
     return GestureDetector(
       onTap: () {
@@ -2783,7 +3556,7 @@ class _CartScreenState extends State<CartScreen> {
       },
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
-        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 4),
+        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 6),
         decoration: BoxDecoration(
           color: selected
               ? AppThemeData.primary500.withValues(alpha: 0.08)
@@ -2814,31 +3587,55 @@ class _CartScreenState extends State<CartScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            AnimatedContainer(
-              duration: const Duration(milliseconds: 200),
-              width: 36,
-              height: 36,
-              decoration: BoxDecoration(
-                color: selected
-                    ? AppThemeData.primary500.withValues(alpha: 0.15)
-                    : (dark
-                        ? AppThemeData.darkBorderPrimary
-                        : AppThemeData.neutral100),
-                shape: BoxShape.circle,
-              ),
-              child: Icon(icon,
-                  color: selected
-                      ? AppThemeData.primary500
-                      : (dark
-                          ? AppThemeData.darkTextSecondary
-                          : AppThemeData.neutral500),
-                  size: 18),
+            Stack(
+              clipBehavior: Clip.none,
+              children: [
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  width: 36,
+                  height: 36,
+                  decoration: BoxDecoration(
+                    color: selected
+                        ? AppThemeData.primary500.withValues(alpha: 0.15)
+                        : (dark
+                            ? AppThemeData.darkBorderPrimary
+                            : AppThemeData.neutral100),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(_tipIcon,
+                      color: selected
+                          ? AppThemeData.primary500
+                          : (dark
+                              ? AppThemeData.darkTextSecondary
+                              : AppThemeData.neutral500),
+                      size: 18),
+                ),
+                if (selected)
+                  Positioned(
+                    right: -2,
+                    top: -2,
+                    child: Container(
+                      width: 16,
+                      height: 16,
+                      decoration: BoxDecoration(
+                        color: AppThemeData.primary500,
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: dark ? AppThemeData.darkBgPrimary : Colors.white,
+                          width: 1.5,
+                        ),
+                      ),
+                      child: const Icon(Icons.check_rounded,
+                          color: Colors.white, size: 10),
+                    ),
+                  ),
+              ],
             ),
-            const SizedBox(height: 7),
+            const SizedBox(height: 8),
             Text(
               amountShow(amount: value.toString()),
               style: TextStyle(
-                fontSize: 13,
+                fontSize: 13.5,
                 fontFamily: AppThemeData.bold,
                 color: selected
                     ? AppThemeData.primary500
@@ -2847,11 +3644,11 @@ class _CartScreenState extends State<CartScreen> {
                         : AppThemeData.neutral900),
               ),
             ),
-            const SizedBox(height: 5),
+            const SizedBox(height: 6),
             label != null
                 ? Container(
                     padding:
-                        const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                        const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                     decoration: BoxDecoration(
                       color: selected
                           ? AppThemeData.primary500
@@ -2862,11 +3659,11 @@ class _CartScreenState extends State<CartScreen> {
                       label,
                       style: const TextStyle(
                           color: Colors.white,
-                          fontSize: 8,
+                          fontSize: 9,
                           fontFamily: AppThemeData.semiBold),
                     ),
                   )
-                : const SizedBox(height: 14),
+                : const SizedBox(height: 15),
           ],
         ),
       ),
@@ -2891,7 +3688,7 @@ class _CartScreenState extends State<CartScreen> {
       },
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
-        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 4),
+        padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 6),
         decoration: BoxDecoration(
           color: isTipSelected3
               ? AppThemeData.primary500.withValues(alpha: 0.08)
@@ -2922,37 +3719,59 @@ class _CartScreenState extends State<CartScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            AnimatedContainer(
-              duration: const Duration(milliseconds: 200),
-              width: 36,
-              height: 36,
-              decoration: BoxDecoration(
-                color: isTipSelected3
-                    ? AppThemeData.primary500.withValues(alpha: 0.15)
-                    : (dark
-                        ? AppThemeData.darkBorderPrimary
-                        : AppThemeData.neutral100),
-                shape: BoxShape.circle,
-              ),
-              child: Icon(
-                isTipSelected3
-                    ? Icons.check_rounded
-                    : Icons.edit_note_rounded,
-                color: isTipSelected3
-                    ? AppThemeData.primary500
-                    : (dark
-                        ? AppThemeData.darkTextSecondary
-                        : AppThemeData.neutral500),
-                size: 18,
-              ),
+            Stack(
+              clipBehavior: Clip.none,
+              children: [
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  width: 36,
+                  height: 36,
+                  decoration: BoxDecoration(
+                    color: isTipSelected3
+                        ? AppThemeData.primary500.withValues(alpha: 0.15)
+                        : (dark
+                            ? AppThemeData.darkBorderPrimary
+                            : AppThemeData.neutral100),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(
+                    Icons.edit_note_rounded,
+                    color: isTipSelected3
+                        ? AppThemeData.primary500
+                        : (dark
+                            ? AppThemeData.darkTextSecondary
+                            : AppThemeData.neutral500),
+                    size: 18,
+                  ),
+                ),
+                if (isTipSelected3)
+                  Positioned(
+                    right: -2,
+                    top: -2,
+                    child: Container(
+                      width: 16,
+                      height: 16,
+                      decoration: BoxDecoration(
+                        color: AppThemeData.primary500,
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: dark ? AppThemeData.darkBgPrimary : Colors.white,
+                          width: 1.5,
+                        ),
+                      ),
+                      child: const Icon(Icons.check_rounded,
+                          color: Colors.white, size: 10),
+                    ),
+                  ),
+              ],
             ),
-            const SizedBox(height: 7),
+            const SizedBox(height: 8),
             Text(
               isTipSelected3
                   ? amountShow(amount: tipValue.toString())
                   : "Custom".tr(),
               style: TextStyle(
-                fontSize: 13,
+                fontSize: 13.5,
                 fontFamily: AppThemeData.bold,
                 color: isTipSelected3
                     ? AppThemeData.primary500
@@ -2961,7 +3780,8 @@ class _CartScreenState extends State<CartScreen> {
                         : AppThemeData.neutral900),
               ),
             ),
-            const SizedBox(height: 19),
+            const SizedBox(height: 6),
+            const SizedBox(height: 15),
           ],
         ),
       ),
@@ -3005,7 +3825,7 @@ class _CartScreenState extends State<CartScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        "Your Order".tr(),
+                        vendorModel != null ? vendorModel!.title : "Your Order".tr(),
                         style: AppTypography.h5.copyWith(
                           fontWeight: FontWeight.w800,
                           letterSpacing: -0.3,
@@ -3014,18 +3834,6 @@ class _CartScreenState extends State<CartScreen> {
                               : AppThemeData.neutral900,
                         ),
                       ),
-                      if (vendorModel != null) ...[
-                        const SizedBox(height: 2),
-                        Text(
-                          vendorModel!.title,
-                          style: AppTypography.labelSmall.copyWith(
-                            color: dark
-                                ? AppThemeData.darkTextTertiary
-                                : AppThemeData.neutral400,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                      ],
                     ],
                   ),
                 ),
@@ -3049,6 +3857,14 @@ class _CartScreenState extends State<CartScreen> {
                   builder: (_) =>
                       NewVendorProductsScreen(vendorModel: vendorModel!),
                 ));
+              } else {
+                // Vendor data not yet ready — re-trigger the load pipeline
+                // and show the skeleton until it completes.
+                setState(() {
+                  _isCartInitialized = false;
+                  isDeliverFound = false;
+                });
+                getDeliveyData();
               }
             },
             borderRadius: const BorderRadius.only(
@@ -3392,6 +4208,30 @@ class _CartScreenState extends State<CartScreen> {
                         if (mounted) Navigator.of(context).pop();
                       }
                       if (pm == null || !mounted) return;
+
+                      // Restore previously chosen variant so the dialog
+                      // opens with the right option already highlighted.
+                      VariantInfo? vi;
+                      try {
+                        final raw = cartProduct.variant_info;
+                        if (raw is VariantInfo) {
+                          vi = raw;
+                        } else if (raw is Map<String, dynamic>) {
+                          vi = VariantInfo.fromJson(raw);
+                        } else if (raw is String && raw.isNotEmpty && raw != 'null') {
+                          vi = VariantInfo.fromJson(jsonDecode(raw) as Map<String, dynamic>);
+                        }
+                      } catch (_) {}
+
+                      // Restore previously selected add-ons so quantities
+                      // match what the user had in the cart.
+                      final String? prevExtras = cartProduct.extras
+                          ?.toString()
+                          .replaceAll('"', '')
+                          .replaceAll('[', '')
+                          .replaceAll(']', '')
+                          .replaceAll('\\', '');
+
                       await showModalBottomSheet(
                         context: context,
                         isScrollControlled: true,
@@ -3400,6 +4240,8 @@ class _CartScreenState extends State<CartScreen> {
                         builder: (BuildContext ctx) {
                           return ProductOptionsDialog(
                             productModel: pm!,
+                            initialVariantInfo: vi,
+                            initialExtras: prevExtras,
                             onAddToCart: (ProductModel updatedProduct, double totalPrice) async {
                               Navigator.of(ctx).pop();
                               await cartDatabase.removeProduct(cartProduct.id);
@@ -3580,7 +4422,7 @@ class _CartScreenState extends State<CartScreen> {
   }
 
   bool isCurrentDateInRange(DateTime startDate, DateTime endDate) {
-    final currentDate = DateTime.now();
+    final currentDate = _serverAdjustedNow;
     return currentDate.isAfter(startDate) && currentDate.isBefore(endDate);
   }
 
@@ -3680,7 +4522,7 @@ class _CartScreenState extends State<CartScreen> {
     required bool dark,
   }) {
     final color =
-        blocking ? AppThemeData.error500 : AppThemeData.warning500;
+        blocking ? AppThemeData.error500 : const Color(0xFFF59E0B);
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -3736,7 +4578,7 @@ class _CartScreenState extends State<CartScreen> {
       {required String message, required bool isBlocking}) {
     final dark = isDarkMode(context);
     final color =
-        isBlocking ? AppThemeData.error500 : AppThemeData.warning500;
+        isBlocking ? AppThemeData.error500 : const Color(0xFFF59E0B);
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
@@ -3825,7 +4667,7 @@ class _CartScreenState extends State<CartScreen> {
       return [];
     }
 
-    final now = DateTime.now();
+    final now = _serverAdjustedNow;
     final currentDay = DateFormat('EEEE', 'en_US').format(now);
     final dateStr = DateFormat('dd-MM-yyyy').format(now);
     final List<Map<String, dynamic>> active = [];
@@ -3835,13 +4677,15 @@ class _CartScreenState extends State<CartScreen> {
       if (dayDiscount.timeslot == null || dayDiscount.timeslot!.isEmpty) continue;
 
       for (final slot in dayDiscount.timeslot!) {
-        if (slot.discount_type != "delivery") continue;
+        if ((slot.from?.isEmpty ?? true) || (slot.to?.isEmpty ?? true)) continue;
 
         try {
           final start = DateFormat("dd-MM-yyyy HH:mm")
               .parse('$dateStr ${slot.from}');
-          final end = DateFormat("dd-MM-yyyy HH:mm")
+          var end = DateFormat("dd-MM-yyyy HH:mm")
               .parse('$dateStr ${slot.to}');
+          // Midnight-crossing: if end ≤ start, slot wraps into next day
+          if (!end.isAfter(start)) end = end.add(const Duration(days: 1));
           if (!isCurrentDateInRange(start, end)) continue;
         } catch (_) {
           continue;
@@ -4561,8 +5405,9 @@ class _CartScreenState extends State<CartScreen> {
     if (txt.text.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text("Please enter a coupon code".tr()),
-        backgroundColor: AppThemeData.primary500,
+        backgroundColor: const Color(0xFFF59E0B),
         behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
       ));
       return;
     }
@@ -4588,8 +5433,9 @@ class _CartScreenState extends State<CartScreen> {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(
             "Invalid coupon code or not applicable for this store".tr()),
-        backgroundColor: AppThemeData.primary500,
+        backgroundColor: AppThemeData.error500,
         behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
       ));
       txt.clear();
       return;
@@ -4600,9 +5446,10 @@ class _CartScreenState extends State<CartScreen> {
       Navigator.pop(sheetCtx);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(
-            "Subtotal must be at least ${amountShow(amount: found.applicableAmount!)}"),
-        backgroundColor: AppThemeData.primary500,
+            "Add ${amountShow(amount: (minAmt - subTotal).toStringAsFixed(2))} more to use this coupon.".tr()),
+        backgroundColor: const Color(0xFFF59E0B),
         behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
       ));
       return;
     }
@@ -4627,7 +5474,13 @@ class _CartScreenState extends State<CartScreen> {
     final isPercentage = offer.discountTypeOffer == 'Percentage' ||
         offer.discountTypeOffer == 'Percent';
     final raw = double.tryParse(offer.discountOffer ?? '0') ?? 0;
-    final couponEffective = isPercentage ? subTotal * raw / 100 : raw;
+    // Percentage is already bounded to <=100% by the vendor app (so it can
+    // never exceed subtotal), but a flat-amount coupon has no such guarantee
+    // if the vendor left "Minimum Order Amount" at 0 — cap it here as a
+    // cart-side backstop so a coupon can never discount more than the cart
+    // is actually worth.
+    final couponEffective =
+        isPercentage ? subTotal * raw / 100 : (raw > subTotal ? subTotal : raw);
 
     // Conflict check: both discounts active and combined > subtotal.
     if (specialDiscountAmount > 0 &&
@@ -4660,7 +5513,7 @@ class _CartScreenState extends State<CartScreen> {
             percentage = raw;
             type = 0.0;
           } else {
-            type = raw;
+            type = couponEffective;
             percentage = 0.0;
           }
           couponId = offer.offerId!;
@@ -4691,7 +5544,7 @@ class _CartScreenState extends State<CartScreen> {
         percentage = raw;
         type = 0.0;
       } else {
-        type = raw;
+        type = couponEffective;
         percentage = 0.0;
       }
       couponId = offer.offerId!;
@@ -4741,7 +5594,7 @@ class _CartScreenState extends State<CartScreen> {
             // Scrollable content — prevents overflow on small devices
             Flexible(
               child: SingleChildScrollView(
-                padding: const EdgeInsets.fromLTRB(20, 20, 20, 24),
+                padding: EdgeInsets.fromLTRB(20, 20, 20, 24 + MediaQuery.of(sheetCtx).padding.bottom),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -4870,11 +5723,11 @@ class _CartScreenState extends State<CartScreen> {
       context: ctx,
       backgroundColor: Colors.transparent,
       isScrollControlled: true,
-      builder: (_) => Padding(
+      builder: (sheetCtx) => Padding(
         padding:
-            EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+            EdgeInsets.only(bottom: MediaQuery.of(sheetCtx).viewInsets.bottom),
         child: Container(
-          padding: const EdgeInsets.fromLTRB(24, 14, 24, 32),
+          padding: EdgeInsets.fromLTRB(24, 14, 24, 32 + MediaQuery.of(sheetCtx).padding.bottom),
           decoration: BoxDecoration(
             color: dark ? AppThemeData.darkBgSecondary : Colors.white,
             borderRadius: const BorderRadius.only(
@@ -4992,7 +5845,7 @@ class _CartScreenState extends State<CartScreen> {
                 children: [
                   Expanded(
                     child: OutlinedButton(
-                      onPressed: () => Navigator.pop(_),
+                      onPressed: () => Navigator.pop(sheetCtx),
                       style: OutlinedButton.styleFrom(
                         foregroundColor: dark
                             ? AppThemeData.darkTextSecondary
@@ -5028,7 +5881,7 @@ class _CartScreenState extends State<CartScreen> {
                             isTipSelected2 = false;
                           }
                         });
-                        Navigator.pop(_);
+                        Navigator.pop(sheetCtx);
                       },
                       style: ElevatedButton.styleFrom(
                         backgroundColor: AppThemeData.primary500,

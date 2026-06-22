@@ -14,6 +14,8 @@ class SectionModel {
   String? delivery_charge;
   int? nearByRadius;
   AdminCommissionModel? adminCommision;
+  bool deliveryActive = true;
+  String deliveryOffMessage = '';
 
   SectionModel(
       {this.referralAmount,
@@ -28,7 +30,9 @@ class SectionModel {
         this.delivery_charge,
         this.nearByRadius,
         this.isProductDetails,
-        this.serviceTypeFlag});
+        this.serviceTypeFlag,
+        this.deliveryActive = true,
+        this.deliveryOffMessage = ''});
 
   SectionModel.fromJson(Map<String, dynamic> json) {
     referralAmount = json['referralAmount'] ?? '';
@@ -44,6 +48,8 @@ class SectionModel {
     serviceTypeFlag = json['serviceTypeFlag'] ?? '';
     delivery_charge = json['delivery_charge'] ?? '';
     nearByRadius = json['nearByRadius'] ?? 50000;
+    deliveryActive = json['delivery_active'] ?? true;
+    deliveryOffMessage = json['delivery_off_message'] ?? '';
   }
 
   Map<String, dynamic> toJson() {
@@ -63,6 +69,8 @@ class SectionModel {
     data['serviceTypeFlag'] = serviceTypeFlag;
     data['delivery_charge'] = delivery_charge;
     data['nearByRadius'] = nearByRadius;
+    data['delivery_active'] = deliveryActive;
+    data['delivery_off_message'] = deliveryOffMessage;
     return data;
   }
 }

@@ -11,6 +11,7 @@ import 'package:emartconsumer/services/msg91_service.dart';
 import 'package:emartconsumer/services/notification_service.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
+import 'package:emartconsumer/ui/auth_screen/auth_widgets.dart';
 import 'package:emartconsumer/ui/auth_screen/login_screen.dart';
 import 'package:emartconsumer/ui/auth_screen/signup_screen.dart';
 import 'package:emartconsumer/ui/location_permission_screen.dart';
@@ -232,6 +233,10 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
         final prefs = await SharedPreferences.getInstance();
         await prefs.setString(PHONE_AUTH_USER_ID, userModel.userID);
 
+        // Set global user state so ServiceListScreen / LocationPermissionScreen
+        // see an authenticated user instead of navigating as a guest.
+        MyAppState.currentUser = userModel;
+
         if (!mounted) return;
         ShowToastDialog.closeLoader();
 
@@ -284,299 +289,194 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
   // ── UI ────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
-    final dark = isDarkMode(context);
     return Scaffold(
-      backgroundColor:
-          dark ? AppThemeData.surfaceDark : const Color(0xFFF5F6FA),
-      body: Column(
-        children: [
-          // Gradient header
-          Container(
-            width: double.infinity,
-            decoration: const BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [AppThemeData.primary500, AppThemeData.primary400],
-              ),
-              borderRadius: BorderRadius.only(
-                bottomLeft: Radius.circular(32),
-                bottomRight: Radius.circular(32),
-              ),
+      backgroundColor: const Color(0xFF0D0620),
+      body: AuthBackground(
+        child: Column(
+          children: [
+            AuthHeader(
+              title: 'Verify Your Number'.tr(),
+              subtitle: '${'Code sent to'.tr()} $countryCode $phoneNumber',
+              showBackButton: true,
             ),
-            child: SafeArea(
-              bottom: false,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(24, 12, 24, 32),
+            Expanded(
+              child: AuthFormCard(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(24, 32, 24, 24),
                 child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    GestureDetector(
-                      onTap: () => Navigator.pop(context),
-                      child: Container(
-                        width: 36,
-                        height: 36,
-                        decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: 0.2),
-                          borderRadius: BorderRadius.circular(10),
+                    // OTP pin boxes — 4 digits, keyboard OTP suggestion enabled
+                    PinCodeTextField(
+                      length: 4,
+                      appContext: context,
+                      keyboardType: TextInputType.number,
+                      enablePinAutofill: true,
+                      hintCharacter: '·',
+                      hintStyle: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.30),
+                        fontSize: 22,
+                      ),
+                      textStyle: const TextStyle(
+                        color: Colors.white,
+                        fontFamily: AppThemeData.semiBold,
+                        fontSize: 20,
+                      ),
+                      pinTheme: PinTheme(
+                        fieldHeight: 58,
+                        fieldWidth: 58,
+                        inactiveFillColor: Colors.white.withValues(alpha: 0.08),
+                        selectedFillColor: Colors.white.withValues(alpha: 0.14),
+                        activeFillColor: Colors.white.withValues(alpha: 0.08),
+                        selectedColor: AppThemeData.primary400,
+                        activeColor: AppThemeData.primary400,
+                        inactiveColor: Colors.white.withValues(alpha: 0.28),
+                        disabledColor: Colors.white.withValues(alpha: 0.15),
+                        shape: PinCodeFieldShape.box,
+                        errorBorderColor: AppThemeData.error500,
+                        borderRadius:
+                            const BorderRadius.all(Radius.circular(12)),
+                        borderWidth: 1.5,
+                      ),
+                      cursorColor: AppThemeData.primary400,
+                      enableActiveFill: true,
+                      controller: _otpController,
+                      onCompleted: (_) => _verifyOtp(),
+                      onChanged: (_) {},
+                    ),
+
+                    const SizedBox(height: 28),
+
+                    // Timer / resend row
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text(
+                          _canResend
+                              ? "${'Didn\'t receive the code?'.tr()} "
+                              : "${'Resend code in'.tr()} ",
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontFamily: AppThemeData.regular,
+                            color: Colors.white.withValues(alpha: 0.65),
+                          ),
                         ),
-                        child: const Icon(
-                          Icons.arrow_back_ios_new_rounded,
-                          color: Colors.white,
-                          size: 18,
+                        _canResend
+                            ? GestureDetector(
+                                onTap: _resendOtp,
+                                child: Text(
+                                  'Resend'.tr(),
+                                  style: const TextStyle(
+                                    color: AppThemeData.primary400,
+                                    fontFamily: AppThemeData.semiBold,
+                                    fontSize: 14,
+                                  ),
+                                ),
+                              )
+                            : Text(
+                                _formattedTime,
+                                style: const TextStyle(
+                                  fontSize: 14,
+                                  fontFamily: AppThemeData.semiBold,
+                                  color: Colors.white,
+                                ),
+                              ),
+                      ],
+                    ),
+
+                    const SizedBox(height: 32),
+
+                    // Verify button
+                    GestureDetector(
+                      onTap: _isVerifying ? null : _verifyOtp,
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 200),
+                        height: 52,
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            colors: _isVerifying
+                                ? [
+                                    AppThemeData.primary500
+                                        .withValues(alpha: 0.6),
+                                    AppThemeData.primary400
+                                        .withValues(alpha: 0.6),
+                                  ]
+                                : [
+                                    AppThemeData.primary500,
+                                    AppThemeData.primary400,
+                                  ],
+                          ),
+                          borderRadius: BorderRadius.circular(14),
+                          boxShadow: _isVerifying
+                              ? []
+                              : [
+                                  BoxShadow(
+                                    color: AppThemeData.primary500
+                                        .withValues(alpha: 0.40),
+                                    blurRadius: 16,
+                                    offset: const Offset(0, 5),
+                                  ),
+                                ],
+                        ),
+                        child: Center(
+                          child: _isVerifying
+                              ? const SizedBox(
+                                  width: 22,
+                                  height: 22,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2.5,
+                                    color: Colors.white,
+                                  ),
+                                )
+                              : Text(
+                                  'Verify & Continue'.tr(),
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 15,
+                                    fontFamily: AppThemeData.semiBold,
+                                  ),
+                                ),
                         ),
                       ),
                     ),
-                    const SizedBox(height: 20),
-                    Row(
-                      children: [
-                        Container(
-                          width: 48,
-                          height: 48,
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            borderRadius: BorderRadius.circular(12),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withValues(alpha: 0.12),
-                                blurRadius: 8,
-                                offset: const Offset(0, 2),
+
+                    const SizedBox(height: 24),
+
+                    // Wrong number? Go back
+                    Center(
+                      child: GestureDetector(
+                        onTap: () => Navigator.pop(context),
+                        child: Text.rich(
+                          TextSpan(
+                            children: [
+                              TextSpan(
+                                text: 'Wrong number? '.tr(),
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontFamily: AppThemeData.regular,
+                                  color: Colors.white.withValues(alpha: 0.65),
+                                ),
+                              ),
+                              TextSpan(
+                                text: 'Change'.tr(),
+                                style: const TextStyle(
+                                  fontSize: 13,
+                                  fontFamily: AppThemeData.semiBold,
+                                  color: AppThemeData.primary400,
+                                ),
                               ),
                             ],
                           ),
-                          child: Center(
-                            child: Text(
-                              'Q',
-                              style: TextStyle(
-                                fontSize: 26,
-                                fontFamily: AppThemeData.bold,
-                                color: AppThemeData.primary500,
-                                height: 1.0,
-                                letterSpacing: -1.0,
-                              ),
-                            ),
-                          ),
                         ),
-                        const SizedBox(width: 12),
-                        const Text(
-                          'QuickDash',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 20,
-                            fontFamily: AppThemeData.bold,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 20),
-                    Text(
-                      'Verify Your Number'.tr(),
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 26,
-                        fontFamily: AppThemeData.bold,
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      '${'Code sent to'.tr()} $countryCode $phoneNumber',
-                      style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.8),
-                        fontSize: 14,
-                        fontFamily: AppThemeData.regular,
                       ),
                     ),
                   ],
                 ),
               ),
             ),
-          ),
-
-          // Body
-          Expanded(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(24, 32, 24, 24),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  // OTP pin boxes — 4 digits, keyboard OTP suggestion enabled
-                  PinCodeTextField(
-                    length: 4,
-                    appContext: context,
-                    keyboardType: TextInputType.number,
-                    enablePinAutofill: true,
-                    hintCharacter: '·',
-                    hintStyle: TextStyle(
-                      color: dark
-                          ? AppThemeData.grey600
-                          : AppThemeData.grey300,
-                      fontSize: 22,
-                    ),
-                    textStyle: TextStyle(
-                      color: dark ? AppThemeData.grey50 : AppThemeData.grey900,
-                      fontFamily: AppThemeData.semiBold,
-                      fontSize: 20,
-                    ),
-                    pinTheme: PinTheme(
-                      fieldHeight: 58,
-                      fieldWidth: 58,
-                      inactiveFillColor: Colors.transparent,
-                      selectedFillColor: Colors.transparent,
-                      activeFillColor: Colors.transparent,
-                      selectedColor: AppThemeData.primary500,
-                      activeColor: AppThemeData.primary500,
-                      inactiveColor:
-                          dark ? AppThemeData.grey600 : AppThemeData.grey300,
-                      disabledColor: AppThemeData.grey300,
-                      shape: PinCodeFieldShape.box,
-                      errorBorderColor: AppThemeData.error500,
-                      borderRadius:
-                          const BorderRadius.all(Radius.circular(12)),
-                      borderWidth: 1.5,
-                    ),
-                    cursorColor: AppThemeData.primary500,
-                    enableActiveFill: true,
-                    controller: _otpController,
-                    onCompleted: (_) => _verifyOtp(),
-                    onChanged: (_) {},
-                  ),
-
-                  const SizedBox(height: 28),
-
-                  // Timer / resend row
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Text(
-                        _canResend
-                            ? "${'Didn\'t receive the code?'.tr()} "
-                            : "${'Resend code in'.tr()} ",
-                        style: TextStyle(
-                          fontSize: 14,
-                          fontFamily: AppThemeData.regular,
-                          color: dark
-                              ? AppThemeData.grey400
-                              : AppThemeData.grey500,
-                        ),
-                      ),
-                      _canResend
-                          ? GestureDetector(
-                              onTap: _resendOtp,
-                              child: Text(
-                                'Resend'.tr(),
-                                style: const TextStyle(
-                                  color: AppThemeData.primary500,
-                                  fontFamily: AppThemeData.semiBold,
-                                  fontSize: 14,
-                                ),
-                              ),
-                            )
-                          : Text(
-                              _formattedTime,
-                              style: TextStyle(
-                                fontSize: 14,
-                                fontFamily: AppThemeData.semiBold,
-                                color: dark
-                                    ? AppThemeData.grey200
-                                    : AppThemeData.grey700,
-                              ),
-                            ),
-                    ],
-                  ),
-
-                  const SizedBox(height: 32),
-
-                  // Verify button
-                  GestureDetector(
-                    onTap: _isVerifying ? null : _verifyOtp,
-                    child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 200),
-                      height: 52,
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          colors: _isVerifying
-                              ? [
-                                  AppThemeData.primary500
-                                      .withValues(alpha: 0.6),
-                                  AppThemeData.primary400
-                                      .withValues(alpha: 0.6),
-                                ]
-                              : [
-                                  AppThemeData.primary500,
-                                  AppThemeData.primary400,
-                                ],
-                        ),
-                        borderRadius: BorderRadius.circular(14),
-                        boxShadow: _isVerifying
-                            ? []
-                            : [
-                                BoxShadow(
-                                  color: AppThemeData.primary500
-                                      .withValues(alpha: 0.3),
-                                  blurRadius: 12,
-                                  offset: const Offset(0, 4),
-                                ),
-                              ],
-                      ),
-                      child: Center(
-                        child: _isVerifying
-                            ? const SizedBox(
-                                width: 22,
-                                height: 22,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2.5,
-                                  color: Colors.white,
-                                ),
-                              )
-                            : Text(
-                                'Verify & Continue'.tr(),
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 15,
-                                  fontFamily: AppThemeData.semiBold,
-                                ),
-                              ),
-                      ),
-                    ),
-                  ),
-
-                  const SizedBox(height: 24),
-
-                  // Wrong number? Go back
-                  Center(
-                    child: GestureDetector(
-                      onTap: () => Navigator.pop(context),
-                      child: Text.rich(
-                        TextSpan(
-                          children: [
-                            TextSpan(
-                              text: 'Wrong number? '.tr(),
-                              style: TextStyle(
-                                fontSize: 13,
-                                fontFamily: AppThemeData.regular,
-                                color: dark
-                                    ? AppThemeData.grey400
-                                    : AppThemeData.grey500,
-                              ),
-                            ),
-                            TextSpan(
-                              text: 'Change'.tr(),
-                              style: const TextStyle(
-                                fontSize: 13,
-                                fontFamily: AppThemeData.semiBold,
-                                color: AppThemeData.primary500,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

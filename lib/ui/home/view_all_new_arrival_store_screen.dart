@@ -12,6 +12,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../../constants.dart';
+import '../../widget/road_distance_text.dart';
 import '../vendorProductsScreen/newVendorProductsScreen.dart';
 
 class ViewAllNewArrivalStoreScreen extends StatefulWidget {
@@ -79,6 +80,48 @@ class _ViewAllNewArrivalStoreScreenState extends State<ViewAllNewArrivalStoreScr
                 itemBuilder: (context, index) => buildPopularsItem(newArrivalLst[index]))));
   }
 
+  /// Same "Closed" pill used on the home screen restaurant card.
+  Widget _closedBadge() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFEEEE),
+        borderRadius: BorderRadius.circular(50),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFFDC2626).withValues(alpha: 0.25),
+            blurRadius: 8,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 6,
+            height: 6,
+            decoration: const BoxDecoration(
+              color: Color(0xFFDC2626),
+              shape: BoxShape.circle,
+            ),
+          ),
+          const SizedBox(width: 4),
+          const Text(
+            'Closed',
+            style: TextStyle(
+              color: Color(0xFFDC2626),
+              fontSize: 11,
+              height: 1.2,
+              fontFamily: AppThemeData.semiBold,
+              letterSpacing: 0.1,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget buildPopularsItem(VendorModel vendorModel) {
     return GestureDetector(
       onTap: () => push(
@@ -107,27 +150,37 @@ class _ViewAllNewArrivalStoreScreenState extends State<ViewAllNewArrivalStoreScr
           mainAxisSize: MainAxisSize.min,
           children: [
             Expanded(
-                child: CachedNetworkImage(
-              imageUrl: getImageVAlidUrl(vendorModel.photo),
-              imageBuilder: (context, imageProvider) => Container(
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(20),
-                  image: DecorationImage(image: imageProvider, fit: BoxFit.cover),
-                ),
-              ),
-              placeholder: (context, url) => Center(
-                  child: CircularProgressIndicator.adaptive(
-                valueColor: AlwaysStoppedAnimation(AppThemeData.primary500),
-              )),
-              errorWidget: (context, url, error) => ClipRRect(
-                  borderRadius: BorderRadius.circular(15),
-                  child: Image.network(
-                    placeholderImage,
-                    fit: BoxFit.cover,
-                    width: MediaQuery.of(context).size.width,
-                    height: MediaQuery.of(context).size.height,
+                child: Stack(
+              children: [
+                CachedNetworkImage(
+                  imageUrl: getImageVAlidUrl(vendorModel.photo),
+                  imageBuilder: (context, imageProvider) => Container(
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(20),
+                      image: DecorationImage(image: imageProvider, fit: BoxFit.cover),
+                    ),
+                  ),
+                  placeholder: (context, url) => Center(
+                      child: CircularProgressIndicator.adaptive(
+                    valueColor: AlwaysStoppedAnimation(AppThemeData.primary500),
                   )),
-              fit: BoxFit.cover,
+                  errorWidget: (context, url, error) => ClipRRect(
+                      borderRadius: BorderRadius.circular(15),
+                      child: Image.network(
+                        placeholderImage,
+                        fit: BoxFit.cover,
+                        width: MediaQuery.of(context).size.width,
+                        height: MediaQuery.of(context).size.height,
+                      )),
+                  fit: BoxFit.cover,
+                ),
+                if (!vendorModel.isAcceptingOrders)
+                  Positioned(
+                    top: 12,
+                    left: 12,
+                    child: _closedBadge(),
+                  ),
+              ],
             )),
             const SizedBox(height: 8),
             Container(
@@ -212,12 +265,15 @@ class _ViewAllNewArrivalStoreScreenState extends State<ViewAllNewArrivalStoreScr
                             ),
                             Padding(
                               padding: const EdgeInsets.only(left: 10, right: 10),
-                              child: Text((getKm(vendorModel.latitude, vendorModel.longitude) ?? "0") + " km",
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                    color: Color(0xff555353),
-                                  )),
+                              child: RoadDistanceText(
+                                vendorLat: vendorModel.latitude,
+                                vendorLon: vendorModel.longitude,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: Color(0xff555353),
+                                ),
+                              ),
                             ),
                           ],
                         ),

@@ -9,6 +9,7 @@ import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/model/OrderModel.dart';
 import 'package:emartconsumer/constants/spacing.dart';
+import 'package:emartconsumer/constants/typography.dart';
 import 'package:emartconsumer/model/ProductModel.dart';
 import 'package:emartconsumer/model/TaxModel.dart';
 import 'package:emartconsumer/model/User.dart';
@@ -16,6 +17,7 @@ import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/model/variant_info.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/helper.dart';
+import 'package:emartconsumer/services/show_toast_dialog.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/chat_screen/admin_chat_screeen.dart';
 import 'package:emartconsumer/ui/chat_screen/chat_screen.dart';
@@ -93,21 +95,26 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
   }
 
   loadData() async {
-    if (widget.orderModel != null) {
-      orderModel = widget.orderModel;
-      await calculate();
-    } else {
-      await FireStoreUtils().getOrderById(widget.orderId).then((value) {
-        orderModel = value;
-        calculate();
-      });
-      if (orderModel == null) return;
-      await FireStoreUtils()
-          .getSectionsById(orderModel!.sectionId)
-          .then((value) {
-        sectionConstantModel = value;
-      });
-      setState(() {});
+    try {
+      if (widget.orderModel != null) {
+        orderModel = widget.orderModel;
+        await calculate();
+      } else {
+        await FireStoreUtils().getOrderById(widget.orderId).then((value) {
+          orderModel = value;
+          if (orderModel != null) calculate();
+        });
+        if (orderModel == null) return;
+        await FireStoreUtils()
+            .getSectionsById(orderModel!.sectionId)
+            .then((value) {
+          sectionConstantModel = value;
+        });
+        if (mounted) setState(() {});
+      }
+    } catch (e) {
+      debugPrint('OrderDetailsScreen loadData error: $e');
+      if (mounted) setState(() {});
     }
   }
 
@@ -117,9 +124,8 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
     setMarkerIcon();
 
     getCurrentOrder();
-    checkPerm();
     orderStatus = orderModel!.status;
-    isTakeAway = orderModel!.takeAway!;
+    isTakeAway = orderModel!.takeAway ?? false;
 
     orderModel!.products.forEach((element) {
       if (element.extras_price != null &&
@@ -143,11 +149,7 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
     var status = await Permission.bluetooth.status;
     var bluetoothConnect = await Permission.bluetoothConnect.status;
     var bluetoothScan = await Permission.bluetoothScan.status;
-    var locationstatus = await Permission.location.status;
 
-    if (locationstatus.isDenied) {
-      await Permission.location.request();
-    }
     if (bluetoothConnect.isDenied) {
       await Permission.bluetoothConnect.request();
     }
@@ -167,6 +169,8 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
   void dispose() {
     timerCountDown?.cancel();
     arrivalTimeStreamController.close();
+    _orderSub?.cancel();
+    _driverSub?.cancel();
     super.dispose();
   }
 
@@ -236,7 +240,7 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
           ? StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
               stream: fireStoreUtils.watchOrderStatus(orderModel!.id),
               builder: (context, snapshot) {
-                if (snapshot.hasData) {
+                if (snapshot.hasData && snapshot.data!.exists && snapshot.data!.data() != null) {
                   OrderModel orderModel = OrderModel.fromJson(snapshot.data!.data()!);
                   orderStatus = orderModel.status;
                   storeName = orderModel.vendor.title;
@@ -491,7 +495,7 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                           color: isDarkMode(context) ? Colors.white : const Color(0xFF1A1A2E),
                         ),
                       ),
-                      if (order.vendor.location.isNotEmpty) ...[
+                      if (order.vendor.location.isNotEmpty || order.vendor.locality.isNotEmpty) ...[
                         const SizedBox(height: 3),
                         Row(children: [
                           Icon(Icons.location_on_outlined, size: 12, color: AppThemeData.grey500),
@@ -499,10 +503,11 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                           Expanded(
                             child: Text(
                               () {
-                                final parts = order.vendor.location.split(',');
-                                return parts.length <= 2
-                                    ? order.vendor.location
-                                    : '${parts[0].trim()}, ${parts[1].trim()}';
+                                final loc = order.vendor.locality.trim();
+                                final lm = order.vendor.landmark.trim();
+                                if (loc.isEmpty) return order.vendor.location;
+                                if (lm.isEmpty) return loc;
+                                return '$loc, $lm';
                               }(),
                               style: TextStyle(fontSize: 12, color: AppThemeData.grey500),
                               maxLines: 1,
@@ -548,22 +553,33 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                           ? null
                           : () async {
                               await showProgress("Please wait...".tr(), false);
-                              User? customer = await FireStoreUtils.getCurrentUser(order.authorID);
-                              User? restaurantUser = await FireStoreUtils.getCurrentUser(order.vendor.author);
-                              VendorModel? vendorModel = await FireStoreUtils.getVendor(restaurantUser!.vendorID.toString());
-                              await hideProgress();
-                              push(context, ChatScreens(
-                                type: "vendor_chat",
-                                customerName: '${customer!.firstName} ${customer.lastName}',
-                                restaurantName: vendorModel!.title,
-                                orderId: order.id,
-                                restaurantId: restaurantUser.userID,
-                                customerId: customer.userID,
-                                customerProfileImage: customer.profilePictureURL,
-                                restaurantProfileImage: vendorModel.photo,
-                                token: restaurantUser.fcmToken,
-                                chatType: 'Restaurant',
-                              ));
+                              try {
+                                User? customer = await FireStoreUtils.getCurrentUser(order.authorID);
+                                User? restaurantUser = await FireStoreUtils.getCurrentUser(order.vendor.author);
+                                if (restaurantUser == null || customer == null) {
+                                  await hideProgress();
+                                  ShowToastDialog.showToast('Could not load chat participants.');
+                                  return;
+                                }
+                                VendorModel? vendorModel = await FireStoreUtils.getVendor(restaurantUser.vendorID.toString());
+                                await hideProgress();
+                                if (vendorModel == null || !context.mounted) return;
+                                push(context, ChatScreens(
+                                  type: "vendor_chat",
+                                  customerName: '${customer.firstName} ${customer.lastName}',
+                                  restaurantName: vendorModel.title,
+                                  orderId: order.id,
+                                  restaurantId: restaurantUser.userID,
+                                  customerId: customer.userID,
+                                  customerProfileImage: customer.profilePictureURL,
+                                  restaurantProfileImage: vendorModel.photo,
+                                  token: restaurantUser.fcmToken,
+                                  chatType: 'Restaurant',
+                                ));
+                              } catch (e) {
+                                await hideProgress();
+                                ShowToastDialog.showToast('Could not open chat. Please try again.');
+                              }
                             },
                     ),
                   ],
@@ -580,7 +596,7 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                 Icon(Icons.receipt_long_outlined, size: 13, color: AppThemeData.grey400),
                 const SizedBox(width: 6),
                 Text(
-                  '#${order.id.length > 8 ? order.id.substring(0, 8).toUpperCase() : order.id.toUpperCase()}',
+                  '#${order.id.length > 8 ? order.id.substring(order.id.length - 8).toUpperCase() : order.id.toUpperCase()}',
                   style: TextStyle(
                     fontFamily: AppThemeData.medium,
                     fontSize: 12,
@@ -784,10 +800,33 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
   Widget _buildStatusCard(OrderModel order) {
     final bool isDineAway = order.orderType == "Dining" || order.orderType == "Takeaway" || order.orderType == "Bill Pay";
     final bool isBillPay = order.orderType == "Bill Pay";
+    final bool isScheduled = order.scheduleTime != null;
     String statusTitle;
     String statusSubtitle;
     Color statusColor;
     IconData statusIcon;
+    final bool _staffReady = order.staffStatus == 'Ready' || order.staffStatus == 'Completed';
+    final bool isScheduledActive = isScheduled &&
+        order.status != ORDER_STATUS_COMPLETED &&
+        order.status != ORDER_STATUS_REJECTED;
+    if (isScheduledActive) {
+      final formatted = DateFormat("EEE, d MMM 'at' hh:mm a")
+          .format(order.scheduleTime!.toDate());
+      if (order.orderType == 'Takeaway') {
+        statusTitle = 'Collect it at'.tr();
+        statusSubtitle = formatted;
+        statusIcon = Icons.shopping_bag_rounded;
+      } else if (order.orderType == 'Dining') {
+        statusTitle = 'Served at'.tr();
+        statusSubtitle = formatted;
+        statusIcon = Icons.restaurant_rounded;
+      } else {
+        statusTitle = 'Order Scheduled'.tr();
+        statusSubtitle = '${'Your order will be ready at'.tr()} $formatted';
+        statusIcon = Icons.schedule_rounded;
+      }
+      statusColor = const Color(0xFF8B5CF6);
+    } else {
     switch (order.status) {
       case ORDER_STATUS_PLACED:
         statusTitle = 'Order Placed'.tr();
@@ -796,10 +835,19 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
         statusIcon = Icons.check_circle_outline_rounded;
         break;
       case ORDER_STATUS_ACCEPTED:
-        statusTitle = 'Preparing Your Order'.tr();
-        statusSubtitle = isDineAway ? 'Your order will be ready soon'.tr() : 'Getting your order ready for pickup'.tr();
-        statusColor = const Color(0xFFF59E0B);
-        statusIcon = Icons.restaurant_menu_rounded;
+        if (isDineAway && _staffReady) {
+          statusTitle = 'Order Ready'.tr();
+          statusSubtitle = order.orderType == 'Takeaway'
+              ? 'Your order is ready. Please collect it.'.tr()
+              : 'Ready — Being served to your table shortly.'.tr();
+          statusColor = AppThemeData.success400;
+          statusIcon = Icons.check_circle_rounded;
+        } else {
+          statusTitle = 'Preparing Your Order'.tr();
+          statusSubtitle = isDineAway ? 'Your order will be ready soon'.tr() : 'Getting your order ready for pickup'.tr();
+          statusColor = const Color(0xFFF59E0B);
+          statusIcon = Icons.restaurant_menu_rounded;
+        }
         break;
       case ORDER_STATUS_REJECTED:
         statusTitle = 'Order Rejected'.tr();
@@ -831,9 +879,17 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
           statusTitle = 'Payment Received'.tr();
           statusSubtitle = 'Your bill has been paid successfully'.tr();
           statusIcon = Icons.receipt_long_rounded;
+        } else if (order.orderType == 'Takeaway') {
+          statusTitle = 'Order Collected'.tr();
+          statusSubtitle = 'Hope you enjoy your meal!'.tr();
+          statusIcon = Icons.shopping_bag_rounded;
+        } else if (order.orderType == 'Dining') {
+          statusTitle = 'Order Served'.tr();
+          statusSubtitle = 'Enjoy your meal!'.tr();
+          statusIcon = Icons.restaurant_rounded;
         } else {
-          statusTitle = isDineAway ? 'Order Ready'.tr() : 'Order Delivered'.tr();
-          statusSubtitle = isDineAway ? 'Enjoy your meal!'.tr() : 'Your order has been delivered'.tr();
+          statusTitle = 'Order Delivered'.tr();
+          statusSubtitle = 'Your order has been delivered'.tr();
           statusIcon = Icons.check_circle_rounded;
         }
         statusColor = AppThemeData.success400;
@@ -844,6 +900,7 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
         statusColor = AppThemeData.primary500;
         statusIcon = Icons.info_outline_rounded;
     }
+    } // end else (non-scheduled normal status)
     final List<String> steps = isBillPay
         ? ['Payment Confirmed']
         : isDineAway
@@ -855,7 +912,9 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
     } else {
       switch (order.status) {
         case ORDER_STATUS_PLACED:      currentStep = 0; break;
-        case ORDER_STATUS_ACCEPTED:    currentStep = 1; break;
+        case ORDER_STATUS_ACCEPTED:
+          currentStep = (isDineAway && (order.staffStatus == 'Ready' || order.staffStatus == 'Completed')) ? 2 : 1;
+          break;
         case ORDER_STATUS_DRIVER_PENDING:
         case ORDER_STATUS_DRIVER_REJECTED: currentStep = 1; break;
         case ORDER_STATUS_SHIPPED:     currentStep = 2; break;
@@ -919,7 +978,9 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
             ),
           ),
           // Live prep countdown tile
-          if ((order.status == ORDER_STATUS_ACCEPTED ||
+          if (!isScheduledActive &&
+              !(isDineAway && (order.staffStatus == 'Ready' || order.staffStatus == 'Completed')) &&
+              (order.status == ORDER_STATUS_ACCEPTED ||
                order.status == ORDER_STATUS_DRIVER_PENDING ||
                order.status == ORDER_STATUS_DRIVER_REJECTED) &&
               order.estimatedTimeToPrepare != null &&
@@ -935,8 +996,8 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                   order.status == ORDER_STATUS_DRIVER_REJECTED,
             ),
           ],
-          // Progress step indicator
-          if (order.status != ORDER_STATUS_REJECTED) ...[
+          // Progress step indicator — hidden for scheduled orders still in progress
+          if (!isScheduledActive && order.status != ORDER_STATUS_REJECTED) ...[
             Divider(height: 1, color: isDarkMode(context) ? AppThemeData.darkBgTertiary : const Color(0xFFF0F0F5)),
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
@@ -1507,9 +1568,9 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
   }
 
   Widget buildBillSummaryCard(OrderModel orderModel) {
-    double tipValue = orderModel.tipValue!.isEmpty ? 0.0 : double.parse(orderModel.tipValue!);
+    double tipValue = (orderModel.tipValue == null || orderModel.tipValue!.isEmpty) ? 0.0 : double.parse(orderModel.tipValue!);
     double specialDiscountAmount = 0.0;
-    if (orderModel.specialDiscount!.isNotEmpty) {
+    if (orderModel.specialDiscount != null && orderModel.specialDiscount!.isNotEmpty) {
       specialDiscountAmount = double.parse(orderModel.specialDiscount!['special_discount'].toString());
     }
     List<TaxModel> taxesToDisplay = [];
@@ -1599,12 +1660,25 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
             _billRow('Coupon Code'.tr(), orderModel.couponCode!),
           Divider(height: 1, color: isDarkMode(context) ? AppThemeData.darkBgTertiary : const Color(0xFFF0F0F5)),
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 14),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text('Order Total'.tr(), style: TextStyle(fontFamily: AppThemeData.semiBold, fontSize: 15, color: isDarkMode(context) ? Colors.white : const Color(0xFF1A1A2E))),
-                Text(amountShow(amount: totalamount.toString()), style: TextStyle(fontFamily: AppThemeData.semiBold, fontSize: 15, color: AppThemeData.primary500)),
+                Text(
+                  'Order Total'.tr(),
+                  style: AppTypography.labelLarge.copyWith(
+                    fontWeight: FontWeight.w700,
+                    color: AppThemeData.primary500,
+                  ),
+                ),
+                Text(
+                  amountShow(amount: totalamount.toString()),
+                  style: AppTypography.labelLarge.copyWith(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 17,
+                    color: AppThemeData.primary500,
+                  ),
+                ),
               ],
             ),
           ),
@@ -1614,18 +1688,23 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
   }
 
   Widget _billRow(String label, String value, {Color? valueColor, Widget? trailingWidget}) {
+    final bool dark = isDarkMode(context);
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 7),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Text(label, style: TextStyle(fontSize: 13, color: isDarkMode(context) ? AppThemeData.darkTextSecondary : AppThemeData.grey600)),
+          Text(
+            label,
+            style: AppTypography.bodyMedium.copyWith(
+              color: dark ? AppThemeData.darkTextSecondary : AppThemeData.neutral600,
+            ),
+          ),
           trailingWidget ?? Text(
             value,
-            style: TextStyle(
-              fontSize: 13,
+            style: AppTypography.bodyMedium.copyWith(
               fontWeight: FontWeight.w500,
-              color: valueColor ?? (isDarkMode(context) ? Colors.white : const Color(0xFF1A1A2E)),
+              color: valueColor ?? (dark ? AppThemeData.darkTextPrimary : AppThemeData.neutral800),
             ),
           ),
         ],
@@ -1765,11 +1844,15 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
 
   late Stream<User> driverStream;
   User? _driverModel = User();
+  StreamSubscription? _driverSub;
+  StreamSubscription? _orderSub;
 
   getDriver() async {
+    await _driverSub?.cancel();
     driverStream =
         FireStoreUtils().getDriver(currentOrder!.driverID.toString());
-    driverStream.listen((event) {
+    _driverSub = driverStream.listen((event) {
+      if (!mounted) return;
       _driverModel = event;
       getDirections();
       setState(() {});
@@ -1781,9 +1864,9 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
 
   getCurrentOrder() async {
     ordersFuture = FireStoreUtils().getOrderByID(orderModel!.id);
-    ordersFuture.listen((event) {
+    _orderSub = ordersFuture.listen((event) {
+      if (!mounted) return;
       if (event == null) return;
-      print("----?${event.driverID}");
       setState(() {
         currentOrder = event;
         if (event.driverID != null) {
@@ -2084,21 +2167,27 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                     ? null
                     : () async {
                         await showProgress("Please wait...".tr(), false);
-                        User? customer = await FireStoreUtils.getCurrentUser(orderModel!.authorID);
-                        User? driver = await FireStoreUtils.getCurrentUser(orderModel!.driverID.toString());
-                        await hideProgress();
-                        push(context, ChatScreens(
-                          type: "vendor_chat",
-                          customerName: '${customer!.firstName} ${customer.lastName}',
-                          restaurantName: '${driver!.firstName} ${driver.lastName}',
-                          orderId: orderModel!.id,
-                          restaurantId: driver.userID,
-                          customerId: customer.userID,
-                          customerProfileImage: customer.profilePictureURL,
-                          restaurantProfileImage: driver.profilePictureURL,
-                          token: driver.fcmToken,
-                          chatType: 'Driver',
-                        ));
+                        try {
+                          User? customer = await FireStoreUtils.getCurrentUser(orderModel!.authorID);
+                          User? driver = await FireStoreUtils.getCurrentUser(orderModel!.driverID.toString());
+                          await hideProgress();
+                          if (customer == null || driver == null || !context.mounted) return;
+                          push(context, ChatScreens(
+                            type: "vendor_chat",
+                            customerName: '${customer.firstName} ${customer.lastName}',
+                            restaurantName: '${driver.firstName} ${driver.lastName}',
+                            orderId: orderModel!.id,
+                            restaurantId: driver.userID,
+                            customerId: customer.userID,
+                            customerProfileImage: customer.profilePictureURL,
+                            restaurantProfileImage: driver.profilePictureURL,
+                            token: driver.fcmToken,
+                            chatType: 'Driver',
+                          ));
+                        } catch (e) {
+                          await hideProgress();
+                          ShowToastDialog.showToast('Could not open chat. Please try again.');
+                        }
                       },
                 child: Container(
                   width: 42,
@@ -2292,6 +2381,7 @@ class _PrepCountdownTile extends StatefulWidget {
 class _PrepCountdownTileState extends State<_PrepCountdownTile> {
   Timer? _ticker;
   Duration _remaining = Duration.zero;
+  Duration _elapsed = Duration.zero;
   bool _initialized = false;
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -2363,8 +2453,12 @@ class _PrepCountdownTileState extends State<_PrepCountdownTile> {
     final end = start.add(prep);
     final left = end.difference(DateTime.now());
     if (!mounted) return;
-    setState(() => _remaining = left > Duration.zero ? left : Duration.zero);
-    if (left <= Duration.zero) _ticker?.cancel();
+    if (left > Duration.zero) {
+      setState(() { _remaining = left; _elapsed = Duration.zero; });
+    } else {
+      setState(() { _remaining = Duration.zero; _elapsed = left.abs(); });
+    }
+    // Ticker keeps running past 00:00 so we can show elapsed delay time.
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
@@ -2387,7 +2481,8 @@ class _PrepCountdownTileState extends State<_PrepCountdownTile> {
     return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
   }
 
-  bool get _isDone => _initialized && _remaining == Duration.zero;
+  bool get _isDone => _initialized && widget.alreadyPrepared;
+  bool get _isDelayed => _initialized && !widget.alreadyPrepared && _elapsed > Duration.zero;
 
   // ── Build ─────────────────────────────────────────────────────────────────
 
@@ -2397,10 +2492,75 @@ class _PrepCountdownTileState extends State<_PrepCountdownTile> {
 
     final dark = isDarkMode(context);
 
-    if (_isDone) {
-      return _buildPreparedState(dark);
-    }
+    if (_isDone) return _buildPreparedState(dark);
+    if (_isDelayed) return _buildDelayedState(dark);
     return _buildCountdownState(dark);
+  }
+
+  // Delayed — prep time expired, still cooking ─────────────────────────────
+
+  Widget _buildDelayedState(bool dark) {
+    final m = _elapsed.inMinutes;
+    final s = _elapsed.inSeconds % 60;
+    final delayLabel = '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+      child: Row(
+        children: [
+          Container(
+            width: 48,
+            height: 48,
+            decoration: BoxDecoration(
+              color: AppThemeData.error500.withValues(alpha: 0.10),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Icon(Icons.schedule_rounded, color: AppThemeData.error500, size: 24),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.baseline,
+                  textBaseline: TextBaseline.alphabetic,
+                  children: [
+                    Text(
+                      delayLabel,
+                      style: TextStyle(
+                        fontFamily: AppThemeData.semiBold,
+                        fontSize: 28,
+                        color: AppThemeData.error500,
+                        letterSpacing: 1.5,
+                        height: 1.1,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      'delayed'.tr(),
+                      style: TextStyle(
+                        fontFamily: AppThemeData.regular,
+                        fontSize: 12,
+                        color: AppThemeData.error500,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'Taking a bit longer than expected…'.tr(),
+                  style: TextStyle(
+                    fontFamily: AppThemeData.regular,
+                    fontSize: 12,
+                    color: dark ? AppThemeData.grey400 : AppThemeData.grey500,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   // Order is fully prepared ──────────────────────────────────────────────────

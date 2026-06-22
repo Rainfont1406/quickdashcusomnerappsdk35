@@ -12,6 +12,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../../constants.dart';
+import '../../widget/road_distance_text.dart';
 import '../vendorProductsScreen/newVendorProductsScreen.dart';
 
 class ViewAllPopularStoreScreen extends StatefulWidget {
@@ -230,12 +231,15 @@ class _ViewAllPopularStoreScreenState extends State<ViewAllPopularStoreScreen> {
                             ),
                             Padding(
                               padding: const EdgeInsets.only(left: 10, right: 10),
-                              child: Text(getKm(vendorModel.latitude, vendorModel.longitude)! + " km",
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                    color: Color(0xff555353),
-                                  )),
+                              child: RoadDistanceText(
+                                vendorLat: vendorModel.latitude,
+                                vendorLon: vendorModel.longitude,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: Color(0xff555353),
+                                ),
+                              ),
                             ),
                           ],
                         ),

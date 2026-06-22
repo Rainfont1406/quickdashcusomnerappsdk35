@@ -28,7 +28,7 @@ class _DineInCardImageState extends State<_DineInCardImage> {
 
   List<String> get _cardPhotos {
     final all = widget.vendor.photos
-        .map((e) => e.toString())
+        .map((e) => VendorModel.coverPhotoUrl(e))
         .where((s) => s.isNotEmpty && s != 'null')
         .toList();
     return all.length > 1 ? all.sublist(1) : <String>[];

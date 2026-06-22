@@ -10,6 +10,7 @@ import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../../constants.dart';
+import '../../widget/coming_soon_view.dart';
 import '../vendorProductsScreen/newVendorProductsScreen.dart';
 
 class FavouriteStoreScreen extends StatefulWidget {
@@ -48,6 +49,18 @@ class _FavouriteStoreScreenState extends State<FavouriteStoreScreen> with Single
 
   @override
   Widget build(BuildContext context) {
+    return ValueListenableBuilder<bool>(
+      valueListenable: isDeliveryActiveNotifier,
+      builder: (context, deliveryActive, _) {
+        if (currentOrderTypeGlobal == 'Delivery'.tr() && !deliveryActive) {
+          return ComingSoonScreen(message: deliveryOffMessageNotifier.value);
+        }
+        return _buildScreen(context);
+      },
+    );
+  }
+
+  Widget _buildScreen(BuildContext context) {
     return Scaffold(
       backgroundColor: isDarkMode(context) ? AppThemeData.surfaceDark : AppThemeData.surface,
       body: showLoader

@@ -29,7 +29,9 @@ import 'package:emartconsumer/ui/mapView/MapViewScreen.dart';
 import 'package:emartconsumer/ui/productDetailsScreen/ProductDetailsScreen.dart';
 import 'package:emartconsumer/ui/searchScreen/SearchScreen.dart';
 import 'package:emartconsumer/ui/vendorProductsScreen/newVendorProductsScreen.dart';
+import 'package:emartconsumer/widget/coming_soon_view.dart';
 import 'package:emartconsumer/widget/delivery_type_selector.dart';
+import 'package:emartconsumer/widget/road_distance_text.dart';
 import 'package:emartconsumer/ui/home/home_skeleton.dart';
 
 import 'package:emartconsumer/utils/network_image_widget.dart';
@@ -92,11 +94,160 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   List<VendorModel> newArrivalRestaurantList = [];
   List<OfferModel> offersList = [];
   Stream<List<VendorModel>>? lstAllRestaurant;
+  StreamSubscription<List<VendorModel>>? _vendorSub;
+  // Live admin toggle: when false, the Delivery section shows a Coming Soon
+  // message instead of categories/banners/restaurants. Listened in realtime
+  // (not just read from sectionConstantModel at startup) so it applies
+  // instantly for users already on the Home screen.
   List<ProductModel> lstNearByFood = [];
   List<ProductModel> recommendedProducts = [];
   bool islocationGet = false;
 
+  // Manual restaurant-feed sort chosen by the user — 'offer' | 'nearest' |
+  // 'rating', or null for the default recommended order. Re-sorts the
+  // already-loaded `vendors` list in place (no new Firestore fetch); ties
+  // fall through to the same recommended priority order used by default.
+  String? _manualSortMode;
+
+  // Restaurant-card offer badge text, keyed by vendor id — computed once per
+  // _sortRestaurants() pass (same normal/special offer evaluation used for
+  // ranking, so the badge can never contradict why a restaurant is ranked
+  // where it is). Never a merged normal+special number — just the single
+  // bigger real offer's own amount, "Up to ₹X off", no minimum stated.
+  Map<String, String> _offerBadgeByVendorId = {};
+
+  // Global coupon-style ("normal") offers used by the feed-ranking algorithm
+  // below. Includes vendor-specific and global (storeId null/empty) coupons —
+  // same eligibility rule CartScreen uses at checkout. Refreshed once per
+  // getData() call by _loadNormalOffersForRanking().
+  List<OfferModel> _normalOffersForRanking = [];
+
+  void _loadNormalOffersForRanking() {
+    fireStoreUtils.getAllCoupons().then((value) {
+      _normalOffersForRanking = value;
+      _sortRestaurants();
+      if (mounted) setState(() {});
+    });
+  }
+
+  bool _isPercentageOfferType(String? type) =>
+      type == 'Percentage' || type == 'Percent' || type == 'percentage';
+
+  // Best "normal" (coupon-style) offer for [vendor] — OfferModel has no
+  // section field, so these apply to both Delivery and Dineaway alike.
+  // There's no live cart while browsing the feed, so each offer's own
+  // applicableAmount is used as the comparison order amount for converting
+  // a percentage offer into a monetary saving — this also means the
+  // "satisfies minimum order amount" validity rule is met by construction.
+  ({double amount, double percent}) _bestNormalOffer(VendorModel vendor) {
+    double bestAmount = 0;
+    double bestPercent = 0;
+    double bestRate = -1;
+    final now = DateTime.now();
+
+    for (final offer in _normalOffersForRanking) {
+      final appliesToVendor = offer.storeId == vendor.id ||
+          offer.storeId == null ||
+          (offer.storeId?.isEmpty ?? true);
+      if (!appliesToVendor) continue;
+      if (offer.isEnableOffer != true) continue;
+      // Private coupons (isPublic == false) need a manual code the browsing
+      // customer doesn't have — they're excluded from the cart's tap-to-
+      // apply offers sheet too, so they must not influence ranking or what
+      // gets advertised on the card.
+      if (offer.isPublic == false) continue;
+      final expiry = offer.expireOfferDate?.toDate();
+      if (expiry == null || !expiry.isAfter(now)) continue;
+
+      final minAmt = double.tryParse(offer.applicableAmount ?? '') ?? 0;
+      final raw = double.tryParse(offer.discountOffer ?? '') ?? 0;
+      final isPercent = _isPercentageOfferType(offer.discountTypeOffer);
+
+      final amount = isPercent ? (minAmt * raw / 100) : raw;
+      final percent = isPercent ? raw : 0.0;
+      // Rank by effective rate (discount ÷ minimum spend), not raw amount —
+      // a big-looking flat discount that needs a huge minimum order isn't
+      // actually a better deal than a small discount with a low minimum.
+      // Percentage offers reduce to their own percent value (the minimum
+      // cancels out algebraically); a no-minimum offer is unconditionally
+      // attainable, so it always wins the comparison.
+      final rate =
+          isPercent ? (raw / 100) : (minAmt > 0 ? raw / minAmt : double.infinity);
+
+      if (rate > bestRate) {
+        bestRate = rate;
+        bestAmount = amount;
+        bestPercent = percent;
+      }
+    }
+    return (amount: bestAmount, percent: bestPercent);
+  }
+
+  // Best section-specific special offer for [vendor]. [orderType] is
+  // "Delivery" or "Takeaway" — matching Timeslot.orderType's convention
+  // (same as CartScreen's special-discount evaluation).
+  ({double amount, double percent}) _bestSpecialOffer(
+      VendorModel vendor, String orderType) {
+    double bestAmount = 0;
+    double bestPercent = 0;
+    double bestRate = -1;
+    if (!vendor.specialDiscountEnable) return (amount: 0, percent: 0);
+
+    final now = DateTime.now();
+    final todayName = DateFormat('EEEE', 'en_US').format(now);
+    final todayDate = DateFormat('dd-MM-yyyy').format(now);
+
+    for (final dayDiscount in vendor.specialDiscount) {
+      if (dayDiscount.day != todayName) continue;
+      for (final slot in dayDiscount.timeslot ?? []) {
+        if (slot.from == null || slot.to == null) continue;
+        if (slot.orderType != null &&
+            slot.orderType!.isNotEmpty &&
+            slot.orderType != orderType) {
+          continue;
+        }
+
+        DateTime start, end;
+        try {
+          start = DateFormat('dd-MM-yyyy HH:mm')
+              .parse('$todayDate ${slot.from}');
+          end =
+              DateFormat('dd-MM-yyyy HH:mm').parse('$todayDate ${slot.to}');
+        } catch (_) {
+          continue;
+        }
+        if (!end.isAfter(start)) end = end.add(const Duration(days: 1));
+        if (!vendor.isCurrentDateInRange(start, end)) continue;
+
+        final minAmt = double.tryParse(slot.applicableAmount ?? '') ?? 0;
+        final raw = double.tryParse(slot.discount ?? '') ?? 0;
+        final isPercent = _isPercentageOfferType(slot.type);
+
+        final amount = isPercent ? (minAmt * raw / 100) : raw;
+        final percent = isPercent ? raw : 0.0;
+        // Same effective-rate ranking as _bestNormalOffer — see comment there.
+        final rate = isPercent
+            ? (raw / 100)
+            : (minAmt > 0 ? raw / minAmt : double.infinity);
+
+        if (rate > bestRate) {
+          bestRate = rate;
+          bestAmount = amount;
+          bestPercent = percent;
+        }
+      }
+    }
+    return (amount: bestAmount, percent: bestPercent);
+  }
+
   /// BY AK
+  /// Restaurant feed ranking. Priority order: OPEN status, eligibility,
+  /// effective discount, effective offer percentage, rating, distance, then
+  /// CLOSED status — i.e. OPEN+eligible, OPEN+non-eligible, CLOSED+eligible,
+  /// CLOSED+non-eligible, each sub-group ordered by discount/percent/
+  /// rating/distance. Re-evaluated per current screen's order type
+  /// (Delivery vs Dineaway), since thresholds and special-offer matching
+  /// both depend on which section is active.
   void _sortRestaurants() {
     if (MyAppState.selectedPosotion.location == null) {
       return;
@@ -105,40 +256,153 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final double userLat = MyAppState.selectedPosotion.location!.latitude;
     final double userLng = MyAppState.selectedPosotion.location!.longitude;
 
-    vendors.sort((a, b) {
-      bool aOpen = a.reststatus && (a.workingHours.isEmpty || a.isOpen());
-      bool bOpen = b.reststatus && (b.workingHours.isEmpty || b.isOpen());
+    final bool isDineaway = selctedOrderTypeValue == "Dineaway".tr() ||
+        selctedOrderTypeValue == "Takeaway".tr();
+    final String orderType = isDineaway ? "Takeaway" : "Delivery";
+    final double threshold = isDineaway ? 200 : 50;
+    final double strongOfferMin = isDineaway ? 100 : 30;
 
-      // Rule 1: open first
-      if (aOpen != bOpen) {
-        if (aOpen) return -1;
-        return 1;
+    final Map<String, String> newBadges = {};
+
+    final ranked = vendors.map((v) {
+      final bool open = v.isAcceptingOrders;
+
+      final normal = _bestNormalOffer(v);
+      final special = _bestSpecialOffer(v, orderType);
+
+      final double effectiveDiscount = normal.amount + special.amount;
+      final double effectivePercent = normal.percent + special.percent;
+
+      // Card badge: never the merged normal+special sum above (that number
+      // can correspond to no real, single order size when the two offers
+      // have different minimums) — just the single bigger real offer,
+      // shown as its own genuine "Up to ₹X off" ceiling.
+      final bool normalWins = normal.amount >= special.amount;
+      final double featuredAmount = normalWins ? normal.amount : special.amount;
+      final double featuredPercent = normalWins ? normal.percent : special.percent;
+
+      if (featuredAmount > 0) {
+        // Whichever framing looks more compelling: a small ₹ amount reads
+        // better as a percentage ("Up to 20% off" > "Up to ₹18 off"), while
+        // a large amount reads better as a flat figure ("Up to ₹250 off" >
+        // "Up to 12% off") — only applies when the winning offer is
+        // actually percentage-type (featuredPercent > 0); flat-type offers
+        // have no percentage to fall back to. No decimals either way.
+        final bool showAsPercent = featuredPercent > 0 && featuredAmount < 100;
+        newBadges[v.id] = showAsPercent
+            ? 'Up to ${featuredPercent.round()}% off'.tr()
+            : 'Up to ${amountShow(amount: featuredAmount.toStringAsFixed(0), decimals: 0)} off'
+                .tr();
       }
 
-      // Rule 2: if both same status, compare rating
-      double aRating =
-      a.reviewsCount > 0 ? a.reviewsSum / a.reviewsCount : 0.0;
-      double bRating =
-      b.reviewsCount > 0 ? b.reviewsSum / b.reviewsCount : 0.0;
+      final bool meetsThreshold = effectiveDiscount >= threshold;
+      final bool hasStrongOffer = normal.amount >= strongOfferMin ||
+          special.amount >= strongOfferMin;
+      final bool eligible = meetsThreshold && hasStrongOffer;
 
-      if (aRating != bRating) {
-        return bRating.compareTo(aRating);
+      final double rating =
+          v.reviewsCount > 0 ? v.reviewsSum / v.reviewsCount : 0.0;
+      final double distance = Geolocator.distanceBetween(
+          userLat, userLng, v.latitude, v.longitude);
+
+      return (
+        vendor: v,
+        isOpen: open,
+        effectiveDiscount: effectiveDiscount,
+        effectivePercent: effectivePercent,
+        isEligible: eligible,
+        rating: rating,
+        distance: distance,
+      );
+    }).toList();
+
+    ranked.sort((a, b) {
+      // 1. OPEN before CLOSED — absolute priority, regardless of everything else.
+      if (a.isOpen != b.isOpen) return a.isOpen ? -1 : 1;
+
+      // Manual user-selected sort (Offer / Nearest / Rating), if active —
+      // takes priority within the open/closed group. If values tie, fall
+      // through to the same recommended priority order used by default.
+      if (_manualSortMode == 'offer' &&
+          a.effectiveDiscount != b.effectiveDiscount) {
+        return b.effectiveDiscount.compareTo(a.effectiveDiscount);
+      }
+      if (_manualSortMode == 'nearest' && a.distance != b.distance) {
+        return a.distance.compareTo(b.distance);
+      }
+      if (_manualSortMode == 'rating' && a.rating != b.rating) {
+        return b.rating.compareTo(a.rating);
       }
 
-      // Rule 3: if same rating, nearest first
-      double aDistance = Geolocator.distanceBetween(
-          userLat, userLng, a.latitude, a.longitude);
-      double bDistance = Geolocator.distanceBetween(
-          userLat, userLng, b.latitude, b.longitude);
-
-      return aDistance.compareTo(bDistance);
+      // 2. Eligible before non-eligible, within the same open/closed group.
+      if (a.isEligible != b.isEligible) return a.isEligible ? -1 : 1;
+      // 3. Higher effective discount first.
+      if (a.effectiveDiscount != b.effectiveDiscount) {
+        return b.effectiveDiscount.compareTo(a.effectiveDiscount);
+      }
+      // 4. Higher effective offer percentage first.
+      if (a.effectivePercent != b.effectivePercent) {
+        return b.effectivePercent.compareTo(a.effectivePercent);
+      }
+      // 5. Higher rating first.
+      if (a.rating != b.rating) return b.rating.compareTo(a.rating);
+      // 6. Closer distance first.
+      return a.distance.compareTo(b.distance);
     });
+
+    vendors = ranked.map((r) => r.vendor).toList();
+    _offerBadgeByVendorId = newBadges;
   }
 
   void _tryHideSkeleton() {
     if (isLoading && _bannerReady && _firstVendorReceived && mounted) {
       setState(() => isLoading = false);
     }
+  }
+
+  // Called every time the user picks a new delivery location.
+  // Shows the skeleton immediately so stale distances aren't visible,
+  // then lets getData() + _tryHideSkeleton() reveal the page once fresh
+  // vendor data has arrived.
+  void _onLocationChanged() {
+    clearRoadDistanceCache();
+    setState(() {
+      isLoading = true;
+      _firstVendorReceived = false;
+      _precachingVendors = false;
+    });
+    getData();
+  }
+
+  // Precaches a list of network image URLs concurrently. Individual failures
+  // are swallowed; a 5-second hard timeout prevents the skeleton from blocking
+  // forever when images are slow or unavailable.
+  Future<void> _precacheBatch(List<String> urls) async {
+    if (!mounted || urls.isEmpty) return;
+    final futures = urls
+        .where((u) => u.isNotEmpty)
+        .map((url) =>
+            precacheImage(NetworkImage(url), context).catchError((_) {}))
+        .toList();
+    if (futures.isEmpty) return;
+    await Future.wait(futures).timeout(
+      const Duration(seconds: 5),
+      onTimeout: () => [],
+    );
+  }
+
+  // Called on the first vendor batch: precaches vendor card images then signals
+  // the skeleton to hide. Separated from the stream listener so it can await.
+  Future<void> _precacheVendorsAndShow() async {
+    final images = vendors
+        .take(8)
+        .where((v) => v.photo.isNotEmpty)
+        .map((v) => v.photo)
+        .toList();
+    await _precacheBatch(images);
+    if (!mounted) return;
+    _firstVendorReceived = true;
+    _tryHideSkeleton();
   }
 
   late Future<List<FavouriteModel>> lstFavourites;
@@ -154,6 +418,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   // is safe — _tryHideSkeleton checks both before acting.
   bool _bannerReady = false;
   bool _firstVendorReceived = false;
+  bool _precachingVendors = false;
 
   getLocationData() async {
     try {
@@ -185,8 +450,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     print("AK DEBUG: HomeScreen initState");
+    // The live listener itself lives in ContainerScreen (one listener for the
+    // whole app); this screen just rebuilds when the shared notifiers change.
+    isDeliveryActiveNotifier.addListener(_onDeliveryGateChanged);
+    deliveryOffMessageNotifier.addListener(_onDeliveryGateChanged);
     getLocationData();
     getBanner();
+  }
+
+  void _onDeliveryGateChanged() {
+    if (mounted) setState(() {});
   }
 
   List<BannerModel> bannerTopHome = [];
@@ -226,9 +499,25 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         .get()
         .then((value) {
       setState(() {
-        storyEnable = value.data()!['isEnabled'];
+        storyEnable = value.data()?['isEnabled'] ?? false;
       });
     });
+    // Precache category and banner images so they are painted before the
+    // skeleton disappears. A 5-second timeout (inside _precacheBatch) ensures
+    // we never block indefinitely on a slow network.
+    if (mounted) {
+      await _precacheBatch([
+        ...vendorCategoryModel
+            .where((c) => (c.photo ?? '').isNotEmpty)
+            .map((c) => c.photo!),
+        ...bannerTopHome
+            .where((b) => (b.photo ?? '').isNotEmpty)
+            .map((b) => b.photo!),
+        ...bannerMiddleHome
+            .where((b) => (b.photo ?? '').isNotEmpty)
+            .map((b) => b.photo!),
+      ]);
+    }
     // All banner/category data is ready — signal and try to dismiss skeleton.
     _bannerReady = true;
     _tryHideSkeleton();
@@ -353,8 +642,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                           MyAppState
                                               .selectedPosotion =
                                               addressModel;
-                                          setState(() {});
-                                          getData();
+                                          _onLocationChanged();
                                         }
                                       });
                                     } else {
@@ -401,7 +689,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                                     MyAppState
                                                         .selectedPosotion =
                                                         addressModel;
-                                                    getData();
+                                                    _onLocationChanged();
                                                   }
                                                 });
                                           } else {
@@ -437,7 +725,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                                         MyAppState
                                                             .selectedPosotion =
                                                             addressModel;
-                                                        getData();
+                                                        _onLocationChanged();
                                                         Navigator.pop(
                                                             context);
                                                       },
@@ -464,32 +752,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                             );
                                           }
                                         } catch (e) {
-                                          await placemarkFromCoordinates(
-                                              19.228825,
-                                              72.854118)
-                                              .then(
-                                                  (valuePlaceMaker) {
-                                                Placemark placeMark =
-                                                valuePlaceMaker[0];
-                                                setState(() {
-                                                  addressModel
-                                                      .location =
-                                                      UserLocation(
-                                                          latitude:
-                                                          19.228825,
-                                                          longitude:
-                                                          72.854118);
-                                                  String
-                                                  currentLocation =
-                                                      "${placeMark.name}, ${placeMark.subLocality}, ${placeMark.locality}, ${placeMark.administrativeArea}, ${placeMark.postalCode}, ${placeMark.country}";
-                                                  addressModel
-                                                      .locality =
-                                                      currentLocation;
-                                                });
-                                              });
-                                          MyAppState
-                                              .selectedPosotion =
-                                              addressModel;
+                                          // GPS failed — do not set a
+                                          // hardcoded location; the user
+                                          // must pick their address manually.
                                           await hideProgress();
                                           getData();
                                         }
@@ -715,13 +980,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 child: SingleChildScrollView(
                   physics: const AlwaysScrollableScrollPhysics(),
                   child: Column(
-                  children: [
+                  children: (isDelivery && !isDeliveryActiveNotifier.value)
+                      ? [
+                          ComingSoonView(message: deliveryOffMessageNotifier.value),
+                        ]
+                      : [
                     storyList.isEmpty || storyEnable == false
                         ? const SizedBox()
-                        : Padding(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 16),
-                      child: storyList.isNotEmpty &&
+                        : storyList.isNotEmpty &&
                           ((selctedOrderTypeValue ==
                               "Takeaway".tr() ||
                               selctedOrderTypeValue ==
@@ -740,8 +1006,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         crossAxisAlignment:
                         CrossAxisAlignment.start,
                         children: [
-                          titleView("Today's Specials",
-                                  () {}),
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 16),
+                            child: titleView("Today's Specials", () {}),
+                          ),
                           const SizedBox(height: 10),
                           StoryView(
                             storyList: storyList,
@@ -752,7 +1020,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         ],
                       )
                           : const SizedBox(),
-                    ),
                     SizedBox(
                       height: storyList.isEmpty ? 0 : 20,
                     ),
@@ -769,12 +1036,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     const SizedBox(height: 32),
                     bannerTopHome.isEmpty
                         ? const SizedBox()
-                        : Padding(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 16),
-                      child: BannerView(
-                          bannerList: bannerTopHome),
-                    ),
+                        : BannerView(bannerList: bannerTopHome),
 
                     /// BY AK
                     if (isDelivery && lstNearByFood.isNotEmpty)
@@ -820,31 +1082,26 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     //   const SizedBox(),
                     ///
 
-                    Padding(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 16),
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.start,
-                        crossAxisAlignment:
-                        CrossAxisAlignment.start,
-                        children: [
-                          _sectionTitle("New Arrivals"),
-                          const SizedBox(height: 10),
-                          NewArrival(
-                              newArrivalRestaurantList:
-                              newArrivalRestaurantList)
-                        ],
-                      ),
+                    Column(
+                      mainAxisAlignment: MainAxisAlignment.start,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          child: _sectionTitle("New Arrivals"),
+                        ),
+                        const SizedBox(height: 10),
+                        NewArrival(
+                            newArrivalRestaurantList:
+                            newArrivalRestaurantList,
+                            isDelivery: isDelivery,
+                            productsByVendor: _deliveryProductsByVendor)
+                      ],
                     ),
                     const SizedBox(height: 32),
                     bannerMiddleHome.isEmpty
                         ? const SizedBox()
-                        : Padding(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 16),
-                      child: BannerView(
-                          bannerList: bannerMiddleHome),
-                    ),
+                        : BannerView(bannerList: bannerMiddleHome),
                     Padding(
                       padding: const EdgeInsets.symmetric(
                           horizontal: 16),
@@ -855,7 +1112,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         children: [
                           _sectionTitle("${vendors.length} Restaurants Around You"),
                           const SizedBox(height: 10),
-                          AllStore(allStoreList: vendors)
+                          _restaurantSortBar(),
+                          const SizedBox(height: 10),
+                          AllStore(
+                              allStoreList: vendors,
+                              offerBadges: _offerBadgeByVendorId,
+                              isDelivery: isDelivery,
+                              productsByVendor: _deliveryProductsByVendor)
                         ],
                       ),
                     ),
@@ -984,11 +1247,20 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     selectedValue: selctedOrderTypeValue!,
                     isDarkMode: isDarkMode(context),
                     onValueChanged: (String newValue) async {
+                      // Switching Delivery/Dineaway changes special-offer
+                      // matching, eligibility thresholds, and ranking — show
+                      // the skeleton immediately so stale results from the
+                      // old section aren't visible while the new section's
+                      // data loads, same pattern as _onLocationChanged().
                       setState(() {
                         selctedOrderTypeValue = newValue;
+                        currentOrderTypeGlobal = newValue;
+                        isLoading = true;
+                        _firstVendorReceived = false;
+                        _precachingVendors = false;
                         saveFoodTypeValue();
-                        getData();
                       });
+                      getData();
                     },
                   ),
                 ],
@@ -1035,6 +1307,68 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
+  // Manual sort chips for the "Restaurants Around You" feed — re-sorts the
+  // already-loaded `vendors` list in place (_sortRestaurants), no new fetch.
+  Widget _restaurantSortBar() {
+    return Row(
+      children: [
+        _sortChip('offer', 'Offers'.tr(), Icons.local_offer_rounded),
+        const SizedBox(width: 8),
+        _sortChip('nearest', 'Nearest'.tr(), Icons.near_me_rounded),
+        const SizedBox(width: 8),
+        _sortChip('rating', 'Rating'.tr(), Icons.star_rounded),
+      ],
+    );
+  }
+
+  Widget _sortChip(String mode, String label, IconData icon) {
+    final bool selected = _manualSortMode == mode;
+    final dark = isDarkMode(context);
+    return GestureDetector(
+      onTap: () {
+        setState(() {
+          _manualSortMode = selected ? null : mode;
+          _sortRestaurants();
+        });
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        decoration: BoxDecoration(
+          color: selected
+              ? AppThemeData.primary500
+              : (dark ? AppThemeData.grey800 : AppThemeData.grey100),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: selected
+                ? AppThemeData.primary500
+                : (dark ? AppThemeData.grey700 : AppThemeData.grey200),
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon,
+                size: 14,
+                color: selected
+                    ? Colors.white
+                    : (dark ? AppThemeData.grey300 : AppThemeData.grey600)),
+            const SizedBox(width: 5),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 12,
+                fontFamily: AppThemeData.semiBold,
+                color: selected
+                    ? Colors.white
+                    : (dark ? AppThemeData.grey300 : AppThemeData.grey600),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _sectionTitle(String name) {
     return Text(
       name.tr(),
@@ -1064,6 +1398,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _vendorSub?.cancel();
+    isDeliveryActiveNotifier.removeListener(_onDeliveryGateChanged);
+    deliveryOffMessageNotifier.removeListener(_onDeliveryGateChanged);
     WidgetsBinding.instance.removeObserver(this);
     fireStoreUtils.closeOfferStream();
     fireStoreUtils.closeVendorStream();
@@ -1107,6 +1444,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             !validOptions.contains(savedFoodType))
             ? "Delivery".tr()
             : savedFoodType;
+        currentOrderTypeGlobal = selctedOrderTypeValue!;
       });
     }
     if (selctedOrderTypeValue == "Takeaway".tr() ||
@@ -1122,6 +1460,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   bool _storiesLoaded = false;
 
   Map<String, List<ProductModel>> _productsByVendor = {};
+
+  // All of each vendor's published, delivery-eligible products (unlike
+  // _productsByVendor above, not capped to the first 20 app-wide) — the
+  // pool AllStore/NewArrival's delivery menu carousels rank/select from.
+  Map<String, List<ProductModel>> _deliveryProductsByVendor = {};
 
   void _filterStories() {
     print('\n🎬 ===== STORY FILTERING START =====');
@@ -1150,9 +1493,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         if (element1.vendorID == element.id) {
           vendorFound = true;
 
-          bool isVendorOnline =
-              element.isVendorOnline || element.reststatus || element.isOpen();
-          if (!isVendorOnline) {
+          if (!element.isAcceptingOrders) {
             print(
                 '\n📍 Skipping story (vendor offline) for vendor: ${element.title}');
             return;
@@ -1213,8 +1554,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   Future<void> getData() async {
     print("AK DEBUG: getData called");
+    // Cancel any previous subscription so stale Firestore events from an old
+    // location cannot fire after a new location has been selected.
+    await _vendorSub?.cancel();
+    _vendorSub = null;
     getFoodType();
     lstNearByFood.clear();
+    _loadNormalOffersForRanking();
     lstAllRestaurant =
         fireStoreUtils.getAllStores().asBroadcastStream();
 
@@ -1228,7 +1574,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       name = toBeginningOfSentenceCase(widget.user!.firstName);
     }
 
-    lstAllRestaurant!.listen((event) {
+    _vendorSub = lstAllRestaurant!.listen((event) {
       print("AK DEBUG: Firestore vendors = ${event.length}");
 
       popularRestaurantLst.clear();
@@ -1251,9 +1597,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               .add(product);
         }
 
+        _deliveryProductsByVendor.clear();
+        for (var product in value) {
+          if (!product.publish || !product.deliveryOption) continue;
+          if (product.productStatus != 'approved') continue;
+          _deliveryProductsByVendor
+              .putIfAbsent(product.vendorID, () => [])
+              .add(product);
+        }
+        if (mounted) setState(() {});
+
         for (var vendor in event) {
-          bool isVendorOnline = vendor.reststatus || vendor.isOpen();
-          if (isVendorOnline) {
+          if (vendor.isAcceptingOrders) {
             final vendorProducts = _productsByVendor[vendor.id];
             if (vendorProducts != null) {
               for (var product in vendorProducts) {
@@ -1349,13 +1704,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       popularRestaurantLst.addAll(temp0);
       popularRestaurantLst.addAll(temp0_);
 
-      // All synchronous vendor processing is done. Signal the first batch and
-      // try to dismiss the skeleton (needs _bannerReady too). For subsequent
-      // stream events (order-type change, Firestore push), just rebuild.
-      if (!_firstVendorReceived) {
-        _firstVendorReceived = true;
-        _tryHideSkeleton();
-      } else if (mounted) {
+      // All synchronous vendor processing is done. On the first batch, kick off
+      // image precaching; the skeleton hides only after that completes. For
+      // subsequent stream events (live updates / order-type change), just rebuild.
+      if (!_firstVendorReceived && !_precachingVendors) {
+        _precachingVendors = true;
+        _precacheVendorsAndShow();
+      } else if (mounted && _firstVendorReceived) {
         setState(() {});
       }
 
@@ -1461,6 +1816,7 @@ class _StoryViewState extends State<StoryView> {
         height: _storyH,
         child: ListView.builder(
           controller: _scrollController,
+          physics: const ClampingScrollPhysics(),
           scrollDirection: Axis.horizontal,
           padding: EdgeInsets.zero,
           itemCount: widget.storyList.length,
@@ -1477,6 +1833,7 @@ class _StoryViewState extends State<StoryView> {
       height: _videoH,
       child: ListView.builder(
         shrinkWrap: true,
+        physics: const ClampingScrollPhysics(),
         itemCount: widget.storyList.length,
         scrollDirection: Axis.horizontal,
         addAutomaticKeepAlives: false,
@@ -2082,8 +2439,10 @@ class _RestaurantCardImageState extends State<_RestaurantCardImage> {
   List<String> get _images {
     // photos[0] = logo (same as photo field), photos[1..n] = card gallery images.
     // Skip index 0 so only the actual card images appear in the carousel.
+    // Entries may be a legacy URL string or a {original, cover} map — always
+    // resolve through coverPhotoUrl() so the carousel shows the 16:9 cover.
     final allPhotos = widget.vendorModel.photos
-        .map((e) => e.toString())
+        .map((e) => VendorModel.coverPhotoUrl(e))
         .where((s) => s.isNotEmpty && s != 'null')
         .toList();
     final cardImages = allPhotos.length > 1 ? allPhotos.sublist(1) : <String>[];
@@ -2172,24 +2531,228 @@ class _RestaurantCardImageState extends State<_RestaurantCardImage> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Delivery-mode menu carousel — replaces the restaurant photo with up to 5 of
+// the vendor's own menu items (image, name, price), ranked by rolling 30-day
+// sales with a sales → best-discount → lowest-price fallback chain.
+// ─────────────────────────────────────────────────────────────────────────────
+class _MenuCarousel extends StatefulWidget {
+  final VendorModel vendorModel;
+  final List<ProductModel> products;
+  final double height;
+  final BorderRadius borderRadius;
+  final bool showDots;
+
+  const _MenuCarousel({
+    required this.vendorModel,
+    required this.products,
+    required this.height,
+    required this.borderRadius,
+    this.showDots = true,
+  });
+
+  @override
+  State<_MenuCarousel> createState() => _MenuCarouselState();
+}
+
+class _MenuCarouselState extends State<_MenuCarousel> {
+  late PageController _pageController;
+  late Future<List<ProductModel>> _rankedFuture;
+  int _currentPage = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _pageController = PageController();
+    _rankedFuture =
+        FireStoreUtils.getCarouselProducts(widget.vendorModel.id, widget.products);
+  }
+
+  @override
+  void didUpdateWidget(covariant _MenuCarousel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.vendorModel.id != widget.vendorModel.id ||
+        oldWidget.products != widget.products) {
+      _rankedFuture =
+          FireStoreUtils.getCarouselProducts(widget.vendorModel.id, widget.products);
+    }
+  }
+
+  @override
+  void dispose() {
+    _pageController.dispose();
+    super.dispose();
+  }
+
+  bool _hasVariants(ProductModel p) {
+    final hasNewAttrs = p.productAttributes.isNotEmpty &&
+        p.productAttributes.any((c) => c.options.any((o) => o.enabled));
+    final hasLegacyVariants = p.itemAttributes != null &&
+        (p.itemAttributes!.attributes?.isNotEmpty ?? false) &&
+        (p.itemAttributes!.variants?.isNotEmpty ?? false);
+    return hasNewAttrs || hasLegacyVariants;
+  }
+
+  double? _startingPrice(ProductModel p) {
+    final List<double> prices = [];
+    for (final cfg in p.productAttributes) {
+      for (final o in cfg.options) {
+        if (o.enabled && o.effectivePrice > 0) prices.add(o.effectivePrice);
+      }
+    }
+    final variants = p.itemAttributes?.variants;
+    if (variants != null) {
+      for (final v in variants) {
+        final vp = double.tryParse(v.variant_price ?? '');
+        if (vp != null && vp > 0) prices.add(vp);
+      }
+    }
+    if (prices.isEmpty) return null;
+    return prices.reduce((a, b) => a < b ? a : b);
+  }
+
+  String _priceLabel(ProductModel p) {
+    if (_hasVariants(p)) {
+      final starting = _startingPrice(p);
+      if (starting != null) {
+        return '${'Starting'.tr()} ${amountShow(amount: starting.toStringAsFixed(2))}';
+      }
+    }
+    final disPrice = double.tryParse(p.disPrice ?? '0') ?? 0;
+    final price = double.tryParse(p.price) ?? 0;
+    if (disPrice > 0 && disPrice < price) {
+      return amountShow(amount: p.disPrice!);
+    }
+    return amountShow(amount: p.price);
+  }
+
+  Widget _menuTile(ProductModel p) {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        NetworkImageWidget(
+          imageUrl: p.photo.isNotEmpty && p.photo != 'null' ? p.photo : '',
+          fit: BoxFit.cover,
+          height: widget.height,
+          width: double.infinity,
+        ),
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: 0,
+          child: Container(
+            padding: const EdgeInsets.fromLTRB(10, 18, 10, 10),
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [Colors.transparent, Colors.black.withValues(alpha: 0.65)],
+              ),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  p.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 13,
+                    fontFamily: AppThemeData.semiBold,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  _priceLabel(p),
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.9),
+                    fontSize: 12,
+                    fontFamily: AppThemeData.medium,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _fallbackToRestaurantPhoto() {
+    return _RestaurantCardImage(
+      vendorModel: widget.vendorModel,
+      height: widget.height,
+      borderRadius: widget.borderRadius,
+      showDots: widget.showDots,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.products.isEmpty) return _fallbackToRestaurantPhoto();
+    return FutureBuilder<List<ProductModel>>(
+      future: _rankedFuture,
+      builder: (context, snapshot) {
+        final items = snapshot.data ?? widget.products.take(5).toList();
+        if (items.isEmpty) return _fallbackToRestaurantPhoto();
+        return Stack(
+          children: [
+            ClipRRect(
+              borderRadius: widget.borderRadius,
+              child: items.length == 1
+                  ? _menuTile(items[0])
+                  : PageView.builder(
+                      controller: _pageController,
+                      itemCount: items.length,
+                      onPageChanged: (i) => setState(() => _currentPage = i),
+                      itemBuilder: (_, i) => _menuTile(items[i]),
+                    ),
+            ),
+            if (widget.showDots && items.length > 1)
+              Positioned(
+                bottom: 8,
+                left: 0,
+                right: 0,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: List.generate(items.length, (i) {
+                    final active = i == _currentPage;
+                    return AnimatedContainer(
+                      duration: const Duration(milliseconds: 250),
+                      margin: const EdgeInsets.symmetric(horizontal: 3),
+                      width: active ? 18 : 6,
+                      height: 6,
+                      decoration: BoxDecoration(
+                        color: active ? Colors.white : Colors.white.withValues(alpha: 0.55),
+                        borderRadius: BorderRadius.circular(3),
+                      ),
+                    );
+                  }),
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // AllStore
 // ─────────────────────────────────────────────────────────────────────────────
 class AllStore extends StatelessWidget {
   final List<VendorModel> allStoreList;
+  final Map<String, String> offerBadges;
+  final bool isDelivery;
+  final Map<String, List<ProductModel>> productsByVendor;
 
-  const AllStore({super.key, required this.allStoreList});
-
-  String _formatDistance(VendorModel vendor) {
-    if (MyAppState.selectedPosotion.location == null) return '-- km';
-    final double meters = Geolocator.distanceBetween(
-      MyAppState.selectedPosotion.location!.latitude,
-      MyAppState.selectedPosotion.location!.longitude,
-      vendor.latitude,
-      vendor.longitude,
-    );
-    if (meters < 1000) return '${meters.toStringAsFixed(0)} m';
-    return '${(meters / 1000).toStringAsFixed(1)} km';
-  }
+  const AllStore(
+      {super.key,
+      required this.allStoreList,
+      this.offerBadges = const {},
+      this.isDelivery = false,
+      this.productsByVendor = const {}});
 
   @override
   Widget build(BuildContext context) {
@@ -2203,15 +2766,15 @@ class AllStore extends StatelessWidget {
       addRepaintBoundaries: true,
       itemBuilder: (BuildContext context, int index) {
         final VendorModel vendorModel = allStoreList[index];
-        final bool open = vendorModel.reststatus && (vendorModel.workingHours.isEmpty || vendorModel.isOpen());
+        final bool open = vendorModel.isAcceptingOrders;
         final String rating = calculateReview(
           reviewCount: vendorModel.reviewsCount.toString(),
           reviewSum: vendorModel.reviewsSum.toString(),
         );
-        final String distanceText = _formatDistance(vendorModel);
         final int listLen = allStoreList.length >= 10 ? 10 : allStoreList.length;
 
         return Padding(
+          key: ValueKey(vendorModel.id),
           padding: EdgeInsets.only(bottom: index == listLen - 1 ? 90 : 24),
           child: InkWell(
             onTap: () =>
@@ -2219,7 +2782,7 @@ class AllStore extends StatelessWidget {
             borderRadius: BorderRadius.circular(24),
             child: Container(
               decoration: BoxDecoration(
-                color: Colors.white,
+                color: const Color(0xFFFAFAFC),
                 borderRadius: BorderRadius.circular(24),
                 boxShadow: [
                   BoxShadow(
@@ -2243,14 +2806,24 @@ class AllStore extends StatelessWidget {
                       SizedBox(
                         height: Responsive.height(24, context),
                         width: double.infinity,
-                        child: _RestaurantCardImage(
-                          vendorModel: vendorModel,
-                          height: Responsive.height(24, context),
-                          borderRadius: const BorderRadius.only(
-                            topLeft: Radius.circular(24),
-                            topRight: Radius.circular(24),
-                          ),
-                        ),
+                        child: isDelivery
+                            ? _MenuCarousel(
+                                vendorModel: vendorModel,
+                                products: productsByVendor[vendorModel.id] ?? [],
+                                height: Responsive.height(24, context),
+                                borderRadius: const BorderRadius.only(
+                                  topLeft: Radius.circular(24),
+                                  topRight: Radius.circular(24),
+                                ),
+                              )
+                            : _RestaurantCardImage(
+                                vendorModel: vendorModel,
+                                height: Responsive.height(24, context),
+                                borderRadius: const BorderRadius.only(
+                                  topLeft: Radius.circular(24),
+                                  topRight: Radius.circular(24),
+                                ),
+                              ),
                       ),
                       // Cinematic bottom gradient
                       Positioned(
@@ -2322,6 +2895,45 @@ class AllStore extends StatelessWidget {
                             ),
                           ),
                         ),
+                      if (offerBadges[vendorModel.id] != null)
+                        Positioned(
+                          top: 12,
+                          right: 12,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 9, vertical: 5),
+                            decoration: BoxDecoration(
+                              color: AppThemeData.primary500,
+                              borderRadius: BorderRadius.circular(50),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: AppThemeData.primary500
+                                      .withValues(alpha: 0.35),
+                                  blurRadius: 8,
+                                  offset: const Offset(0, 3),
+                                ),
+                              ],
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(Icons.local_offer_rounded,
+                                    color: Colors.white, size: 11),
+                                const SizedBox(width: 4),
+                                Text(
+                                  offerBadges[vendorModel.id]!,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 11,
+                                    height: 1.2,
+                                    fontFamily: AppThemeData.semiBold,
+                                    letterSpacing: 0.1,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
                     ],
                   ),
                   // ── Info section ─────────────────────────────────────────
@@ -2330,67 +2942,98 @@ class AllStore extends StatelessWidget {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(
-                          vendorModel.title.toString(),
-                          maxLines: 1,
-                          style: const TextStyle(
-                            fontSize: 18,
-                            fontFamily: AppThemeData.bold,
-                            color: Color(0xFF111111),
-                            overflow: TextOverflow.ellipsis,
-                            letterSpacing: -0.3,
-                          ),
-                        ),
-                        const SizedBox(height: 10),
-                        const Divider(
-                            height: 1,
-                            thickness: 0.8,
-                            color: Color(0xFFF0F0F0)),
-                        const SizedBox(height: 10),
                         Row(
                           children: [
-                            const Icon(Icons.location_on_rounded,
-                                color: Color(0xFF7C3AED), size: 16),
-                            const SizedBox(width: 4),
-                            Text(
-                              distanceText,
-                              style: const TextStyle(
-                                fontSize: 13,
-                                fontFamily: AppThemeData.semiBold,
-                                color: Color(0xFF7C3AED),
+                            if (open)
+                              Container(
+                                width: 7,
+                                height: 7,
+                                margin: const EdgeInsets.only(right: 7),
+                                decoration: const BoxDecoration(
+                                  color: Color(0xFF16A34A),
+                                  shape: BoxShape.circle,
+                                ),
                               ),
-                            ),
-                            const Spacer(),
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 9, vertical: 4),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFFDCFCE7),
-                                borderRadius: BorderRadius.circular(20),
-                                border: Border.all(
-                                    color: const Color(0xFF16A34A)
-                                        .withValues(alpha: 0.35),
-                                    width: 1),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  const Icon(Icons.star_rounded,
-                                      color: Color(0xFF16A34A), size: 14),
-                                  const SizedBox(width: 4),
-                                  Text(
-                                    rating,
-                                    style: const TextStyle(
-                                      fontSize: 11,
-                                      height: 1.2,
-                                      fontFamily: AppThemeData.semiBold,
-                                      color: Color(0xFF15803D),
-                                    ),
-                                  ),
-                                ],
+                            Expanded(
+                              child: Text(
+                                vendorModel.title.toString(),
+                                maxLines: 1,
+                                style: const TextStyle(
+                                  fontSize: 18,
+                                  fontFamily: AppThemeData.bold,
+                                  color: Color(0xFF111111),
+                                  overflow: TextOverflow.ellipsis,
+                                  letterSpacing: -0.3,
+                                ),
                               ),
                             ),
                           ],
+                        ),
+                        const SizedBox(height: 8),
+                        Container(
+                          width: 28,
+                          height: 3,
+                          decoration: BoxDecoration(
+                            color: AppThemeData.primary500,
+                            borderRadius: BorderRadius.circular(2),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 10, vertical: 8),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFF1F1F5),
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.location_on_rounded,
+                                  color: Color(0xFF7C3AED), size: 16),
+                              const SizedBox(width: 4),
+                              RoadDistanceText(
+                                vendorLat: vendorModel.latitude,
+                                vendorLon: vendorModel.longitude,
+                                showAwaySuffix: true,
+                                style: const TextStyle(
+                                  fontSize: 13,
+                                  fontFamily: AppThemeData.semiBold,
+                                  color: Color(0xFF7C3AED),
+                                ),
+                              ),
+                              const Spacer(),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 9, vertical: 4),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFDCFCE7),
+                                  borderRadius: BorderRadius.circular(20),
+                                  border: Border.all(
+                                      color: const Color(0xFF16A34A)
+                                          .withValues(alpha: 0.35),
+                                      width: 1),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(Icons.star_rounded,
+                                        color: Color(0xFF16A34A), size: 14),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      rating,
+                                      style: const TextStyle(
+                                        fontSize: 11,
+                                        height: 1.2,
+                                        fontFamily: AppThemeData.semiBold,
+                                        color: Color(0xFF15803D),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ],
                     ),
@@ -2410,29 +3053,23 @@ class AllStore extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────────────────────
 class NewArrival extends StatelessWidget {
   final List<VendorModel> newArrivalRestaurantList;
+  final bool isDelivery;
+  final Map<String, List<ProductModel>> productsByVendor;
 
-  const NewArrival({super.key, required this.newArrivalRestaurantList});
-
-  String _formatDistance(VendorModel vendor) {
-    if (MyAppState.selectedPosotion.location == null) return '-- km';
-    final double meters = Geolocator.distanceBetween(
-      MyAppState.selectedPosotion.location!.latitude,
-      MyAppState.selectedPosotion.location!.longitude,
-      vendor.latitude,
-      vendor.longitude,
-    );
-    if (meters < 1000) return '${meters.toStringAsFixed(0)} m';
-    return '${(meters / 1000).toStringAsFixed(1)} km';
-  }
+  const NewArrival(
+      {super.key,
+      required this.newArrivalRestaurantList,
+      this.isDelivery = false,
+      this.productsByVendor = const {}});
 
   @override
   Widget build(BuildContext context) {
     return SizedBox(
       height: Responsive.height(26, context),
       child: ListView.builder(
-        physics: const BouncingScrollPhysics(),
+        physics: const ClampingScrollPhysics(),
         scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 16),
+        padding: const EdgeInsets.only(left: 16),
         itemCount: newArrivalRestaurantList.length >= 10
             ? 10
             : newArrivalRestaurantList.length,
@@ -2440,13 +3077,13 @@ class NewArrival extends StatelessWidget {
         addRepaintBoundaries: true,
         itemBuilder: (BuildContext context, int index) {
           VendorModel vendorModel = newArrivalRestaurantList[index];
-          final bool open = vendorModel.reststatus && (vendorModel.workingHours.isEmpty || vendorModel.isOpen());
+          final bool open = vendorModel.isAcceptingOrders;
           final String rating = calculateReview(
             reviewCount: vendorModel.reviewsCount.toString(),
             reviewSum: vendorModel.reviewsSum.toString(),
           );
-          final String distanceText = _formatDistance(vendorModel);
           return Padding(
+            key: ValueKey(vendorModel.id),
             padding: const EdgeInsets.only(right: 12),
             child: InkWell(
               onTap: () {
@@ -2475,15 +3112,26 @@ class NewArrival extends StatelessWidget {
                         SizedBox(
                           height: Responsive.height(14, context),
                           width: double.infinity,
-                          child: _RestaurantCardImage(
-                            vendorModel: vendorModel,
-                            height: Responsive.height(14, context),
-                            borderRadius: const BorderRadius.only(
-                              topLeft: Radius.circular(16),
-                              topRight: Radius.circular(16),
-                            ),
-                            showDots: false,
-                          ),
+                          child: isDelivery
+                              ? _MenuCarousel(
+                                  vendorModel: vendorModel,
+                                  products: productsByVendor[vendorModel.id] ?? [],
+                                  height: Responsive.height(14, context),
+                                  borderRadius: const BorderRadius.only(
+                                    topLeft: Radius.circular(16),
+                                    topRight: Radius.circular(16),
+                                  ),
+                                  showDots: false,
+                                )
+                              : _RestaurantCardImage(
+                                  vendorModel: vendorModel,
+                                  height: Responsive.height(14, context),
+                                  borderRadius: const BorderRadius.only(
+                                    topLeft: Radius.circular(16),
+                                    topRight: Radius.circular(16),
+                                  ),
+                                  showDots: false,
+                                ),
                         ),
                         if (!open)
                           Positioned(
@@ -2617,8 +3265,9 @@ class NewArrival extends StatelessWidget {
                                   color: const Color(0xFFF3F0FF),
                                   borderRadius: BorderRadius.circular(8),
                                 ),
-                                child: Text(
-                                  distanceText,
+                                child: RoadDistanceText(
+                                  vendorLat: vendorModel.latitude,
+                                  vendorLon: vendorModel.longitude,
                                   style: const TextStyle(
                                     fontSize: 10,
                                     fontFamily: AppThemeData.semiBold,
@@ -2700,9 +3349,11 @@ class TopSellingView extends StatelessWidget {
           final bool _hIsDineaway = orderType == 'Takeaway'.tr() ||
               orderType == 'Dineaway'.tr();
 
+          final bool _hProductSupportsDineaway =
+              productModel.dineIn || productModel.takeaway;
           String unavailabilityMessage = '';
           if (_hHasRestrictions) {
-            if (_hIsDineaway && !productModel.dineAway) {
+            if (_hIsDineaway && !_hProductSupportsDineaway) {
               unavailabilityMessage = 'Not available for DineAway';
             } else if (orderType == 'Delivery'.tr() &&
                 !productModel.deliveryOption) {
@@ -2712,7 +3363,7 @@ class TopSellingView extends StatelessWidget {
 
           bool showItem = true;
           if (_hHasRestrictions) {
-            if (_hIsDineaway && !productModel.dineAway) {
+            if (_hIsDineaway && !_hProductSupportsDineaway) {
               showItem = false;
             } else if (orderType == 'Delivery'.tr() &&
                 !productModel.deliveryOption) {
@@ -3650,7 +4301,7 @@ class CategoryView extends StatelessWidget {
   Widget build(BuildContext context) {
     final dark = isDarkMode(context);
     return SizedBox(
-      height: 90,
+      height: 112,
       child: ListView.builder(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -3658,7 +4309,7 @@ class CategoryView extends StatelessWidget {
         itemBuilder: (context, index) {
           final vendorCategoryModel = vendorCategoryList[index];
           return Padding(
-            padding: const EdgeInsets.only(right: 16),
+            padding: const EdgeInsets.only(right: 20),
             child: GestureDetector(
               onTap: () => push(
                 context,
@@ -3671,42 +4322,26 @@ class CategoryView extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Container(
-                    width: 54,
-                    height: 54,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: const Color(0xFFF3F0FF),
-                      border: Border.all(
-                        color: const Color(0xFFE0D9FF),
-                        width: 1.5,
-                      ),
-                    ),
-                    child: Padding(
-                      padding: const EdgeInsets.all(6),
-                      child: ClipOval(
-                        child: NetworkImageWidget(
-                          imageUrl: vendorCategoryModel.photo.toString(),
-                          fit: BoxFit.cover,
-                        ),
-                      ),
+                  SizedBox(
+                    width: 72,
+                    height: 72,
+                    child: NetworkImageWidget(
+                      imageUrl: vendorCategoryModel.photo.toString(),
+                      fit: BoxFit.contain,
                     ),
                   ),
-                  const SizedBox(height: 6),
+                  const SizedBox(height: 8),
                   SizedBox(
-                    width: 60,
-                    height: 28,
+                    width: 76,
                     child: Text(
                       vendorCategoryModel.title.toString(),
                       textAlign: TextAlign.center,
-                      maxLines: 2,
+                      maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                        color: dark
-                            ? Colors.white.withValues(alpha: 0.85)
-                            : const Color(0xFF444444),
-                        fontFamily: AppThemeData.semiBold,
-                        fontSize: 10,
+                        color: dark ? Colors.white : const Color(0xFF1A1A1A),
+                        fontFamily: AppThemeData.bold,
+                        fontSize: 14,
                       ),
                     ),
                   ),
@@ -3773,7 +4408,7 @@ class _BannerViewState extends State<BannerView> {
         SizedBox(
           height: (MediaQuery.of(context).size.width * 0.44).clamp(140.0, 210.0),
           child: PageView.builder(
-            physics: const BouncingScrollPhysics(),
+            physics: const ClampingScrollPhysics(),
             controller: _pageController,
             scrollDirection: Axis.horizontal,
             itemCount: widget.bannerList.length,
@@ -3819,7 +4454,7 @@ class _BannerViewState extends State<BannerView> {
                 },
                 borderRadius: BorderRadius.circular(20),
                 child: Padding(
-                  padding: const EdgeInsets.only(right: 12),
+                  padding: EdgeInsets.only(left: index == 0 ? 12 : 0, right: 12),
                   child: DecoratedBox(
                     decoration: BoxDecoration(
                       borderRadius: BorderRadius.circular(20),

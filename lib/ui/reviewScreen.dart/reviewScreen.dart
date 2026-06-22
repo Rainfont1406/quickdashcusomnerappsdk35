@@ -48,6 +48,7 @@ class _ReviewScreenState extends State<ReviewScreen> with TickerProviderStateMix
   VendorCategoryModel? vendorCategoryModel;
 
   List<ReviewAttributeModel> reviewAttributeList = [];
+  bool _isLoading = true;
 
   // RatingModel? rating;
   @override
@@ -123,7 +124,7 @@ class _ReviewScreenState extends State<ReviewScreen> with TickerProviderStateMix
       });
     }
 
-    setState(() {});
+    setState(() { _isLoading = false; });
   }
 
   @override
@@ -131,7 +132,13 @@ class _ReviewScreenState extends State<ReviewScreen> with TickerProviderStateMix
     return Scaffold(
         backgroundColor: isDarkMode(context) ? AppThemeData.surfaceDark : AppThemeData.surface,
         appBar: AppGlobal.buildSimpleAppBar(context, ratingModel != null ? "Update Review".tr() : "Add Review".tr()),
-        body: SingleChildScrollView(
+        body: _isLoading
+            ? Center(
+                child: CircularProgressIndicator.adaptive(
+                  valueColor: AlwaysStoppedAnimation(AppThemeData.primary500),
+                ),
+              )
+            : SingleChildScrollView(
             child: Container(
                 padding: const EdgeInsets.only(top: 20, left: 20),
                 child: Form(
@@ -144,23 +151,21 @@ class _ReviewScreenState extends State<ReviewScreen> with TickerProviderStateMix
                                 elevation: 1,
                                 margin: const EdgeInsets.only(right: 15),
                                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                                child: SizedBox(
-                                    height: 150,
-                                    child: Column(children: [
-                                      Container(
-                                          alignment: Alignment.center,
-                                          padding: const EdgeInsets.only(top: 15),
-                                          child: Text(
-                                            "Rate For".tr(),
-                                            style: const TextStyle(color: Color(0XFF7C848E), fontSize: 17),
-                                          )),
-                                      Container(
-                                          alignment: Alignment.center,
-                                          child: Text(widget.product.name,
-                                              style: TextStyle(color: isDarkMode(context) ? const Color(0XFFFDFEFE) : const Color(0XFF000003), fontSize: 20))),
-                                      const SizedBox(
-                                        height: 15,
+                                child: Padding(
+                                    padding: const EdgeInsets.symmetric(vertical: 16),
+                                    child: Column(mainAxisSize: MainAxisSize.min, children: [
+                                      Text(
+                                        "Rate For".tr(),
+                                        style: const TextStyle(color: Color(0XFF7C848E), fontSize: 17),
                                       ),
+                                      const SizedBox(height: 6),
+                                      Padding(
+                                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                                        child: Text(widget.product.name,
+                                            textAlign: TextAlign.center,
+                                            style: TextStyle(color: isDarkMode(context) ? const Color(0XFFFDFEFE) : const Color(0XFF000003), fontSize: 20)),
+                                      ),
+                                      const SizedBox(height: 15),
                                       RatingBar.builder(
                                         initialRating: ratings,
                                         minRating: 1,
@@ -174,7 +179,6 @@ class _ReviewScreenState extends State<ReviewScreen> with TickerProviderStateMix
                                         ),
                                         onRatingUpdate: (double rate) {
                                           ratings = rate;
-                                          // print(ratings);
                                         },
                                       ),
                                     ]))),
@@ -303,23 +307,21 @@ class _ReviewScreenState extends State<ReviewScreen> with TickerProviderStateMix
                                 elevation: 1,
                                 margin: const EdgeInsets.only(right: 15),
                                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                                child: SizedBox(
-                                    height: 150,
-                                    child: Column(children: [
-                                      Container(
-                                          alignment: Alignment.center,
-                                          padding: const EdgeInsets.only(top: 15),
-                                          child: Text(
-                                            "Rate For".tr(),
-                                            style: const TextStyle(color: Color(0XFF7C848E), fontSize: 17),
-                                          )),
-                                      Container(
-                                          alignment: Alignment.center,
-                                          child: Text(widget.product.name,
-                                              style: TextStyle(color: isDarkMode(context) ? const Color(0XFFFDFEFE) : const Color(0XFF000003), fontSize: 20))),
-                                      const SizedBox(
-                                        height: 15,
+                                child: Padding(
+                                    padding: const EdgeInsets.symmetric(vertical: 16),
+                                    child: Column(mainAxisSize: MainAxisSize.min, children: [
+                                      Text(
+                                        "Rate For".tr(),
+                                        style: const TextStyle(color: Color(0XFF7C848E), fontSize: 17),
                                       ),
+                                      const SizedBox(height: 6),
+                                      Padding(
+                                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                                        child: Text(widget.product.name,
+                                            textAlign: TextAlign.center,
+                                            style: TextStyle(color: isDarkMode(context) ? const Color(0XFFFDFEFE) : const Color(0XFF000003), fontSize: 20)),
+                                      ),
+                                      const SizedBox(height: 15),
                                       RatingBar.builder(
                                         initialRating: 0,
                                         minRating: 1,

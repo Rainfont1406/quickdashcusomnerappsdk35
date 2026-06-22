@@ -1,3 +1,4 @@
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/main.dart';
@@ -5,7 +6,7 @@ import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/vendorProductsScreen/newVendorProductsScreen.dart';
-import 'package:emartconsumer/utils/network_image_widget.dart';
+import 'package:emartconsumer/widget/coming_soon_view.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -60,7 +61,7 @@ class SearchScreenState extends State<SearchScreen> {
 
   void _buildRecommended() {
     final open = allstoreList
-        .where((v) => v.isOpen() || v.reststatus)
+        .where((v) => v.isAcceptingOrders)
         .toList();
     open.sort((a, b) => _score(b).compareTo(_score(a)));
     _recommended = open.take(10).toList();
@@ -134,8 +135,8 @@ class SearchScreenState extends State<SearchScreen> {
     }
     // Open first, then ranked by score; closed appear at the bottom
     matched.sort((a, b) {
-      final aOpen = a.isOpen() || a.reststatus;
-      final bOpen = b.isOpen() || b.reststatus;
+      final aOpen = a.isAcceptingOrders;
+      final bOpen = b.isAcceptingOrders;
       if (aOpen != bOpen) return aOpen ? -1 : 1;
       return _score(b).compareTo(_score(a));
     });
@@ -251,10 +252,31 @@ class SearchScreenState extends State<SearchScreen> {
         reviewSum: v.reviewsSum.toString(),
       );
 
+  // photos[0] is the square restaurant logo; photo is the wide banner.
+  String _logoUrl(VendorModel v) {
+    if (v.photos.isNotEmpty) {
+      final first = v.photos.first.toString().trim();
+      if (first.isNotEmpty && first != 'null') return first;
+    }
+    return v.photo;
+  }
+
   // ── Build ─────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
+    return ValueListenableBuilder<bool>(
+      valueListenable: isDeliveryActiveNotifier,
+      builder: (context, deliveryActive, _) {
+        if (currentOrderTypeGlobal == 'Delivery'.tr() && !deliveryActive) {
+          return ComingSoonScreen(message: deliveryOffMessageNotifier.value);
+        }
+        return _buildSearchScreen(context);
+      },
+    );
+  }
+
+  Widget _buildSearchScreen(BuildContext context) {
     final dark = isDarkMode(context);
     return Scaffold(
       backgroundColor:
@@ -610,7 +632,7 @@ class SearchScreenState extends State<SearchScreen> {
   }
 
   Widget _vendorCard(VendorModel v, bool dark) {
-    final isOpen = v.isOpen() || v.reststatus;
+    final isOpen = v.isAcceptingOrders;
     final rating = _rating(v);
     final dist = _distanceLabel(v);
     final statusLabel = isOpen ? 'Open' : _nextOpeningLabel(v);
@@ -636,7 +658,9 @@ class SearchScreenState extends State<SearchScreen> {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // ── Image ─────────────────────────────────────────────────────
+            // ── Logo ──────────────────────────────────────────────────────
+            // photos[0] is the square logo — use BoxFit.contain so it is
+            // never cropped, with a neutral background behind any whitespace.
             ClipRRect(
               borderRadius: const BorderRadius.only(
                 topLeft: Radius.circular(16),
@@ -649,11 +673,30 @@ class SearchScreenState extends State<SearchScreen> {
                       : Colors.grey.withValues(alpha: 0.4),
                   BlendMode.saturation,
                 ),
-                child: NetworkImageWidget(
-                  imageUrl: v.photo,
+                child: Container(
                   width: 100,
                   height: 100,
-                  fit: BoxFit.cover,
+                  color: dark ? AppThemeData.grey800 : AppThemeData.grey100,
+                  child: CachedNetworkImage(
+                    imageUrl: _logoUrl(v),
+                    width: 100,
+                    height: 100,
+                    fit: BoxFit.contain,
+                    placeholder: (_, __) => Center(
+                      child: SizedBox(
+                        width: 22,
+                        height: 22,
+                        child: CircularProgressIndicator.adaptive(
+                          strokeWidth: 2,
+                          valueColor: AlwaysStoppedAnimation(AppThemeData.primary500),
+                        ),
+                      ),
+                    ),
+                    errorWidget: (_, __, ___) => Center(
+                      child: Icon(Icons.store_rounded,
+                          size: 40, color: AppThemeData.grey400),
+                    ),
+                  ),
                 ),
               ),
             ),

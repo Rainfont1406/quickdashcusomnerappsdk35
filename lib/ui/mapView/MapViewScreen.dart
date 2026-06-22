@@ -12,6 +12,7 @@ import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/vendorProductsScreen/newVendorProductsScreen.dart';
 // import 'package:emartconsumer/ui/vendorProductsScreen/NewVendorProductsScreen.dart';
+import 'package:emartconsumer/widget/coming_soon_view.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_osm_plugin/flutter_osm_plugin.dart' as osmMap;
 import 'package:google_maps_flutter/google_maps_flutter.dart';
@@ -83,6 +84,16 @@ class _MapViewScreenState extends State<MapViewScreen> {
     super.dispose();
   }
 
+  // photos[0] is the square restaurant logo; photo is the wide banner.
+  // Prefer the logo for compact card thumbnails.
+  String _logoUrl(VendorModel v) {
+    if (v.photos.isNotEmpty) {
+      final first = v.photos.first.toString().trim();
+      if (first.isNotEmpty && first != 'null') return first;
+    }
+    return v.photo;
+  }
+
   // Card width is 78 % of screen width, capped at 300 px; step includes 12 px right margin.
   static double _cardWidthFor(double screenWidth) =>
       (screenWidth * 0.78).clamp(200.0, 300.0);
@@ -132,6 +143,23 @@ class _MapViewScreenState extends State<MapViewScreen> {
 
   @override
   Widget build(BuildContext context) {
+    return ValueListenableBuilder<bool>(
+      valueListenable: isDeliveryActiveNotifier,
+      builder: (context, deliveryActive, _) {
+        if (currentOrderTypeGlobal == 'Delivery'.tr() && !deliveryActive) {
+          return Scaffold(
+            appBar: widget.isShowAppBar == true ? AppBar() : null,
+            body: Center(
+              child: ComingSoonView(message: deliveryOffMessageNotifier.value),
+            ),
+          );
+        }
+        return _buildMap(context);
+      },
+    );
+  }
+
+  Widget _buildMap(BuildContext context) {
     final double _screenWidth = MediaQuery.of(context).size.width;
     final double _cardWidth = _cardWidthFor(_screenWidth);
     final double _cardStep = _cardStepFor(_screenWidth);
@@ -297,7 +325,7 @@ class _MapViewScreenState extends State<MapViewScreen> {
                     itemBuilder: (context, index) {
                       final VendorModel vendor = vendors[index];
                       final bool isSelected = selected == index;
-                      final bool isOpen = vendor.isOpen() || vendor.reststatus;
+                      final bool isOpen = vendor.isAcceptingOrders;
                       final String rating = calculateReview(
                         reviewCount: vendor.reviewsCount.toString(),
                         reviewSum: vendor.reviewsSum.toString(),
@@ -352,41 +380,59 @@ class _MapViewScreenState extends State<MapViewScreen> {
                             ],
                           ),
                           child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
                             children: [
-                              // ── Restaurant photo ──────────────────────
-                              SizedBox(
-                                width: 110,
-                                child: CachedNetworkImage(
-                                  imageUrl: getImageVAlidUrl(vendor.photo),
-                                  fit: BoxFit.cover,
-                                  imageBuilder: (_, img) => DecoratedBox(
-                                    decoration: BoxDecoration(
-                                      image: DecorationImage(
-                                          image: img, fit: BoxFit.cover),
-                                    ),
-                                  ),
-                                  placeholder: (_, __) => Container(
-                                    color: isDarkMode(context)
-                                        ? AppThemeData.grey800
-                                        : AppThemeData.grey100,
-                                    child: Center(
-                                      child: SizedBox(
-                                        width: 20,
-                                        height: 20,
-                                        child: CircularProgressIndicator.adaptive(
-                                          strokeWidth: 2,
-                                          valueColor: AlwaysStoppedAnimation(
-                                              AppThemeData.primary500),
+                              // ── Restaurant logo ───────────────────────
+                              // Panel fills the card height (via stretch).
+                              // The logo sits centred as a fixed 72 × 72 square
+                              // with BoxFit.contain so it is never cropped.
+                              Container(
+                                width: 96,
+                                color: isDarkMode(context)
+                                    ? AppThemeData.grey800
+                                    : const Color(0xFFF5F5F5),
+                                child: Center(
+                                  child: ClipRRect(
+                                    borderRadius: BorderRadius.circular(12),
+                                    child: CachedNetworkImage(
+                                      imageUrl: getImageVAlidUrl(_logoUrl(vendor)),
+                                      width: 72,
+                                      height: 72,
+                                      fit: BoxFit.contain,
+                                      placeholder: (_, __) => Container(
+                                        width: 72,
+                                        height: 72,
+                                        decoration: BoxDecoration(
+                                          color: isDarkMode(context)
+                                              ? AppThemeData.grey700
+                                              : AppThemeData.grey200,
+                                          borderRadius: BorderRadius.circular(12),
+                                        ),
+                                        child: Center(
+                                          child: SizedBox(
+                                            width: 18,
+                                            height: 18,
+                                            child: CircularProgressIndicator.adaptive(
+                                              strokeWidth: 2,
+                                              valueColor: AlwaysStoppedAnimation(
+                                                  AppThemeData.primary500),
+                                            ),
+                                          ),
                                         ),
                                       ),
+                                      errorWidget: (_, __, ___) => Container(
+                                        width: 72,
+                                        height: 72,
+                                        decoration: BoxDecoration(
+                                          color: isDarkMode(context)
+                                              ? AppThemeData.grey700
+                                              : AppThemeData.grey200,
+                                          borderRadius: BorderRadius.circular(12),
+                                        ),
+                                        child: Icon(Icons.store_rounded,
+                                            color: AppThemeData.grey400, size: 34),
+                                      ),
                                     ),
-                                  ),
-                                  errorWidget: (_, __, ___) => Container(
-                                    color: isDarkMode(context)
-                                        ? AppThemeData.grey800
-                                        : AppThemeData.grey100,
-                                    child: Icon(Icons.store_rounded,
-                                        color: AppThemeData.grey400, size: 32),
                                   ),
                                 ),
                               ),
@@ -450,7 +496,13 @@ class _MapViewScreenState extends State<MapViewScreen> {
                                           const SizedBox(width: 3),
                                           Expanded(
                                             child: Text(
-                                              vendor.location,
+                                              () {
+                                                final loc = vendor.locality.trim();
+                                                final lm = vendor.landmark.trim();
+                                                if (loc.isEmpty) return vendor.location;
+                                                if (lm.isEmpty) return loc;
+                                                return '$loc, $lm';
+                                              }(),
                                               maxLines: 1,
                                               overflow: TextOverflow.ellipsis,
                                               style: const TextStyle(

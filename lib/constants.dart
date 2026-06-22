@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
@@ -13,6 +14,7 @@ import 'package:emartconsumer/widget/permission_dialog.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 
 import 'model/TaxModel.dart';
@@ -153,6 +155,17 @@ const STORAGE_ROOT = 'emart';
 CurrencyModel? currencyData;
 SectionModel? sectionConstantModel;
 List<VendorModel> allstoreList = [];
+
+// Live, app-wide Delivery-mode gate. Updated by a single Firestore listener
+// started in ContainerScreen (not per-screen), so every screen that gates
+// itself on isDeliveryActiveNotifier reacts instantly to an admin toggle,
+// not just whichever screen happens to be mounted.
+final ValueNotifier<bool> isDeliveryActiveNotifier = ValueNotifier<bool>(true);
+final ValueNotifier<String> deliveryOffMessageNotifier = ValueNotifier<String>('');
+// Mirrors HomeScreen's selctedOrderTypeValue so other screens (Search, Map,
+// etc.) can synchronously check the current mode without re-reading
+// SharedPreferences. Set whenever HomeScreen's order-type switch changes.
+String currentOrderTypeGlobal = 'Delivery';
 
 String placeholderImage = '';
 List<TaxModel>? taxList = [];
@@ -336,6 +349,52 @@ String getKm(UserLocation pos1, UserLocation pos2) {
   double kilometer = distanceInMeters / 1000;
   debugPrint("KiloMeter$kilometer");
   return kilometer.toStringAsFixed(2).toString();
+}
+
+// Per-session cache: vendor pair → road distance string (km).
+// Keyed by rounded coords so minor GPS jitter doesn't create duplicate entries.
+final Map<String, String> _roadDistanceCache = {};
+
+/// Call this whenever the user changes their delivery address so stale
+/// distance values are not served from the cache.
+void clearRoadDistanceCache() => _roadDistanceCache.clear();
+
+// Returns actual road/driving distance via OSRM (OSM routing).
+// Falls back to straight-line Haversine if the API is unreachable.
+Future<String> getRoadDistanceKm(UserLocation pos1, UserLocation pos2) async {
+  final key =
+      '${pos1.latitude.toStringAsFixed(4)},${pos1.longitude.toStringAsFixed(4)}'
+      '-${pos2.latitude.toStringAsFixed(4)},${pos2.longitude.toStringAsFixed(4)}';
+  if (_roadDistanceCache.containsKey(key)) return _roadDistanceCache[key]!;
+
+  try {
+    // OSRM expects lon,lat order (opposite of lat,lon convention)
+    final url = Uri.parse(
+      'https://router.project-osrm.org/route/v1/driving'
+      '/${pos1.longitude},${pos1.latitude}'
+      ';${pos2.longitude},${pos2.latitude}'
+      '?overview=false',
+    );
+    final response =
+        await http.get(url).timeout(const Duration(seconds: 10));
+    if (response.statusCode == 200) {
+      final data = json.decode(response.body) as Map<String, dynamic>;
+      final routes = data['routes'] as List?;
+      if (data['code'] == 'Ok' && routes != null && routes.isNotEmpty) {
+        final meters = (routes[0]['distance'] as num).toDouble();
+        final km = meters / 1000;
+        debugPrint('RoadDistanceKm (OSRM): $km');
+        final result = km.toStringAsFixed(2);
+        _roadDistanceCache[key] = result;
+        return result;
+      }
+    }
+  } catch (e) {
+    debugPrint('OSRM unavailable, falling back to straight-line: $e');
+  }
+  final fallback = getKm(pos1, pos2);
+  _roadDistanceCache[key] = fallback;
+  return fallback;
 }
 
 String getImageVAlidUrl(String? url) {

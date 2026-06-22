@@ -42,7 +42,9 @@ class _QrCodeScannerState extends State<QrCodeScanner>
   _Phase _phase = _Phase.requesting;
   bool _torchOn = false;
   bool _hasScanned = false;
-  bool _detected = false; // brief green flash on successful read
+  bool _detected = false;   // brief green flash on successful read
+  bool _isVerifying = false; // live Firestore check in progress
+  String? _verifyError;      // non-null while showing inline error
 
   @override
   void initState() {
@@ -154,7 +156,7 @@ class _QrCodeScannerState extends State<QrCodeScanner>
 
   // ── QR detection ────────────────────────────────────────────────
   Future<void> _onDetect(BarcodeCapture capture) async {
-    if (_hasScanned) return;
+    if (_hasScanned || _isVerifying) return;
     final barcodes = capture.barcodes;
     if (barcodes.isEmpty) return;
     final qrValue = barcodes.first.rawValue;
@@ -165,21 +167,62 @@ class _QrCodeScannerState extends State<QrCodeScanner>
     // Brief green-flash feedback.
     if (mounted) setState(() => _detected = true);
     await Future.delayed(const Duration(milliseconds: 300));
-    if (mounted) setState(() => _detected = false);
+    if (mounted) setState(() { _detected = false; _isVerifying = true; _verifyError = null; });
 
-    if (allstoreList.isNotEmpty &&
-        allstoreList.any((e) => e.id == qrValue)) {
-      final VendorModel vendor =
-          allstoreList.firstWhere((e) => e.id == qrValue);
+    try {
+      // Live Firestore fetch — never use the stale allstoreList cache.
+      final query = await FireStoreUtils.firestore
+          .collection(VENDORS)
+          .where('id', isEqualTo: qrValue)
+          .limit(1)
+          .get();
+
+      if (!mounted) return;
+
+      // ── Gate 1: vendor doesn't exist ──────────────────────────────
+      if (query.docs.isEmpty) {
+        _setVerifyError('Restaurant not found. The QR code may be invalid or outdated.'.tr());
+        return;
+      }
+
+      final data = query.docs.first.data();
+
+      // ── Gate 2: admin banned / not approved ───────────────────────
+      final storeStatus = data['store_status'] as String?;
+      final isActive    = data['isActive'];
+      if ((storeStatus != null && storeStatus != 'approved') ||
+          isActive == false) {
+        _setVerifyError('This restaurant is currently unavailable.'.tr());
+        return;
+      }
+
+      // ── Gate 3: section mismatch ───────────────────────────────────
+      final sectionId = data['section_id'] as String?;
+      if (sectionConstantModel != null &&
+          sectionId != null &&
+          sectionId != sectionConstantModel!.id) {
+        _setVerifyError('This restaurant is not available in your current area.'.tr());
+        return;
+      }
+
+      // ── All gates passed — navigate ────────────────────────────────
+      if (mounted) setState(() => _isVerifying = false);
+      final VendorModel vendor = VendorModel.fromJson(data);
       if (mounted) {
         Navigator.pop(context);
         push(context, NewVendorProductsScreen(vendorModel: vendor));
       }
-    } else {
-      ShowToastDialog.showToast('Store is not available'.tr());
-      await Future.delayed(const Duration(seconds: 2));
-      if (mounted) setState(() => _hasScanned = false);
+    } catch (_) {
+      if (mounted) _setVerifyError('Something went wrong. Please try again.'.tr());
     }
+  }
+
+  void _setVerifyError(String message) {
+    if (!mounted) return;
+    setState(() { _isVerifying = false; _verifyError = message; });
+    Future.delayed(const Duration(seconds: 3), () {
+      if (mounted) setState(() { _verifyError = null; _hasScanned = false; });
+    });
   }
 
   // ── Navigation helper ───────────────────────────────────────────
@@ -353,29 +396,82 @@ class _QrCodeScannerState extends State<QrCodeScanner>
                   ],
                 ),
               ),
-              // Hint text below frame
+              // Hint / verifying / error text below frame
               Positioned(
                 top: frameBottom + 22,
-                left: 0,
-                right: 0,
+                left: 16,
+                right: 16,
                 child: AnimatedOpacity(
                   opacity: _detected ? 0.0 : 1.0,
                   duration: const Duration(milliseconds: 200),
-                  child: Text(
-                    'Align the QR code within the frame'.tr(),
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.50),
-                      fontSize: 12,
-                      letterSpacing: 0.2,
-                      shadows: const [
-                        Shadow(
-                            color: Colors.black38,
-                            blurRadius: 4,
-                            offset: Offset(0, 1))
-                      ],
-                    ),
-                  ),
+                  child: _isVerifying
+                      ? Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Text(
+                              'Verifying restaurant…'.tr(),
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ],
+                        )
+                      : _verifyError != null
+                          ? Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 14, vertical: 10),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFEF4444).withValues(alpha: 0.90),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  const Icon(Icons.error_outline_rounded,
+                                      color: Colors.white, size: 16),
+                                  const SizedBox(width: 8),
+                                  Flexible(
+                                    child: Text(
+                                      _verifyError!,
+                                      textAlign: TextAlign.center,
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w500,
+                                        height: 1.4,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            )
+                          : Text(
+                              'Align the QR code within the frame'.tr(),
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: Colors.white.withValues(alpha: 0.50),
+                                fontSize: 12,
+                                letterSpacing: 0.2,
+                                shadows: const [
+                                  Shadow(
+                                      color: Colors.black38,
+                                      blurRadius: 4,
+                                      offset: Offset(0, 1))
+                                ],
+                              ),
+                            ),
                 ),
               ),
             ]);
@@ -413,41 +509,6 @@ class _QrCodeScannerState extends State<QrCodeScanner>
           ),
         ),
 
-        // ── 5. Bottom action bar ─────────────────────────────────
-        Positioned(
-          bottom: 0,
-          left: 0,
-          right: 0,
-          child: SafeArea(
-            top: false,
-            child: Container(
-              padding: const EdgeInsets.fromLTRB(24, 20, 24, 28),
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.bottomCenter,
-                  end: Alignment.topCenter,
-                  colors: [
-                    Colors.black.withValues(alpha: 0.80),
-                    Colors.transparent,
-                  ],
-                ),
-              ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  _BottomActionBtn(
-                    icon: Icons.photo_library_outlined,
-                    label: 'Gallery'.tr(),
-                    onTap: () {
-                      // Gallery QR import — add image_picker integration here
-                      ShowToastDialog.showToast('Coming soon'.tr());
-                    },
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
       ],
     );
   }
@@ -869,52 +930,6 @@ class _CircleIconBtn extends StatelessWidget {
           color: active ? activeColor : Colors.white,
           size: 22,
         ),
-      ),
-    );
-  }
-}
-
-// ── Bottom action button ─────────────────────────────────────────────────────
-class _BottomActionBtn extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final VoidCallback onTap;
-
-  const _BottomActionBtn({
-    required this.icon,
-    required this.label,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 56,
-            height: 56,
-            decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.10),
-              shape: BoxShape.circle,
-              border: Border.all(
-                  color: Colors.white.withValues(alpha: 0.22), width: 1.2),
-            ),
-            child: Icon(icon,
-                color: Colors.white.withValues(alpha: 0.85), size: 24),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            label,
-            style: TextStyle(
-              color: Colors.white.withValues(alpha: 0.65),
-              fontSize: 12,
-              letterSpacing: 0.2,
-            ),
-          ),
-        ],
       ),
     );
   }

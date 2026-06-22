@@ -74,8 +74,8 @@ class _ViewAllRestaurantState extends State<ViewAllRestaurant>
     final double userLat = MyAppState.selectedPosotion.location!.latitude;
     final double userLng = MyAppState.selectedPosotion.location!.longitude;
     list.sort((a, b) {
-      final bool aOpen = a.reststatus || a.isOpen();
-      final bool bOpen = b.reststatus || b.isOpen();
+      final bool aOpen = a.isAcceptingOrders;
+      final bool bOpen = b.isAcceptingOrders;
       if (aOpen != bOpen) return aOpen ? -1 : 1;
       final double aRating =
           a.reviewsCount > 0 ? a.reviewsSum / a.reviewsCount : 0.0;
@@ -237,6 +237,49 @@ class _ViewAllRestaurantState extends State<ViewAllRestaurant>
     );
   }
 
+  /// Same "Closed" pill used on the home screen restaurant card, scaled
+  /// down to fit this screen's smaller thumbnail.
+  Widget _closedBadge() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFEEEE),
+        borderRadius: BorderRadius.circular(50),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFFDC2626).withValues(alpha: 0.25),
+            blurRadius: 6,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 5,
+            height: 5,
+            decoration: const BoxDecoration(
+              color: Color(0xFFDC2626),
+              shape: BoxShape.circle,
+            ),
+          ),
+          const SizedBox(width: 3),
+          const Text(
+            'Closed',
+            style: TextStyle(
+              color: Color(0xFFDC2626),
+              fontSize: 9,
+              height: 1.2,
+              fontFamily: AppThemeData.semiBold,
+              letterSpacing: 0.1,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildVendorCard(VendorModel vendorModel) {
     final isDark = isDarkMode(context);
 
@@ -339,6 +382,12 @@ class _ViewAllRestaurantState extends State<ViewAllRestaurant>
                             ),
                           ),
                         ),
+                      ),
+                    if (!vendorModel.isAcceptingOrders)
+                      Positioned(
+                        top: 4,
+                        left: 4,
+                        child: _closedBadge(),
                       ),
                   ],
                 ),

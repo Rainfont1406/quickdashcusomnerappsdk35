@@ -36,12 +36,33 @@ class VendorModel {
 
   double longitude;
 
-  String photo;
+  String photo; // vendor logo, square — unrelated to the 16:9 pipeline below
 
+  // `photos` (restaurant gallery) and `vendorMenuPhotos` (Dine-In ambience/menu
+  // photos) entries are {'original': url, 'cover': url} maps so the unmodified
+  // master asset and the generated 16:9 cover (1600x900) are both kept. Older
+  // entries saved before this change are plain URL strings — use coverPhotoUrl()
+  // / originalPhotoUrl() below rather than reading entries directly, since both
+  // shapes can appear in the same list.
   List<dynamic> photos;
   List<dynamic> vendorMenuPhotos;
 
+  /// 16:9 cover URL for a photos/vendorMenuPhotos entry, regardless of whether
+  /// it's a legacy plain-URL string or a {original, cover} map.
+  static String coverPhotoUrl(dynamic entry) {
+    if (entry is Map) return (entry['cover'] ?? entry['original'] ?? '').toString();
+    return entry?.toString() ?? '';
+  }
+
+  /// Unmodified master-asset URL for a photos/vendorMenuPhotos entry.
+  static String originalPhotoUrl(dynamic entry) {
+    if (entry is Map) return (entry['original'] ?? entry['cover'] ?? '').toString();
+    return entry?.toString() ?? '';
+  }
+
   String location;
+  String locality;
+  String landmark;
 
   num reviewsCount, vendorCost;
 
@@ -76,12 +97,21 @@ class VendorModel {
   List<BookingSlotModel> bookingSlots;
   String cuisineType;
   bool deliveryEnabled;
-  bool dineAwayEnabled;
+  bool takeawayEnabled;
+  bool diningEnabled;
   bool billPayEnabled;
+
+  // Derived — admin controls sub-types (takeaway / dining), not dineaway itself
+  bool get dineAwayEnabled => takeawayEnabled || diningEnabled;
 
   // Vendor-controlled service pause flags
   bool vendorDeliveryOpen;
   bool vendorDineawayOpen;
+
+  // Vendor's requested services (informational for admin only — not used for customer-facing control)
+  bool wantsDelivery;
+  bool wantsTakeaway;
+  bool wantsDining;
   DeliveryChargeModel? deliveryCharge;
   List<WorkingHoursModel> workingHours;
   List<SpecialDiscountModel> specialDiscount;
@@ -110,6 +140,8 @@ class VendorModel {
       this.specialDiscount = const [],
       this.specialDiscountEnable = false,
       this.location = '',
+      this.locality = '',
+      this.landmark = '',
       this.reviewsCount = 0,
       this.reviewsSum = 0,
       this.vendorCost = 0,
@@ -137,10 +169,14 @@ class VendorModel {
       this.bookingSlots = const [],
       this.cuisineType = '',
       this.deliveryEnabled = true,
-      this.dineAwayEnabled = true,
+      this.takeawayEnabled = true,
+      this.diningEnabled = true,
       this.billPayEnabled = false,
       this.vendorDeliveryOpen = true,
       this.vendorDineawayOpen = true,
+      this.wantsDelivery = true,
+      this.wantsTakeaway = true,
+      this.wantsDining = true,
       geoFireData,
       this.deliveryCharge})
       : geoFireData = geoFireData ??
@@ -205,6 +241,8 @@ class VendorModel {
       photos: parsedJson['photos'] ?? [],
       vendorMenuPhotos: parsedJson['vendorMenuPhotos'] ?? [],
       location: parsedJson['location'] ?? '',
+      locality: parsedJson['locality'] ?? '',
+      landmark: parsedJson['landmark'] ?? '',
       fcmToken: parsedJson['fcmToken'] ?? '',
       reviewsCount: parsedJson['reviewsCount'] ?? 0,
       reviewsSum: parsedJson['reviewsSum'] ?? 0,
@@ -237,10 +275,14 @@ class VendorModel {
           : [],
       cuisineType: parsedJson['cuisineType'] as String? ?? '',
       deliveryEnabled: parsedJson['deliveryEnabled'] as bool? ?? true,
-      dineAwayEnabled: parsedJson['dineAwayEnabled'] as bool? ?? true,
+      takeawayEnabled: parsedJson['takeawayEnabled'] as bool? ?? true,
+      diningEnabled: parsedJson['diningEnabled'] as bool? ?? true,
       billPayEnabled: parsedJson['billPayEnabled'] as bool? ?? false,
       vendorDeliveryOpen: parsedJson['vendorDeliveryOpen'] as bool? ?? true,
       vendorDineawayOpen: parsedJson['vendorDineawayOpen'] as bool? ?? true,
+      wantsDelivery: parsedJson['wantsDelivery'] as bool? ?? true,
+      wantsTakeaway: parsedJson['wantsTakeaway'] as bool? ?? true,
+      wantsDining: parsedJson['wantsDining'] as bool? ?? true,
     );
   }
 
@@ -267,6 +309,8 @@ class VendorModel {
       'photos': photos,
       'vendorMenuPhotos': vendorMenuPhotos,
       'location': location,
+      'locality': locality,
+      'landmark': landmark,
       'fcmToken': fcmToken,
       'reviewsCount': reviewsCount,
       'reviewsSum': reviewsSum,
@@ -296,10 +340,14 @@ class VendorModel {
       'bookingSlots': bookingSlots.map((e) => e.toJson()).toList(),
       'cuisineType': cuisineType,
       'deliveryEnabled': deliveryEnabled,
-      'dineAwayEnabled': dineAwayEnabled,
+      'takeawayEnabled': takeawayEnabled,
+      'diningEnabled': diningEnabled,
       'billPayEnabled': billPayEnabled,
       'vendorDeliveryOpen': vendorDeliveryOpen,
       'vendorDineawayOpen': vendorDineawayOpen,
+      'wantsDelivery': wantsDelivery,
+      'wantsTakeaway': wantsTakeaway,
+      'wantsDining': wantsDining,
     };
     if (deliveryCharge != null) {
       json.addAll({'deliveryCharge': deliveryCharge!.toJson()});
@@ -307,24 +355,53 @@ class VendorModel {
     return json;
   }
 
+  /// Single source of truth for "is this vendor currently accepting
+  /// orders" — the vendor's manual toggle AND (no schedule configured OR
+  /// currently within scheduled hours). Use this everywhere a restaurant
+  /// card/badge/filter needs to decide open vs. closed, instead of each
+  /// screen re-deriving its own formula (which is how several screens
+  /// drifted out of sync with each other).
+  bool get isAcceptingOrders => reststatus && (workingHours.isEmpty || isOpen());
+
   bool isOpen() {
-    final now = DateTime.now();
-    var day = DateFormat('EEEE', 'en_US').format(now);
-    var date = DateFormat('dd-MM-yyyy').format(now);
-    for (var element in workingHours) {
-      if (day == element.day.toString()) {
-        if (element.timeslot!.isNotEmpty) {
-          for (var timeslot in element.timeslot!) {
-            var start = DateFormat("dd-MM-yyyy HH:mm").parse("$date ${timeslot.from}");
-            var end = DateFormat("dd-MM-yyyy HH:mm").parse("$date ${timeslot.to}");
-            if (isCurrentDateInRange(start, end)) {
-              return true;
-            }
+    try {
+      final now = DateTime.now();
+      final todayName = DateFormat('EEEE', 'en_US').format(now);
+      final yesterdayName = DateFormat('EEEE', 'en_US')
+          .format(now.subtract(const Duration(days: 1)));
+      final todayDate = DateFormat('dd-MM-yyyy').format(now);
+      final yesterdayDate = DateFormat('dd-MM-yyyy')
+          .format(now.subtract(const Duration(days: 1)));
+
+      for (var element in workingHours) {
+        final slots = element.timeslot;
+        if (slots == null || slots.isEmpty) continue;
+
+        final isToday = element.day.toString() == todayName;
+        final isYesterday = element.day.toString() == yesterdayName;
+        if (!isToday && !isYesterday) continue;
+
+        for (var timeslot in slots) {
+          if (timeslot.from == null || timeslot.to == null) continue;
+          final dateStr = isToday ? todayDate : yesterdayDate;
+          var start = DateFormat("dd-MM-yyyy HH:mm")
+              .parse("$dateStr ${timeslot.from}");
+          var end = DateFormat("dd-MM-yyyy HH:mm")
+              .parse("$dateStr ${timeslot.to}");
+          if (!end.isAfter(start)) {
+            // Midnight-crossing slot — extend end to next calendar day
+            end = end.add(const Duration(days: 1));
+          } else if (isYesterday) {
+            // Yesterday's non-crossing slot never reaches today
+            continue;
           }
+          if (isCurrentDateInRange(start, end)) return true;
         }
       }
+      return false;
+    } catch (_) {
+      return false;
     }
-    return false;
   }
 
   bool isCurrentDateInRange(DateTime startDate, DateTime endDate) {

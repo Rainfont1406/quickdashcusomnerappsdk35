@@ -56,6 +56,13 @@ class _LocationPickerState extends State<LocationPicker> {
   bool _isProcessingAddressRequest = false;
   bool _isLocating = false;
 
+  // True once the user has deliberately chosen a location:
+  // GPS loaded, search result selected, or manual map pan.
+  bool _userPickedLocation = false;
+  // True while GPS is programmatically animating the map so the center
+  // tracker doesn't misread GPS movement as a user pan.
+  bool _gpsMoving = false;
+
   // ── Inline search state ─────────────────────────────────────────────────
   List<_PlaceSuggestion> _searchResults = [];
   bool _isSearchLoading = false;
@@ -67,7 +74,7 @@ class _LocationPickerState extends State<LocationPicker> {
   void initState() {
     super.initState();
     mapController = MapController(
-      initPosition: GeoPoint(latitude: 37.7749, longitude: -122.4194),
+      initPosition: GeoPoint(latitude: 26.8467, longitude: 80.9462),
     );
     searchController.addListener(_onSearchChanged);
   }
@@ -109,7 +116,16 @@ class _LocationPickerState extends State<LocationPicker> {
         GeoPoint centerPoint = await mapController.centerMap;
         if (_lastCheckedLocation == null ||
             _hasLocationChanged(_lastCheckedLocation!, centerPoint)) {
+          // Capture BEFORE overwriting — first poll is always the default
+          // init position and must never count as a user interaction.
+          final bool wasFirstPoll = _lastCheckedLocation == null;
           _lastCheckedLocation = centerPoint;
+          // Only treat as deliberate interaction when it is NOT the first
+          // poll (which is always the default SF position) AND GPS is not
+          // the one animating the map programmatically.
+          if (!_gpsMoving && !wasFirstPoll && mounted) {
+            setState(() => _userPickedLocation = true);
+          }
           _debounceTimer?.cancel();
           if (mounted) setState(() => isLoadingAddress = true);
           _debounceTimer = Timer(const Duration(milliseconds: 1200), () async {
@@ -251,8 +267,11 @@ class _LocationPickerState extends State<LocationPicker> {
       if (locationData != null && mounted) {
         selectedLocation = GeoPoint(
             latitude: locationData.latitude, longitude: locationData.longitude);
+        _gpsMoving = true;
         await mapController.moveTo(selectedLocation!, animate: true);
+        _gpsMoving = false;
         await _fetchAddressForLocation(selectedLocation!);
+        if (mounted) setState(() => _userPickedLocation = true);
       } else if (mounted) {
         _showToast("Could not get your location. Please try again.".tr(),
             isError: true);
@@ -407,6 +426,7 @@ class _LocationPickerState extends State<LocationPicker> {
       _searchFocus.unfocus(); // outside setState for proper keyboard dismissal
     }
     selectedLocation = pt;
+    if (mounted) setState(() => _userPickedLocation = true);
     await mapController.moveTo(pt, animate: true);
     await _fetchAddressForLocation(pt);
   }
@@ -875,19 +895,49 @@ class _LocationPickerState extends State<LocationPicker> {
                       ],
                     ),
                     const SizedBox(height: 18),
+                    // Hint shown while waiting for GPS or user interaction
+                    if (!_userPickedLocation && !isLoadingAddress)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 10),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.info_outline_rounded,
+                                size: 13,
+                                color: dark
+                                    ? AppThemeData.darkTextTertiary
+                                    : AppThemeData.neutral400),
+                            const SizedBox(width: 6),
+                            Flexible(
+                              child: Text(
+                                'Waiting for GPS — or pan the map to pick manually'
+                                    .tr(),
+                                textAlign: TextAlign.center,
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: dark
+                                      ? AppThemeData.darkTextTertiary
+                                      : AppThemeData.neutral500,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     SizedBox(
                       width: double.infinity,
                       height: 52,
                       child: ElevatedButton(
                         onPressed: selectedLocation != null &&
                                 place != null &&
-                                !isLoadingAddress
+                                !isLoadingAddress &&
+                                _userPickedLocation
                             ? () => Navigator.pop(context, place)
                             : null,
                         style: ElevatedButton.styleFrom(
                           backgroundColor: AppThemeData.primary500,
                           disabledBackgroundColor:
-                              AppThemeData.primary500.withValues(alpha: 0.4),
+                              AppThemeData.primary500.withValues(alpha: 0.35),
                           elevation: 0,
                           shape: RoundedRectangleBorder(
                               borderRadius: BorderRadius.circular(14)),
@@ -895,8 +945,18 @@ class _LocationPickerState extends State<LocationPicker> {
                         child: Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            const Icon(Icons.check_circle_rounded,
-                                color: Colors.white, size: 20),
+                            if (isLoadingAddress || (_isLocating && !_userPickedLocation))
+                              const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.white,
+                                ),
+                              )
+                            else
+                              const Icon(Icons.check_circle_rounded,
+                                  color: Colors.white, size: 20),
                             const SizedBox(width: 10),
                             Text(
                               'Confirm Location'.tr(),

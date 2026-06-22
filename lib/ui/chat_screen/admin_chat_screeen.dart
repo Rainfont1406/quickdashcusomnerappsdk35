@@ -4,6 +4,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
 import '../../theme/app_them_data.dart';
 import '../../services/helper.dart';
+import '../../main.dart';
 
 class AdminChatScreen extends StatefulWidget {
   final String? orderId;
@@ -19,7 +20,7 @@ class AdminChatScreen extends StatefulWidget {
 class _AdminChatScreenState extends State<AdminChatScreen> {
   final TextEditingController _controller = TextEditingController();
   final ScrollController _scrollController = ScrollController();
-  final String _userId = FirebaseAuth.instance.currentUser!.uid;
+  late final String _userId;
   bool _isSending = false;
 
   static const _quickOptions = [
@@ -35,6 +36,10 @@ class _AdminChatScreenState extends State<AdminChatScreen> {
   @override
   void initState() {
     super.initState();
+    _userId = MyAppState.currentUser?.userID.isNotEmpty == true
+        ? MyAppState.currentUser!.userID
+        : (FirebaseAuth.instance.currentUser?.uid ?? '');
+    debugPrint('AdminChat DEBUG: _userId=$_userId orderId=${widget.orderId}');
     if (widget.initialMessage?.isNotEmpty ?? false) {
       _controller.text = widget.initialMessage!;
     }
@@ -50,7 +55,7 @@ class _AdminChatScreenState extends State<AdminChatScreen> {
   String get _shortOrderId {
     final id = widget.orderId;
     if (id == null || id.isEmpty) return '';
-    return '#${id.length >= 8 ? id.substring(0, 8).toUpperCase() : id.toUpperCase()}';
+    return '#${id.length >= 8 ? id.substring(id.length - 8).toUpperCase() : id.toUpperCase()}';
   }
 
   Future<void> _send(String text) async {
@@ -65,11 +70,19 @@ class _AdminChatScreenState extends State<AdminChatScreen> {
         'userId': _userId,
         'orderId': widget.orderId ?? '',
         'isAdmin': false,
-        'isNewMsgCustomer': true,
-        'isNewMsgAdmin': false,
+        'isNewMsg': true,
+        'isNewMsgCustomer': false,
+        'isNewMsgAdmin': true,
       });
       _scrollToBottom();
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('AdminChat send error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to send message. Try again.')),
+        );
+      }
+    }
     if (mounted) setState(() => _isSending = false);
   }
 
@@ -180,15 +193,30 @@ class _AdminChatScreenState extends State<AdminChatScreen> {
   // ── Message area ───────────────────────────────────────────────────────────
 
   Widget _buildMessageArea(bool dark) {
+    // Filter by both userId and orderId so chips are per-conversation, not per-user.
+    var query = FirebaseFirestore.instance
+        .collection('messages')
+        .where('userId', isEqualTo: _userId);
+    if (widget.orderId?.isNotEmpty ?? false) {
+      query = query.where('orderId', isEqualTo: widget.orderId);
+    }
+
     return StreamBuilder<QuerySnapshot>(
-      stream: FirebaseFirestore.instance
-          .collection('messages')
-          .orderBy('timestamp', descending: false)
-          .snapshots(),
+      stream: query.snapshots(),
       builder: (context, snapshot) {
+        final loading = snapshot.connectionState == ConnectionState.waiting;
         final msgs = (snapshot.data?.docs ?? [])
-            .where((d) => (d.data() as Map)['userId'] == _userId)
-            .toList();
+            .map((d) => d.data() as Map<String, dynamic>)
+            .toList()
+          ..sort((a, b) {
+            final at = a['timestamp'] is Timestamp
+                ? (a['timestamp'] as Timestamp).millisecondsSinceEpoch
+                : 0;
+            final bt = b['timestamp'] is Timestamp
+                ? (b['timestamp'] as Timestamp).millisecondsSinceEpoch
+                : 0;
+            return at.compareTo(bt);
+          });
 
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (_scrollController.hasClients && msgs.isNotEmpty) {
@@ -203,12 +231,7 @@ class _AdminChatScreenState extends State<AdminChatScreen> {
           children: [
             _buildWelcomeCard(dark),
             const SizedBox(height: 16),
-            if (msgs.isEmpty) ...[
-              _buildQuickHelpSection(dark),
-              const SizedBox(height: 12),
-            ],
-            if (snapshot.connectionState == ConnectionState.waiting &&
-                msgs.isEmpty)
+            if (loading)
               Center(
                 child: Padding(
                   padding: const EdgeInsets.symmetric(vertical: 24),
@@ -217,12 +240,95 @@ class _AdminChatScreenState extends State<AdminChatScreen> {
                         AlwaysStoppedAnimation(AppThemeData.primary500),
                   ),
                 ),
-              ),
-            ...msgs.map(
-                (doc) => _buildBubble(doc.data() as Map<String, dynamic>, dark)),
+              )
+            else if (msgs.isEmpty) ...[
+              _buildQuickHelpSection(dark),
+              const SizedBox(height: 12),
+            ] else ...[
+              ..._buildMessagesWithSeparators(msgs, dark),
+            ],
           ],
         );
       },
+    );
+  }
+
+  List<Widget> _buildMessagesWithSeparators(
+      List<Map<String, dynamic>> msgs, bool dark) {
+    final List<Widget> widgets = [];
+    DateTime? lastDay;
+
+    for (final data in msgs) {
+      final ts = data['timestamp'] is Timestamp
+          ? (data['timestamp'] as Timestamp).toDate()
+          : DateTime.now();
+      final msgDay = DateTime(ts.year, ts.month, ts.day);
+
+      if (lastDay == null || msgDay != lastDay) {
+        widgets.add(_buildDateSeparator(ts, dark));
+        lastDay = msgDay;
+      }
+      widgets.add(_buildBubble(data, dark));
+    }
+    return widgets;
+  }
+
+  Widget _buildDateSeparator(DateTime ts, bool dark) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final yesterday = today.subtract(const Duration(days: 1));
+    final msgDay = DateTime(ts.year, ts.month, ts.day);
+
+    String label;
+    if (msgDay == today) {
+      label = 'Today';
+    } else if (msgDay == yesterday) {
+      label = 'Yesterday';
+    } else {
+      label = DateFormat('d/M/yyyy').format(ts);
+    }
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Row(
+        children: [
+          Expanded(
+            child: Divider(
+              color: dark ? Colors.white12 : Colors.black12,
+              thickness: 1,
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            child: Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: dark
+                    ? const Color(0xFF252535)
+                    : const Color(0xFFE8E9EF),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Text(
+                label,
+                style: TextStyle(
+                  fontFamily: AppThemeData.regular,
+                  fontSize: 11,
+                  color: dark
+                      ? AppThemeData.neutral400
+                      : AppThemeData.neutral500,
+                ),
+              ),
+            ),
+          ),
+          Expanded(
+            child: Divider(
+              color: dark ? Colors.white12 : Colors.black12,
+              thickness: 1,
+            ),
+          ),
+        ],
+      ),
     );
   }
 

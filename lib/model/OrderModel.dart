@@ -51,6 +51,7 @@ class OrderModel {
   Timestamp? acceptedAt;
   Timestamp? scheduleTime;
   String? orderType; // "Takeaway" or "Dining" for Dineaway feature
+  String? staffStatus;
 
   OrderModel({
     this.address,
@@ -84,6 +85,7 @@ class OrderModel {
     this.taxModel,
     this.scheduleTime,
     this.orderType,
+    this.staffStatus,
   })  : author = author ?? User(),
         createdAt = createdAt ?? Timestamp.now(),
         vendor = vendor ?? VendorModel();
@@ -144,6 +146,7 @@ class OrderModel {
       taxModel: taxList,
       scheduleTime: parsedJson["scheduleTime"],
       orderType: parsedJson["orderType"],
+      staffStatus: parsedJson["staffStatus"],
     );
   }
 

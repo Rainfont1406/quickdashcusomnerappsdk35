@@ -129,7 +129,8 @@ class _StoreMenuPhotoState extends State<StoreMenuPhoto> {
                     children: List.generate(widget.vendorMenuPhotos.length, (index) {
                       return InkWell(
                         onTap: () {
-                          push(context, FullScreenImageViewer(imageUrl: widget.vendorMenuPhotos[index]));
+                          push(context, FullScreenImageViewer(
+                              imageUrl: VendorModel.originalPhotoUrl(widget.vendorMenuPhotos[index])));
                         },
                         child: Card(
                             color: const Color(0xffE7EAED),
@@ -138,7 +139,7 @@ class _StoreMenuPhotoState extends State<StoreMenuPhoto> {
                             child: CachedNetworkImage(
                                 height: 70,
                                 width: 100,
-                                imageUrl: getImageVAlidUrl(widget.vendorMenuPhotos[index]),
+                                imageUrl: getImageVAlidUrl(VendorModel.coverPhotoUrl(widget.vendorMenuPhotos[index])),
                                 imageBuilder: (context, imageProvider) => Container(
                                       width: 70,
                                       height: 100,

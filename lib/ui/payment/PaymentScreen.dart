@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
@@ -24,7 +25,6 @@ import 'package:emartconsumer/model/stripeSettingData.dart';
 import 'package:emartconsumer/model/topupTranHistory.dart';
 import 'package:emartconsumer/payment/midtrans_screen.dart';
 import 'package:emartconsumer/payment/orangePayScreen.dart';
-import 'package:emartconsumer/payment/phonePayScreen.dart';
 import 'package:emartconsumer/payment/xenditModel.dart';
 import 'package:emartconsumer/payment/xenditScreen.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
@@ -57,6 +57,7 @@ import 'package:http/http.dart' as http;
 
 import 'package:razorpay_flutter/razorpay_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:phonepe_payment_sdk/phonepe_payment_sdk.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../model/MercadoPagoSettingsModel.dart';
@@ -69,6 +70,7 @@ import '../../model/VendorModel.dart';
 import '../../model/getPaytmTxtToken.dart';
 import '../../model/paypalSettingData.dart';
 import '../../model/paytmSettingData.dart';
+import '../container/ContainerScreen.dart';
 import '../placeOrderScreen/PlaceOrderScreen.dart';
 
 class PaymentScreen extends StatefulWidget {
@@ -116,29 +118,13 @@ class PaymentScreenState extends State<PaymentScreen> {
   late Future<bool> hasNativePay;
 
   // Modified to ensure unique order ID by checking against database
+  // Generates a unique-enough order ID without hitting the network.
+  // Combines a millisecond timestamp with a 4-digit random suffix —
+  // the collision probability is negligible for any realistic order volume.
   Future<String> generateOrderId() async {
-    final random = Random();
-    String orderId = '';
-    bool isUnique = false;
-
-    while (!isUnique) {
-      // Generate a 10-digit number
-      int first = random.nextInt(90000) + 10000; // 10000-99999
-      int second = random.nextInt(90000) + 10000; // 10000-99999
-      orderId = '$first$second';
-
-      // Check if this ID exists in the database
-      final orderDoc = await FireStoreUtils.firestore
-          .collection('vendor_orders')
-          .doc(orderId)
-          .get();
-
-      if (!orderDoc.exists) {
-        isUnique = true;
-      }
-    }
-
-    return orderId;
+    final ts = DateTime.now().millisecondsSinceEpoch % 100000; // last 5 digits
+    final rand = Random().nextInt(9000) + 1000;               // 1000-9999
+    return '$ts$rand';
   }
 
   //List<PaymentMethod> _cards = [];
@@ -181,35 +167,40 @@ class PaymentScreenState extends State<PaymentScreen> {
         .collection(USERS)
         .doc(MyAppState.currentUser!.userID)
         .snapshots();
-    // await UserPreference.getStripeData().then((value) async {
-    //   stripeData = value;
-    //   stripe1.Stripe.publishableKey = stripeData!.clientpublishableKey;
-    //   stripe1.Stripe.merchantIdentifier = 'QuickDash';
-    //   await stripe1.Stripe.instance.applySettings();
-    // });
-    razorPayData = await UserPreference.getRazorPayData();
-    paytmSettingData = await UserPreference.getPaytmData();
-    paypalSettingData = await UserPreference.getPayPalData();
-    payStackSettingData = await UserPreference.getPayStackData();
-    flutterWaveSettingData = await UserPreference.getFlutterWaveData();
-    payFastSettingData = await UserPreference.getPayFastData();
-    mercadoPagoSettingData = await UserPreference.getMercadoPago();
-    midTransModel = await UserPreference.getMidTransData();
-    orangeMoneyModel = await UserPreference.getOrangeData();
-    xenditModel = await UserPreference.getXenditData();
+
+    // Each gateway is fetched independently so a missing/unconfigured gateway
+    // (jsonData! crash inside UserPreference) cannot abort the entire load.
+    razorPayData = await _safeLoad(() => UserPreference.getRazorPayData());
+    paytmSettingData = await _safeLoad(() => UserPreference.getPaytmData());
+    paypalSettingData = await _safeLoad(() => UserPreference.getPayPalData());
+    payStackSettingData = await _safeLoad(() => UserPreference.getPayStackData());
+    flutterWaveSettingData = await _safeLoad(() => UserPreference.getFlutterWaveData());
+    payFastSettingData = await _safeLoad(() => UserPreference.getPayFastData());
+    mercadoPagoSettingData = await _safeLoad(() => UserPreference.getMercadoPago());
+    midTransModel = await _safeLoad(() => UserPreference.getMidTransData());
+    orangeMoneyModel = await _safeLoad(() => UserPreference.getOrangeData());
+    xenditModel = await _safeLoad(() => UserPreference.getXenditData());
     phonePayData = UserPreference.getPhonePayData();
 
-    ///set Refrence for FlutterWave
     setRef();
+    if (paypalSettingData != null) initPayPal();
 
-    initPayPal();
+    if (mounted) setState(() {});
+  }
+
+  // Silently returns null if the preference key is missing or data is malformed.
+  Future<T?> _safeLoad<T>(FutureOr<T?> Function() loader) async {
+    try {
+      return await loader();
+    } catch (_) {
+      return null;
+    }
   }
 
   void initPayPal() async {
-    //set debugMode for error logging
+    if (paypalSettingData == null) return;
     FlutterPaypalNative.isDebugMode =
         paypalSettingData!.isLive == false ? true : false;
-    //initiate payPal plugin
     await _flutterPaypalNativePlugin.init(
       returnUrl: "com.emart.customer://paypalpay",
       clientID: paypalSettingData!.paypalClient,
@@ -307,7 +298,7 @@ class PaymentScreenState extends State<PaymentScreen> {
                   child: _buildWalletCard(isDarkMode(context)),
                 ),
                 Visibility(
-                  visible: paytmSettingData!.isEnabled,
+                  visible: paytmSettingData?.isEnabled == true,
                   child: _pmCard(
                     dark: isDarkMode(context), isSelected: payTm, value: 'PayTm',
                     label: 'Paytm'.tr(),
@@ -316,12 +307,12 @@ class PaymentScreenState extends State<PaymentScreen> {
                       stripe = false; flutterWave = false; payTm = true; mercadoPago = false;
                       razorPay = false; paypal = false; payFast = false; payStack = false;
                       orange = false; Midtrans = false; xendit = false; wallet = false;
-                      codPay = false; selectedRadioTile = v!;
+                      phonePay = false; codPay = false; selectedRadioTile = v!;
                     }),
                   ),
                 ),
                 Visibility(
-                  visible: payStackSettingData!.isEnabled,
+                  visible: payStackSettingData?.isEnabled == true,
                   child: _pmCard(
                     dark: isDarkMode(context), isSelected: payStack, value: 'PayStack',
                     label: 'PayStack'.tr(),
@@ -330,12 +321,12 @@ class PaymentScreenState extends State<PaymentScreen> {
                       flutterWave = false; payStack = true; mercadoPago = false; stripe = false;
                       payFast = false; razorPay = false; payTm = false; paypal = false;
                       orange = false; Midtrans = false; xendit = false; wallet = false;
-                      codPay = false; selectedRadioTile = v!;
+                      phonePay = false; codPay = false; selectedRadioTile = v!;
                     }),
                   ),
                 ),
                 Visibility(
-                  visible: flutterWaveSettingData!.isEnable,
+                  visible: flutterWaveSettingData?.isEnable == true,
                   child: _pmCard(
                     dark: isDarkMode(context), isSelected: flutterWave, value: 'FlutterWave',
                     label: 'FlutterWave'.tr(),
@@ -344,12 +335,12 @@ class PaymentScreenState extends State<PaymentScreen> {
                       flutterWave = true; payStack = false; mercadoPago = false; payFast = false;
                       stripe = false; razorPay = false; payTm = false; paypal = false;
                       orange = false; Midtrans = false; xendit = false; wallet = false;
-                      codPay = false; selectedRadioTile = v!;
+                      phonePay = false; codPay = false; selectedRadioTile = v!;
                     }),
                   ),
                 ),
                 Visibility(
-                  visible: razorPayData!.isEnabled,
+                  visible: razorPayData?.isEnabled == true,
                   child: _pmCard(
                     dark: isDarkMode(context), isSelected: razorPay, value: 'RazorPay',
                     label: 'RazorPay'.tr(),
@@ -358,12 +349,12 @@ class PaymentScreenState extends State<PaymentScreen> {
                       mercadoPago = false; flutterWave = false; stripe = false; razorPay = true;
                       payTm = false; payFast = false; paypal = false; payStack = false;
                       orange = false; Midtrans = false; xendit = false; wallet = false;
-                      codPay = false; selectedRadioTile = v!;
+                      phonePay = false; codPay = false; selectedRadioTile = v!;
                     }),
                   ),
                 ),
                 Visibility(
-                  visible: payFastSettingData!.isEnable,
+                  visible: payFastSettingData?.isEnable == true,
                   child: _pmCard(
                     dark: isDarkMode(context), isSelected: payFast, value: 'payFast',
                     label: 'Payfast'.tr(),
@@ -372,12 +363,12 @@ class PaymentScreenState extends State<PaymentScreen> {
                       payFast = true; stripe = false; mercadoPago = false; razorPay = false;
                       payStack = false; flutterWave = false; payTm = false; paypal = false;
                       orange = false; Midtrans = false; xendit = false; wallet = false;
-                      codPay = false; selectedRadioTile = v!;
+                      phonePay = false; codPay = false; selectedRadioTile = v!;
                     }),
                   ),
                 ),
                 Visibility(
-                  visible: mercadoPagoSettingData!.isEnabled,
+                  visible: mercadoPagoSettingData?.isEnabled == true,
                   child: _pmCard(
                     dark: isDarkMode(context), isSelected: mercadoPago, value: 'MercadoPago',
                     label: 'Mercado Pago'.tr(),
@@ -386,12 +377,12 @@ class PaymentScreenState extends State<PaymentScreen> {
                       mercadoPago = true; payFast = false; stripe = false; razorPay = false;
                       payStack = false; flutterWave = false; payTm = false; paypal = false;
                       orange = false; Midtrans = false; xendit = false; wallet = false;
-                      codPay = false; selectedRadioTile = v!;
+                      phonePay = false; codPay = false; selectedRadioTile = v!;
                     }),
                   ),
                 ),
                 Visibility(
-                  visible: paypalSettingData!.isEnabled,
+                  visible: paypalSettingData?.isEnabled == true,
                   child: _pmCard(
                     dark: isDarkMode(context), isSelected: paypal, value: 'PayPal',
                     label: 'PayPal'.tr(),
@@ -400,12 +391,12 @@ class PaymentScreenState extends State<PaymentScreen> {
                       stripe = false; payTm = false; mercadoPago = false; flutterWave = false;
                       razorPay = false; paypal = true; payFast = false; payStack = false;
                       orange = false; Midtrans = false; xendit = false; wallet = false;
-                      codPay = false; selectedRadioTile = v!;
+                      phonePay = false; codPay = false; selectedRadioTile = v!;
                     }),
                   ),
                 ),
                 Visibility(
-                  visible: xenditModel!.enable ?? false,
+                  visible: xenditModel?.enable == true,
                   child: _pmCard(
                     dark: isDarkMode(context), isSelected: xendit, value: 'Xendit',
                     label: 'Xendit'.tr(),
@@ -414,12 +405,12 @@ class PaymentScreenState extends State<PaymentScreen> {
                       stripe = false; payTm = false; mercadoPago = false; flutterWave = false;
                       razorPay = false; paypal = false; payFast = false; payStack = false;
                       orange = false; Midtrans = false; xendit = true; wallet = false;
-                      codPay = false; selectedRadioTile = v!;
+                      phonePay = false; codPay = false; selectedRadioTile = v!;
                     }),
                   ),
                 ),
                 Visibility(
-                  visible: orangeMoneyModel!.enable ?? false,
+                  visible: orangeMoneyModel?.enable == true,
                   child: _pmCard(
                     dark: isDarkMode(context), isSelected: orange, value: 'OrangeMoney',
                     label: 'OrangeMoney'.tr(),
@@ -428,12 +419,12 @@ class PaymentScreenState extends State<PaymentScreen> {
                       stripe = false; payTm = false; mercadoPago = false; flutterWave = false;
                       razorPay = false; paypal = false; payFast = false; payStack = false;
                       orange = true; Midtrans = false; xendit = false; wallet = false;
-                      codPay = false; selectedRadioTile = v!;
+                      phonePay = false; codPay = false; selectedRadioTile = v!;
                     }),
                   ),
                 ),
                 Visibility(
-                  visible: midTransModel!.enable ?? false,
+                  visible: midTransModel?.enable == true,
                   child: _pmCard(
                     dark: isDarkMode(context), isSelected: Midtrans, value: 'Midtrans',
                     label: 'Midtrans'.tr(),
@@ -710,7 +701,7 @@ class PaymentScreenState extends State<PaymentScreen> {
                   return SizedBox(height: 18, width: 18,
                       child: CircularProgressIndicator(strokeWidth: 1.5, color: AppThemeData.primary500));
                 }
-                if (asyncSnapshot.data == null) return const SizedBox.shrink();
+                if (asyncSnapshot.data == null || !asyncSnapshot.data!.exists) return const SizedBox.shrink();
                 final User userData = User.fromJson(asyncSnapshot.data!.data()!);
                 final bool sufficient = userData.wallet_amount >= widget.total;
                 walletBalanceError = sufficient;
@@ -856,6 +847,11 @@ class PaymentScreenState extends State<PaymentScreen> {
       paymentType = 'razorpay';
       showLoadingAlert();
       RazorPayController().createOrderRazorPay(amount: widget.total).then((result) {
+        // Manually dismiss the loading dialog and clear the flag before
+        // opening the Razorpay sheet, so that when _handlePaymentSuccess /
+        // _handlePaymentError fires later, the guard in
+        // dismissLoadingAndClearProcessing() knows no dialog is open.
+        setState(() => _isLoadingDialogShowing = false);
         Navigator.pop(context);
         if (result.isSuccess) {
           openCheckout(amount: widget.total, orderId: result.order!.id);
@@ -949,17 +945,32 @@ class PaymentScreenState extends State<PaymentScreen> {
 
   // Show dialog when user tries to go back during processing
   Future<void> _showBackDialog() async {
-    if (isOrderPlaced) {
-      // If order is already placed, just show notification
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Order has been placed successfully!'.tr()),
-          backgroundColor: Colors.green,
-          duration: Duration(seconds: 3),
+    if (_paymentCollected) {
+      // Payment is already debited — never allow going back. Show a reassuring,
+      // non-cancellable dialog so the user knows their money is safe.
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogCtx) => PopScope(
+          canPop: false,
+          child: AlertDialog(
+            icon: Icon(Icons.lock_clock_rounded, color: Colors.green.shade700, size: 32),
+            title: Text('Payment Received'.tr()),
+            content: Text(
+              'Your payment was successful. We are confirming your order — please do not go back.'
+                  .tr(),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogCtx).pop(),
+                child: Text("OK, I'll Wait".tr()),
+              ),
+            ],
+          ),
         ),
       );
     } else {
-      // If order not placed yet, show confirmation to prevent placement
+      // No payment taken yet — user can still cancel and go back to cart.
       final goBack = await AppDialog.showConfirm(
         context,
         title: 'Cancel Payment?',
@@ -968,10 +979,8 @@ class PaymentScreenState extends State<PaymentScreen> {
         cancelLabel: 'Stay Here',
       );
       if (goBack) {
-        setState(() {
-          isProcessingOrder = false; // Stop any processing
-        });
-        Navigator.of(context).pop(); // Go back to cart
+        setState(() { isProcessingOrder = false; });
+        Navigator.of(context).pop();
       }
     }
   }
@@ -983,7 +992,14 @@ class PaymentScreenState extends State<PaymentScreen> {
         isProcessingOrder = false;
       });
     }
-    Navigator.pop(_scaffoldKey.currentContext!);
+    // Only pop if the loading dialog is actually showing.
+    // Without this guard, calling pop when no dialog is open would pop the
+    // PaymentScreen itself (e.g. Razorpay already dismissed the dialog before
+    // calling _handlePaymentSuccess / _handlePaymentError).
+    if (_isLoadingDialogShowing) {
+      setState(() => _isLoadingDialogShowing = false);
+      Navigator.pop(_scaffoldKey.currentContext!);
+    }
   }
 
   bool payStack = false;
@@ -1003,6 +1019,7 @@ class PaymentScreenState extends State<PaymentScreen> {
   bool isProcessingOrder = false;
   bool isOrderPlaced = false;
   bool _isPlacingOrder = false; // debounce for placeOrder()
+  bool _paymentCollected = false; // true once Razorpay (or any online gateway) has debited the user
 
   ///RazorPay payment function
   void openCheckout({required amount, required orderId}) async {
@@ -1012,7 +1029,7 @@ class PaymentScreenState extends State<PaymentScreen> {
       'name': 'Quickdash',
       'order_id': orderId,
       "currency": currencyData?.code,
-      'description': 'wallet Topup',
+      'description': 'Order Payment',
       'retry': {'enabled': true, 'max_count': 1},
       'send_sms_hash': true,
       'prefill': {
@@ -1030,24 +1047,27 @@ class PaymentScreenState extends State<PaymentScreen> {
   }
 
   void _handlePaymentSuccess(PaymentSuccessResponse response) {
-    dismissLoadingAndClearProcessing();
+    // Dismiss the loading dialog if it's still open (it was already dismissed in
+    // _onProceed before the Razorpay sheet opened, so this is usually a no-op).
+    // Crucially we do NOT call dismissLoadingAndClearProcessing() here because
+    // that would set isProcessingOrder = false, creating a window where the user
+    // could press Back between payment and the order being written to Firestore.
+    if (_isLoadingDialogShowing) {
+      setState(() => _isLoadingDialogShowing = false);
+      Navigator.pop(_scaffoldKey.currentContext!);
+    }
 
-    // Generate order ID first, then proceed with order placement
-    generateOrderId().then((orderId) {
-      if (widget.take_away!) {
-        placeOrder(_scaffoldKey.currentContext!, oid: orderId);
-      } else {
-        toCheckOutScreen(true, _scaffoldKey.currentContext!, oid: orderId);
-      }
+    // Money is now debited. Lock back navigation for the entire order-placement
+    // phase and remember that payment was collected (used in _showBackDialog).
+    setState(() {
+      isOrderPlaced = true;
+      isProcessingOrder = true;
+      _paymentCollected = true;
     });
 
-    ScaffoldMessenger.of(_scaffoldKey.currentContext!).showSnackBar(SnackBar(
-      content: Text(
-        "Payment Successful!!".tr() + "\n" + response.orderId!,
-      ),
-      backgroundColor: Colors.green.shade400,
-      duration: const Duration(seconds: 6),
-    ));
+    generateOrderId().then((orderId) {
+      placeOrder(_scaffoldKey.currentContext!, oid: orderId);
+    });
   }
 
   void _handleExternalWaller(ExternalWalletResponse response) {
@@ -1291,9 +1311,12 @@ class PaymentScreenState extends State<PaymentScreen> {
   //   });
   // }
 
+  bool _isLoadingDialogShowing = false;
+
   showLoadingAlert() {
     setState(() {
       isProcessingOrder = true;
+      _isLoadingDialogShowing = true;
     });
     return showDialog<void>(
       context: _scaffoldKey.currentContext!,
@@ -1953,7 +1976,7 @@ class PaymentScreenState extends State<PaymentScreen> {
     }
   }
 
-  // ── PhonePe Payment ──────────────────────────────────────────────────────────
+  // ── PhonePe Payment (SDK) ────────────────────────────────────────────────────
 
   Future<void> _phonePayMakePayment({
     required BuildContext context,
@@ -1961,57 +1984,118 @@ class PaymentScreenState extends State<PaymentScreen> {
   }) async {
     showLoadingAlert();
     try {
-      final paymentUrl = await _createPhonePayOrder(amount: amount);
-      Navigator.pop(_scaffoldKey.currentContext!); // dismiss loading
-      if (paymentUrl == null || paymentUrl.isEmpty) {
-        ShowToastDialog.showToast(
-            'Something went wrong, please contact admin.'.tr());
-        setState(() => isProcessingOrder = false);
-        return;
-      }
-      final bool isDone = await Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => PhonePayScreen(
-            initialUrl: paymentUrl,
-            redirectUrl: phonePayData?.redirectUrl ?? '',
-          ),
-        ),
+      final params = _buildPhonePayParams(amount: amount);
+      final merchantId   = params['merchantId']    as String;
+      final base64Body   = params['base64Payload'] as String;
+      final checksum     = params['checksum']      as String;
+      final callbackUrl  = params['callbackUrl']   as String;
+      final transactionId = params['transactionId'] as String;
+      final isSandbox    = params['isSandbox']     as bool;
+
+      await PhonePePaymentSdk.init(
+        isSandbox ? "UAT" : "PRODUCTION",
+        null,
+        merchantId,
+        false,
       );
-      if (isDone) {
-        ShowToastDialog.showToast('Payment Successful!!'.tr());
-        final orderId = await generateOrderId();
-        if (widget.take_away!) {
-          placeOrder(_scaffoldKey.currentContext!, oid: orderId);
+
+      Navigator.pop(_scaffoldKey.currentContext!); // dismiss loading
+
+      final response = await PhonePePaymentSdk.startTransaction(
+        base64Body,
+        callbackUrl,
+        checksum,
+        null, // null = let user choose any UPI app
+      );
+
+      debugPrint('PhonePe SDK response: $response');
+
+      if (response != null && response['status'] == 'SUCCESS') {
+        showLoadingAlert();
+        final verified = await _checkPhonePayStatus(transactionId);
+        if (Navigator.canPop(_scaffoldKey.currentContext!)) {
+          Navigator.pop(_scaffoldKey.currentContext!);
+        }
+        if (verified) {
+          ShowToastDialog.showToast('Payment Successful!!'.tr());
+          final orderId = await generateOrderId();
+          if (widget.take_away!) {
+            placeOrder(_scaffoldKey.currentContext!, oid: orderId);
+          } else {
+            toCheckOutScreen(true, _scaffoldKey.currentContext!, oid: orderId);
+          }
         } else {
-          toCheckOutScreen(true, _scaffoldKey.currentContext!, oid: orderId);
+          setState(() => isProcessingOrder = false);
+          ShowToastDialog.showToast('Payment could not be verified'.tr());
         }
       } else {
         setState(() => isProcessingOrder = false);
-        ShowToastDialog.showToast('Payment Unsuccessful!!'.tr());
+        final err = response?['error'] ?? 'Payment cancelled';
+        ShowToastDialog.showToast(err.toString());
       }
     } catch (e) {
-      Navigator.pop(_scaffoldKey.currentContext!);
+      debugPrint('PhonePe payment error: $e');
+      if (Navigator.canPop(_scaffoldKey.currentContext!)) {
+        Navigator.pop(_scaffoldKey.currentContext!);
+      }
       setState(() => isProcessingOrder = false);
-      ShowToastDialog.showToast(
-          'Something went wrong, please contact admin.'.tr());
+      ShowToastDialog.showToast(e.toString().replaceFirst('Exception: ', ''));
     }
   }
 
-  Future<String?> _createPhonePayOrder({required double amount}) async {
+  Future<bool> _checkPhonePayStatus(String transactionId) async {
     final merchantId = phonePayData?.merchantId ?? '';
-    final saltKey = phonePayData?.saltKey ?? '';
-    final saltIndex = phonePayData?.saltIndex ?? 1;
-    final isSandbox = phonePayData?.isSandbox ?? true;
+    final saltKey    = phonePayData?.saltKey    ?? '';
+    final saltIndex  = phonePayData?.saltIndex  ?? 1;
+    final isSandbox  = phonePayData?.isSandbox  ?? true;
+
+    final statusPath    = '/pg/v1/status/$merchantId/$transactionId';
+    final checksumInput = statusPath + saltKey;
+    final checksum      =
+        '${sha256.convert(utf8.encode(checksumInput)).toString()}###$saltIndex';
+
+    final baseUrl = isSandbox
+        ? 'https://api-preprod.phonepe.com/apis/pg-sandbox'
+        : 'https://api.phonepe.com/apis/hermes';
+
+    debugPrint('PhonePe status: GET $baseUrl$statusPath');
+
+    final response = await http.get(
+      Uri.parse('$baseUrl$statusPath'),
+      headers: {
+        'Content-Type': 'application/json',
+        'X-VERIFY': checksum,
+        'X-MERCHANT-ID': merchantId,
+      },
+    );
+
+    debugPrint('PhonePe status: ${response.statusCode} ${response.body}');
+
+    if (response.statusCode == 200) {
+      final data = jsonDecode(response.body);
+      return data['success'] == true && data['code'] == 'PAYMENT_SUCCESS';
+    }
+    return false;
+  }
+
+  Map<String, dynamic> _buildPhonePayParams({required double amount}) {
+    final merchantId  = phonePayData?.merchantId  ?? '';
+    final saltKey     = phonePayData?.saltKey     ?? '';
+    final saltIndex   = phonePayData?.saltIndex   ?? 1;
+    final isSandbox   = phonePayData?.isSandbox   ?? true;
     final redirectUrl = phonePayData?.redirectUrl ?? '';
     final callbackUrl = phonePayData?.callbackUrl ?? '';
 
-    final merchantTransactionId = 'MT${DateTime.now().millisecondsSinceEpoch}';
-    final amountInPaise = (amount * 100).toInt();
+    if (merchantId.isEmpty || saltKey.isEmpty) {
+      throw Exception('PhonePe credentials not configured.');
+    }
+
+    final transactionId  = 'MT${DateTime.now().millisecondsSinceEpoch}';
+    final amountInPaise  = (amount * 100).toInt();
 
     final payload = {
       'merchantId': merchantId,
-      'merchantTransactionId': merchantTransactionId,
+      'merchantTransactionId': transactionId,
       'merchantUserId': 'MUID_${MyAppState.currentUser!.userID}',
       'amount': amountInPaise,
       'redirectUrl': redirectUrl,
@@ -2021,33 +2105,21 @@ class PaymentScreenState extends State<PaymentScreen> {
       'paymentInstrument': {'type': 'PAY_PAGE'},
     };
 
-    final payloadJson = jsonEncode(payload);
-    final base64Payload = base64Encode(utf8.encode(payloadJson));
-    final checksumInput = base64Payload + '/pg/v1/pay' + saltKey;
-    final checksum =
+    final base64Payload  = base64Encode(utf8.encode(jsonEncode(payload)));
+    final checksumInput  = base64Payload + '/pg/v1/pay' + saltKey;
+    final checksum       =
         '${sha256.convert(utf8.encode(checksumInput)).toString()}###$saltIndex';
 
-    final apiUrl = isSandbox
-        ? 'https://api-preprod.phonepe.com/apis/pg-sandbox/pg/v1/pay'
-        : 'https://api.phonepe.com/apis/hermes/pg/v1/pay';
+    debugPrint('PhonePe SDK: merchantId=$merchantId isSandbox=$isSandbox amount=$amountInPaise');
 
-    final response = await http.post(
-      Uri.parse(apiUrl),
-      headers: {
-        'Content-Type': 'application/json',
-        'X-VERIFY': checksum,
-      },
-      body: jsonEncode({'request': base64Payload}),
-    );
-
-    if (response.statusCode == 200 || response.statusCode == 201) {
-      final data = jsonDecode(response.body);
-      if (data['success'] == true) {
-        return data['data']?['instrumentResponse']?['redirectInfo']?['url']
-            as String?;
-      }
-    }
-    return null;
+    return {
+      'merchantId':   merchantId,
+      'base64Payload': base64Payload,
+      'checksum':     checksum,
+      'transactionId': transactionId,
+      'callbackUrl':  callbackUrl,
+      'isSandbox':    isSandbox,
+    };
   }
 
   placeOrder(BuildContext buildContext, {required String oid}) async {
@@ -2097,7 +2169,7 @@ class PaymentScreenState extends State<PaymentScreen> {
         id: oid.toString(),
         address: widget.addressModel,
         author: MyAppState.currentUser,
-        authorID: MyAppState.currentUser!.userID,
+        authorID: MyAppState.currentUser?.userID ?? '',
         createdAt: Timestamp.now(),
         products: tempProduc,
         status: widget.orderType == "Bill Pay" ? ORDER_STATUS_COMPLETED : ORDER_STATUS_PLACED,
@@ -2109,14 +2181,13 @@ class PaymentScreenState extends State<PaymentScreen> {
         discount: widget.discount,
         couponCode: widget.couponCode,
         couponId: widget.couponId,
-        sectionId: sectionConstantModel!.id,
-        adminCommission: widget.take_away!
-            ? sectionConstantModel!.adminCommision!.takeawayCommission
-                .toString()
-            : sectionConstantModel!.adminCommision!.commission.toString(),
-        adminCommissionType: sectionConstantModel!.adminCommision!.type,
+        sectionId: sectionConstantModel?.id ?? '',
+        adminCommission: (widget.take_away ?? false)
+            ? (sectionConstantModel?.adminCommision?.takeawayCommission ?? 0).toString()
+            : (sectionConstantModel?.adminCommision?.commission ?? 0).toString(),
+        adminCommissionType: sectionConstantModel?.adminCommision?.type,
         specialDiscount: widget.specialDiscountMap,
-        takeAway: true,
+        takeAway: widget.take_away ?? false,
         scheduleTime: widget.scheduleTime,
         orderType: widget.orderType,
       );
@@ -2125,33 +2196,27 @@ class PaymentScreenState extends State<PaymentScreen> {
       placedOrder =
           await FireStoreUtils().placeOrderWithTakeAWay(orderModel);
 
-      // Update stock counts (best-effort â€” don't fail the order if this errors)
-      for (int i = 0; i < tempProduc.length; i++) {
-        try {
-          await FireStoreUtils()
-              .getProductByID(tempProduc[i].id.split('~').first)
-              .then((productModel) async {
-            if (tempProduc[i].variant_info != null &&
-                productModel.itemAttributes?.variants != null) {
+      // Update stock counts in parallel — best-effort, never fails the order.
+      await Future.wait(
+        tempProduc.map((item) async {
+          try {
+            final productModel = await FireStoreUtils().getProductByID(item.id.split('~').first);
+            if (item.variant_info != null && productModel.itemAttributes?.variants != null) {
               for (final v in productModel.itemAttributes!.variants!) {
-                if (v.variant_id == tempProduc[i].id.split('~').last &&
-                    v.variant_quantity != '-1') {
+                if (v.variant_id == item.id.split('~').last && v.variant_quantity != '-1') {
                   v.variant_quantity =
-                      (int.parse(v.variant_quantity.toString()) -
-                              tempProduc[i].quantity)
-                          .toString();
+                      (int.parse(v.variant_quantity.toString()) - item.quantity).toString();
                 }
               }
             } else if (productModel.quantity != -1) {
-              productModel.quantity -= tempProduc[i].quantity;
+              productModel.quantity -= item.quantity;
             }
             await FireStoreUtils.updateProduct(productModel);
-          });
-        } catch (stockErr) {
-          // Non-critical: stock update failed but order is placed
-          debugPrint('Stock update error for item ${tempProduc[i].id}: $stockErr');
-        }
-      }
+          } catch (stockErr) {
+            debugPrint('Stock update error for item ${item.id}: $stockErr');
+          }
+        }),
+      );
 
       hideProgress();
       setState(() {
@@ -2160,8 +2225,10 @@ class PaymentScreenState extends State<PaymentScreen> {
         _isPlacingOrder = false;
       });
 
-      // Navigate to the premium full-screen placement screen
-      push(buildContext, PlaceOrderScreen(orderModel: placedOrder));
+      push(buildContext, PlaceOrderScreen(
+        orderModel: placedOrder,
+        isPaymentVerified: paymentType != 'cod',
+      ));
 
     } catch (e) {
       hideProgress();
@@ -2170,15 +2237,22 @@ class PaymentScreenState extends State<PaymentScreen> {
         _isPlacingOrder = false;
       });
 
-      // If the Firestore write succeeded before the crash, still navigate
       if (placedOrder != null && buildContext.mounted) {
-        push(buildContext, PlaceOrderScreen(orderModel: placedOrder));
+        push(buildContext, PlaceOrderScreen(
+          orderModel: placedOrder,
+          isPaymentVerified: paymentType != 'cod',
+        ));
         return;
       }
 
-      // Show error with retry option
       if (buildContext.mounted) {
-        _showOrderFailureDialog(buildContext, oid, e.toString());
+        // When payment was already debited (online gateway), show a different
+        // message that doesn't falsely reassure the user their card wasn't charged.
+        if (_paymentCollected) {
+          _showPaymentCollectedOrderFailDialog(buildContext, oid, e.toString());
+        } else {
+          _showOrderFailureDialog(buildContext, oid, e.toString());
+        }
       }
     }
   }
@@ -2217,6 +2291,32 @@ class PaymentScreenState extends State<PaymentScreen> {
     });
   }
 
+  // Shown when the online payment was collected but Firestore write failed.
+  // Unlike _showOrderFailureDialog, this does NOT say "payment not charged" —
+  // because it already was. The user can retry or navigate to Orders to verify.
+  void _showPaymentCollectedOrderFailDialog(
+      BuildContext ctx, String oid, String errorDetail) {
+    AppDialog.showConfirm(
+      ctx,
+      title: 'Order Failed'.tr(),
+      message:
+          'Your payment was received but we could not confirm your order. '
+          'Please check your Orders list or contact support. (Ref: $oid)'
+              .tr(),
+      confirmLabel: 'Retry'.tr(),
+      cancelLabel: 'View Orders'.tr(),
+    ).then((retry) async {
+      if (!ctx.mounted) return;
+      if (retry) {
+        setState(() { _isPlacingOrder = false; });
+        final retryId = await generateOrderId();
+        placeOrder(ctx, oid: retryId);
+      } else {
+        pushAndRemoveUntil(ctx, ContainerScreen(user: MyAppState.currentUser!));
+      }
+    });
+  }
+
   Future<void> setPrefData() async {
     SharedPreferences sp = await SharedPreferences.getInstance();
 
@@ -2245,6 +2345,7 @@ class PaymentScreenState extends State<PaymentScreen> {
         specialDiscountMap: widget.specialDiscountMap,
         scheduleTime: widget.scheduleTime,
         address: widget.addressModel,
+        orderType: widget.orderType,
       ),
     );
   }

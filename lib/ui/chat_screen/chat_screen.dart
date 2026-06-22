@@ -115,11 +115,30 @@ class _ChatScreensState extends State<ChatScreens> {
                   controller: _controller,
                   physics: const BouncingScrollPhysics(),
                   itemBuilder: (context, documentSnapshots, index) {
-                    ConversationModel inboxModel = ConversationModel.fromJson(documentSnapshots[index].data() as Map<String, dynamic>);
-                    print(index);
-                    print(MyAppState.currentUser!.userID);
-                    print(inboxModel.senderId == MyAppState.currentUser!.userID);
-                    return chatItemView(inboxModel.senderId == MyAppState.currentUser!.userID, inboxModel);
+                    final ConversationModel inboxModel = ConversationModel.fromJson(
+                        documentSnapshots[index].data() as Map<String, dynamic>);
+                    final bool showSeparator;
+                    if (index == 0 || inboxModel.createdAt == null) {
+                      showSeparator = true;
+                    } else {
+                      final ConversationModel prev = ConversationModel.fromJson(
+                          documentSnapshots[index - 1].data() as Map<String, dynamic>);
+                      showSeparator = prev.createdAt == null ||
+                          !_isSameDay(
+                            prev.createdAt!.toDate(),
+                            inboxModel.createdAt!.toDate(),
+                          );
+                    }
+                    return Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (showSeparator && inboxModel.createdAt != null)
+                          _buildDateSeparator(inboxModel.createdAt!.toDate()),
+                        chatItemView(
+                            inboxModel.senderId == MyAppState.currentUser!.userID,
+                            inboxModel),
+                      ],
+                    );
                   },
                   onEmpty: Center(
                     child: Column(
@@ -227,6 +246,56 @@ class _ChatScreensState extends State<ChatScreens> {
               ),
           ],
         ),
+      ),
+    );
+  }
+
+  bool _isSameDay(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
+
+  Widget _buildDateSeparator(DateTime date) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final yesterday = today.subtract(const Duration(days: 1));
+    final msgDay = DateTime(date.year, date.month, date.day);
+
+    String label;
+    if (msgDay == today) {
+      label = 'Today';
+    } else if (msgDay == yesterday) {
+      label = 'Yesterday';
+    } else {
+      label = DateFormat('d/M/yyyy').format(date);
+    }
+
+    final lineColor = isDarkMode(context) ? Colors.white12 : Colors.black12;
+    final chipColor = isDarkMode(context) ? Colors.white10 : Colors.grey.shade200;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Row(
+        children: [
+          Expanded(child: Divider(color: lineColor, thickness: 1)),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: chipColor,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Text(
+                label,
+                style: TextStyle(
+                  fontSize: 11,
+                  color: Colors.grey.shade600,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+          ),
+          Expanded(child: Divider(color: lineColor, thickness: 1)),
+        ],
       ),
     );
   }

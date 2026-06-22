@@ -10,7 +10,8 @@ class ProductModel {
   String brandID;
   String description;
   String id;
-  String photo;
+  String photo; // 16:9 cover image (1600x900)
+  String photoOriginal; // unmodified master asset, as uploaded by the vendor
   List<dynamic> photos;
   String price;
   String name;
@@ -44,6 +45,7 @@ class ProductModel {
   List<ProductAttributeConfig> productAttributes;
   bool nutritionEnabled;
   NutritionInfo? nutritionInfo;
+  String productStatus; // 'pending' | 'approved' | 'rejected'
 
   ProductModel({
     this.categoryID = '',
@@ -51,6 +53,7 @@ class ProductModel {
     this.description = '',
     this.id = '',
     this.photo = '',
+    this.photoOriginal = '',
     this.photos = const [],
     this.price = '',
     this.name = '',
@@ -84,6 +87,7 @@ class ProductModel {
     this.productAttributes = const [],
     this.nutritionEnabled = false,
     this.nutritionInfo,
+    this.productStatus = 'approved',
   });
 
   factory ProductModel.fromJson(Map<String, dynamic> parsedJson) {
@@ -93,6 +97,7 @@ class ProductModel {
       description: parsedJson['description'] ?? '',
       id: parsedJson['id'] ?? '',
       photo: parsedJson['photo'],
+      photoOriginal: parsedJson['photoOriginal'] ?? parsedJson['photo'] ?? '',
       photos: parsedJson['photos'] ?? [],
       price: parsedJson['price'] ?? '',
       quantity: parsedJson['quantity'] ?? 0,
@@ -198,6 +203,7 @@ class ProductModel {
         } catch (_) {}
         return null;
       })(),
+      productStatus: parsedJson['product_status'] ?? 'approved',
     );
   }
 
@@ -209,6 +215,7 @@ class ProductModel {
       'description': description,
       'id': id,
       'photo': photo,
+      'photoOriginal': photoOriginal,
       'photos': photos,
       'price': price,
       'name': name,
@@ -243,6 +250,7 @@ class ProductModel {
       'product_attributes': productAttributes.map((e) => e.toJson()).toList(),
       'nutrition_enabled': nutritionEnabled,
       'nutrition_info': nutritionInfo?.toJson(),
+      'product_status': productStatus,
     };
   }
 }

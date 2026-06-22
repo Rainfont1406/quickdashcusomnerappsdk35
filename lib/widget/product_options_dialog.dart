@@ -17,11 +17,18 @@ import 'package:shared_preferences/shared_preferences.dart';
 class ProductOptionsDialog extends StatefulWidget {
   final ProductModel productModel;
   final Function(ProductModel, double) onAddToCart;
+  // When re-ordering or editing, pass the old variant_info to pre-populate selections.
+  final VariantInfo? initialVariantInfo;
+  // Comma-joined add-on names from the cart item (e.g. "Cheese,Extra Sauce").
+  // Used to restore add-on quantities when editing an existing cart item.
+  final String? initialExtras;
 
   const ProductOptionsDialog({
     Key? key,
     required this.productModel,
     required this.onAddToCart,
+    this.initialVariantInfo,
+    this.initialExtras,
   }) : super(key: key);
 
   @override
@@ -50,6 +57,9 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
   String finalDisPrice = "0.0";
   bool isLoading = true;
 
+  // ── Validation error ──────────────────────────────────────────────────────
+  String? _msError;
+
   // ── Helpers ───────────────────────────────────────────────────────────────
   bool get _hasNewVariants =>
       widget.productModel.productAttributes.isNotEmpty &&
@@ -61,6 +71,19 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
 
   bool get _hasAddOns => widget.productModel.addOnsTitle.isNotEmpty;
 
+  // Add-ons are locked when the product has MS-type attribute groups but the
+  // user hasn't selected any option from any of them yet. SS groups always
+  // have an auto-selected first option so they never cause locking.
+  bool get _addOnsLocked {
+    if (!_hasNewVariants) return false;
+    return widget.productModel.productAttributes.any(
+      (cfg) =>
+          cfg.type == 'MS' &&
+          cfg.options.any((o) => o.enabled) &&
+          (_msSel[cfg.attributeId] ?? {}).isEmpty,
+    );
+  }
+
   @override
   void initState() {
     super.initState();
@@ -69,12 +92,32 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
   }
 
   void _initSelectionsSync() {
-    // Add-ons
+    // Add-ons — start at zero, then restore from initialExtras if editing.
     selectedAddOns = List.filled(widget.productModel.addOnsTitle.length, 0);
+
+    // When editing a cart item, initialExtras is a cleaned comma-joined string
+    // like "Cheese,Extra Sauce,Cheese" (repeated = qty > 1). Count occurrences
+    // of each add-on title to restore the previously chosen quantities.
+    final rawExtras = widget.initialExtras ?? '';
+    if (rawExtras.isNotEmpty) {
+      final names = rawExtras
+          .split(',')
+          .map((e) => e.trim())
+          .where((e) => e.isNotEmpty)
+          .toList();
+      for (int i = 0; i < widget.productModel.addOnsTitle.length; i++) {
+        final title = widget.productModel.addOnsTitle[i].toString().trim();
+        selectedAddOns[i] = names.where((n) => n == title).length;
+      }
+    }
 
     // Legacy itemAttributes variants
     final attrs = widget.productModel.itemAttributes?.attributes;
     if (attrs != null && attrs.isNotEmpty) {
+      // When re-ordering: pre-select the previously chosen variant using the SKU.
+      final preSku = widget.initialVariantInfo?.variant_sku ?? '';
+      final preSkuParts = preSku.isNotEmpty ? preSku.split('-') : <String>[];
+
       for (int i = 0; i < attrs.length; i++) {
         final options = attrs[i].attributeOptions;
         if (options == null || options.isEmpty) {
@@ -83,11 +126,28 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
           selectedIndexArray.add('${i}_-1');
           continue;
         }
+
+        // Try to restore the old selection from the SKU part at this index.
+        String? preSelected;
+        if (i < preSkuParts.length) {
+          final candidate = preSkuParts[i];
+          if (options.map((o) => o.toString()).contains(candidate)) {
+            preSelected = candidate;
+          }
+        }
+
+        final targetOption = preSelected ?? options[0].toString();
         String defaultOption = options[0].toString();
         int defaultOptionIndex = 0;
         for (int j = 0; j < options.length; j++) {
           final opt = options[j].toString();
-          if (_isOptionAvailable(i, opt)) {
+          if (opt == targetOption && _isOptionAvailable(i, opt)) {
+            defaultOption = opt;
+            defaultOptionIndex = j;
+            break;
+          }
+          // fallback: first available option
+          if (_isOptionAvailable(i, opt) && preSelected == null) {
             defaultOption = opt;
             defaultOptionIndex = j;
             break;
@@ -99,13 +159,31 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
       }
     }
 
-    // New productAttribute variants — pre-select first enabled option for SS
+    // New productAttribute variants — pre-select from initialVariantInfo if re-ordering,
+    // otherwise fall back to first enabled option for SS.
+    final preOpts = widget.initialVariantInfo?.variant_options ?? {};
     for (final cfg in widget.productModel.productAttributes) {
       final enabledOpts = cfg.options.where((o) => o.enabled).toList();
-      if (cfg.type == 'SS' && enabledOpts.isNotEmpty) {
-        _ssSel[cfg.attributeId] = enabledOpts.first.id;
+      if (cfg.type == 'SS') {
+        // Try to restore previously selected option by name match.
+        final prevName = preOpts[cfg.attributeTitle];
+        final preMatch = prevName != null
+            ? enabledOpts.where((o) => o.name == prevName).firstOrNull
+            : null;
+        _ssSel[cfg.attributeId] =
+            (preMatch ?? (enabledOpts.isNotEmpty ? enabledOpts.first : null))?.id ?? '';
       } else if (cfg.type == 'MS') {
-        _msSel[cfg.attributeId] = {};
+        // Restore multi-select: prevName may be "Opt1, Opt2" (comma-joined).
+        final prevName = preOpts[cfg.attributeTitle];
+        if (prevName != null) {
+          final prevNames = prevName.split(', ').map((s) => s.trim()).toSet();
+          _msSel[cfg.attributeId] = enabledOpts
+              .where((o) => prevNames.contains(o.name))
+              .map((o) => o.id)
+              .toSet();
+        } else {
+          _msSel[cfg.attributeId] = {};
+        }
       }
     }
 
@@ -211,6 +289,7 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
 
   void _toggleMS(String attrId, String optId) {
     setState(() {
+      _msError = null;
       final set = _msSel.putIfAbsent(attrId, () => {});
       if (set.contains(optId)) {
         set.remove(optId);
@@ -229,6 +308,20 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
   }
 
   void _addToCart() async {
+    // Block order if any MS group with enabled options has no selection.
+    if (_hasNewVariants) {
+      for (final cfg in widget.productModel.productAttributes) {
+        if (cfg.type == 'MS' && cfg.options.any((o) => o.enabled)) {
+          if ((_msSel[cfg.attributeId] ?? {}).isEmpty) {
+            setState(() {
+              _msError = 'Please select at least one option for "${cfg.attributeTitle}"'.tr();
+            });
+            return;
+          }
+        }
+      }
+    }
+    setState(() => _msError = null);
     try {
       await _saveSelectedAddOns();
       if (_hasNewVariants) await _saveNewVariantSelections();
@@ -310,26 +403,30 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
       // New productAttribute variant system: build variant_info from selections
       if (_hasNewVariants && updatedProduct.variant_info == null) {
         final Map<String, String> variantOptions = {};
+        final List<String> skuParts = [];
         for (final cfg in widget.productModel.productAttributes) {
           if (cfg.type == 'SS') {
             final selId = _ssSel[cfg.attributeId];
             final matches = cfg.options.where((o) => o.id == selId);
             if (matches.isNotEmpty) {
               variantOptions[cfg.attributeTitle] = matches.first.name;
+              skuParts.add(matches.first.name);
             }
           } else {
             final selIds = _msSel[cfg.attributeId] ?? {};
-            final names = cfg.options
-                .where((o) => selIds.contains(o.id))
-                .map((o) => o.name)
-                .join(', ');
+            final selectedOpts = cfg.options.where((o) => selIds.contains(o.id)).toList();
+            final names = selectedOpts.map((o) => o.name).join(', ');
             if (names.isNotEmpty) {
               variantOptions[cfg.attributeTitle] = names;
+              skuParts.add(selectedOpts.map((o) => o.name).join('-'));
             }
           }
         }
         if (variantOptions.isNotEmpty) {
-          updatedProduct.variant_info = VariantInfo(variant_options: variantOptions);
+          updatedProduct.variant_info = VariantInfo(
+            variant_options: variantOptions,
+            variant_sku: skuParts.join('-'),
+          );
         }
       }
 
@@ -497,7 +594,38 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
                 color: bg,
                 border: Border(top: BorderSide(color: divColor, width: 1)),
               ),
-              child: Row(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (_msError != null) ...[
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                      margin: const EdgeInsets.only(bottom: 10),
+                      decoration: BoxDecoration(
+                        color: AppThemeData.error500.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: AppThemeData.error500.withValues(alpha: 0.4)),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(Icons.error_outline, color: AppThemeData.error500, size: 16),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              _msError!,
+                              style: TextStyle(
+                                color: AppThemeData.error500,
+                                fontSize: 12,
+                                fontFamily: AppThemeData.medium,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                  Row(
                 children: [
                   Expanded(
                     child: Column(
@@ -540,7 +668,9 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
                     ),
                   ),
                 ],
-              ),
+              ),   // closes Row
+                ],
+              ),   // closes Column
             ),
           ),
         ],
@@ -911,103 +1041,179 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
 
   // ── Add-ons section ────────────────────────────────────────────────────────
   List<Widget> _buildAddOnsSection() {
+    final isDark = isDarkMode(context);
+    final locked = _addOnsLocked;
+
     return [
       _sectionHeader("Add-ons".tr()),
       const SizedBox(height: 10),
-      ...widget.productModel.addOnsTitle.asMap().entries.map((entry) {
-        final index = entry.key;
-        final title = entry.value.toString();
-        if (index >= widget.productModel.addOnsPrice.length || index >= selectedAddOns.length) {
-          return const SizedBox.shrink();
-        }
-        final price = widget.productModel.addOnsPrice[index].toString();
-        final isSelected = selectedAddOns[index] > 0;
 
-        return Container(
-          margin: const EdgeInsets.only(bottom: 10),
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      // Lock banner — shown when at least one MS group has no selection yet.
+      if (locked)
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
           decoration: BoxDecoration(
-            color: isSelected
-                ? AppThemeData.primary500.withValues(alpha: 0.05)
-                : (isDarkMode(context) ? AppThemeData.grey800.withValues(alpha: 0.5) : AppThemeData.grey50),
-            border: Border.all(
-              color: isSelected
-                  ? AppThemeData.primary500.withValues(alpha: 0.4)
-                  : (isDarkMode(context) ? AppThemeData.grey700 : AppThemeData.grey200),
-              width: isSelected ? 1.5 : 1,
-            ),
+            color: isDark ? AppThemeData.grey800 : AppThemeData.grey50,
             borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: isDark ? AppThemeData.grey700 : AppThemeData.grey200,
+            ),
           ),
           child: Row(
             children: [
+              Icon(Icons.lock_outline_rounded,
+                  size: 18,
+                  color: isDark ? AppThemeData.grey500 : AppThemeData.grey400),
+              const SizedBox(width: 10),
               Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(title, style: TextStyle(
-                      fontSize: 14, fontWeight: FontWeight.w600,
-                      color: isDarkMode(context) ? AppThemeData.grey100 : AppThemeData.grey800,
-                      fontFamily: AppThemeData.medium,
-                    )),
-                    const SizedBox(height: 2),
-                    Text("+ ${amountShow(amount: productCommissionPrice(price))}",
-                        style: const TextStyle(fontSize: 13, color: AppThemeData.primary500, fontFamily: AppThemeData.medium)),
-                  ],
-                ),
-              ),
-              Container(
-                decoration: BoxDecoration(
-                  border: Border.all(
-                    color: isSelected ? AppThemeData.primary500 : (isDarkMode(context) ? AppThemeData.grey700 : AppThemeData.grey300),
-                    width: 1.5,
+                child: Text(
+                  'Select your options above to unlock add-ons'.tr(),
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontFamily: AppThemeData.regular,
+                    color: isDark ? AppThemeData.grey400 : AppThemeData.grey500,
                   ),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    GestureDetector(
-                      onTap: selectedAddOns[index] > 0 ? () => _updateAddOnQty(index, -1) : null,
-                      child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 150),
-                        width: 30, height: 30,
-                        decoration: BoxDecoration(
-                          color: isSelected ? AppThemeData.primary500 : (isDarkMode(context) ? AppThemeData.grey700 : AppThemeData.grey200),
-                          borderRadius: const BorderRadius.only(topLeft: Radius.circular(6), bottomLeft: Radius.circular(6)),
-                        ),
-                        child: Icon(Icons.remove, size: 14, color: isSelected ? Colors.white : AppThemeData.grey500),
-                      ),
-                    ),
-                    SizedBox(
-                      width: 32, height: 30,
-                      child: Center(child: Text(
-                        selectedAddOns[index].toString(),
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          fontSize: 14, fontWeight: FontWeight.bold,
-                          color: isDarkMode(context) ? AppThemeData.grey100 : AppThemeData.grey900,
-                          fontFamily: AppThemeData.semiBold,
-                        ),
-                      )),
-                    ),
-                    GestureDetector(
-                      onTap: () => _updateAddOnQty(index, 1),
-                      child: Container(
-                        width: 30, height: 30,
-                        decoration: const BoxDecoration(
-                          color: AppThemeData.primary500,
-                          borderRadius: BorderRadius.only(topRight: Radius.circular(6), bottomRight: Radius.circular(6)),
-                        ),
-                        child: const Icon(Icons.add, size: 14, color: Colors.white),
-                      ),
-                    ),
-                  ],
                 ),
               ),
             ],
           ),
-        );
-      }).toList(),
+        )
+      else
+        ...widget.productModel.addOnsTitle.asMap().entries.map((entry) {
+          final index = entry.key;
+          final title = entry.value.toString();
+          if (index >= widget.productModel.addOnsPrice.length ||
+              index >= selectedAddOns.length) {
+            return const SizedBox.shrink();
+          }
+          final price = widget.productModel.addOnsPrice[index].toString();
+          final isSelected = selectedAddOns[index] > 0;
+
+          return Container(
+            margin: const EdgeInsets.only(bottom: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            decoration: BoxDecoration(
+              color: isSelected
+                  ? AppThemeData.primary500.withValues(alpha: 0.05)
+                  : (isDark
+                      ? AppThemeData.grey800.withValues(alpha: 0.5)
+                      : AppThemeData.grey50),
+              border: Border.all(
+                color: isSelected
+                    ? AppThemeData.primary500.withValues(alpha: 0.4)
+                    : (isDark ? AppThemeData.grey700 : AppThemeData.grey200),
+                width: isSelected ? 1.5 : 1,
+              ),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: isDark
+                              ? AppThemeData.grey100
+                              : AppThemeData.grey800,
+                          fontFamily: AppThemeData.medium,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        "+ ${amountShow(amount: productCommissionPrice(price))}",
+                        style: const TextStyle(
+                            fontSize: 13,
+                            color: AppThemeData.primary500,
+                            fontFamily: AppThemeData.medium),
+                      ),
+                    ],
+                  ),
+                ),
+                Container(
+                  decoration: BoxDecoration(
+                    border: Border.all(
+                      color: isSelected
+                          ? AppThemeData.primary500
+                          : (isDark
+                              ? AppThemeData.grey700
+                              : AppThemeData.grey300),
+                      width: 1.5,
+                    ),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      GestureDetector(
+                        onTap: selectedAddOns[index] > 0
+                            ? () => _updateAddOnQty(index, -1)
+                            : null,
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 150),
+                          width: 30,
+                          height: 30,
+                          decoration: BoxDecoration(
+                            color: isSelected
+                                ? AppThemeData.primary500
+                                : (isDark
+                                    ? AppThemeData.grey700
+                                    : AppThemeData.grey200),
+                            borderRadius: const BorderRadius.only(
+                                topLeft: Radius.circular(6),
+                                bottomLeft: Radius.circular(6)),
+                          ),
+                          child: Icon(Icons.remove,
+                              size: 14,
+                              color: isSelected
+                                  ? Colors.white
+                                  : AppThemeData.grey500),
+                        ),
+                      ),
+                      SizedBox(
+                        width: 32,
+                        height: 30,
+                        child: Center(
+                          child: Text(
+                            selectedAddOns[index].toString(),
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.bold,
+                              color: isDark
+                                  ? AppThemeData.grey100
+                                  : AppThemeData.grey900,
+                              fontFamily: AppThemeData.semiBold,
+                            ),
+                          ),
+                        ),
+                      ),
+                      GestureDetector(
+                        onTap: () => _updateAddOnQty(index, 1),
+                        child: Container(
+                          width: 30,
+                          height: 30,
+                          decoration: const BoxDecoration(
+                            color: AppThemeData.primary500,
+                            borderRadius: BorderRadius.only(
+                                topRight: Radius.circular(6),
+                                bottomRight: Radius.circular(6)),
+                          ),
+                          child:
+                              const Icon(Icons.add, size: 14, color: Colors.white),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          );
+        }).toList(),
     ];
   }
 

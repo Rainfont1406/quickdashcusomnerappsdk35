@@ -117,7 +117,7 @@ class _CartOptionsSheetState extends State<CartOptionsSheet> {
           ),
 
           Padding(
-            padding: const EdgeInsets.only(left: 12.0, right: 12, bottom: 12),
+            padding: EdgeInsets.only(left: 12.0, right: 12, bottom: 12 + MediaQuery.of(context).padding.bottom),
             child: CupertinoButton(
                 child: Text(
                   'Remove from Cart'.tr(),

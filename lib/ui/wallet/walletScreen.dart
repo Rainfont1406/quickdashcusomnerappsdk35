@@ -541,11 +541,12 @@ class WalletScreenState extends State<WalletScreen> {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return _buildTransactionSkeleton(dark);
         }
-        if (snapshot.data!.docs.isEmpty) {
+        final docs = snapshot.data?.docs ?? [];
+        if (docs.isEmpty) {
           return _buildHistoryEmptyState(dark);
         } else {
           // Sort newest-first client-side (avoids requiring a Firestore composite index)
-          final sortedDocs = List<DocumentSnapshot>.from(snapshot.data!.docs)
+          final sortedDocs = List<DocumentSnapshot>.from(docs)
             ..sort((a, b) {
               final aTs = (a.data() as Map<String, dynamic>)['date'];
               final bTs = (b.data() as Map<String, dynamic>)['date'];
@@ -961,6 +962,7 @@ class WalletScreenState extends State<WalletScreen> {
                                           .doc(topupTranHistory.order_id)
                                           .get()
                                           .then((value) {
+                                        if (!value.exists || value.data() == null) return;
                                         OrderModel orderModel = OrderModel.fromJson(value.data()!);
                                         push(context, OrderDetailsScreen(orderModel: orderModel));
                                       });

@@ -14,12 +14,10 @@ class UserAvatar extends StatelessWidget {
 
   // Extract initials
   String getInitials(String name) {
-    final names = name.trim().split(' ');
-    if (names.length == 1) {
-      return names.first[0].toUpperCase();
-    } else {
-      return (names[0][0] + names[1][0]).toUpperCase();
-    }
+    final names = name.trim().split(' ').where((s) => s.isNotEmpty).toList();
+    if (names.isEmpty) return '?';
+    if (names.length == 1) return names.first[0].toUpperCase();
+    return (names[0][0] + names[1][0]).toUpperCase();
   }
 
   // Generate a color based on the name

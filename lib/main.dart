@@ -26,6 +26,7 @@ import 'package:firebase_auth/firebase_auth.dart' as auth;
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_easyloading/flutter_easyloading.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -68,6 +69,14 @@ void main() async {
   );
 
   await UserPreference.init();
+
+  // App is portrait-only by design (no screen has a responsive landscape
+  // layout) — enforced here too since Android split-screen/freeform
+  // multi-window can override the manifest's screenOrientation attribute.
+  await SystemChrome.setPreferredOrientations([
+    DeviceOrientation.portraitUp,
+    DeviceOrientation.portraitDown,
+  ]);
 
   runApp(
     MultiProvider(
@@ -148,7 +157,7 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
           .doc("Version")
           .get()
           .then((value) {
-        appVersion = value.data()!['app_version'].toString();
+        if (value.exists) appVersion = value.data()!['app_version'].toString();
       });
 
       await FireStoreUtils.firestore
@@ -156,7 +165,7 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
           .doc("googleMapKey")
           .get()
           .then((value) {
-        GOOGLE_API_KEY = value.data()!['key'].toString();
+        if (value.exists) GOOGLE_API_KEY = value.data()!['key'].toString();
       });
 
       await FireStoreUtils.firestore
@@ -164,7 +173,7 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
           .doc("DriverNearBy")
           .get()
           .then((value) {
-        selectedMapType = value.data()!['selectedMapType'].toString();
+        if (value.exists) selectedMapType = value.data()!['selectedMapType'].toString();
       });
 
       await FireStoreUtils.firestore
@@ -172,8 +181,10 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
           .doc("notification_setting")
           .get()
           .then((value) {
-        senderId = value.data()!['senderId'].toString();
-        jsonNotificationFileURL = value.data()!['serviceJson'].toString();
+        if (value.exists) {
+          senderId = value.data()!['senderId'].toString();
+          jsonNotificationFileURL = value.data()!['serviceJson'].toString();
+        }
       });
 
       await FireStoreUtils.firestore
@@ -181,13 +192,13 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
           .doc("placeHolderImage")
           .get()
           .then((value) {
-        placeholderImage = value.data()!['image'].toString();
+        if (value.exists) placeholderImage = value.data()!['image'].toString();
       });
 
       SharedPreferences sp = await SharedPreferences.getInstance();
-      if (sp.getString("languageCode") != null ||
-          sp.getString("languageCode")!.isNotEmpty) {
-        context.setLocale(Locale(sp.getString("languageCode") ?? "en"));
+      final langCode = sp.getString("languageCode");
+      if (langCode != null && langCode.isNotEmpty) {
+        context.setLocale(Locale(langCode));
       }
     } catch (e) {
       debugPrint(e.toString());
@@ -599,127 +610,57 @@ class OnBoardingState extends State<OnBoarding> with TickerProviderStateMixin {
 
   @override
   Widget build(BuildContext context) {
-    // ── White background — clean, premium, brand-first ────────────────
-    const Color bg = Color(0xFFFAFAFF); // pure white with the faintest cool tint
-    const Color brand = AppThemeData.primary500;
+    final screenWidth = MediaQuery.of(context).size.width;
+    final bottomPad = MediaQuery.of(context).padding.bottom;
 
     return Scaffold(
-      backgroundColor: bg,
-      body: Container(
-        width: double.infinity,
-        height: double.infinity,
-        color: bg,
+      backgroundColor: const Color(0xFF7C3AED),
+      body: FadeTransition(
+        opacity: _logoOpacity,
         child: Stack(
           children: [
-            // ── Very subtle blue tint circles for depth ───────────────
-            Positioned(top: -80, right: -80,   child: _bgCircle(260, 0.55)),
-            Positioned(top: 70,  right: 20,    child: _bgCircle(100, 0.40)),
-            Positioned(bottom: -100, left: -100, child: _bgCircle(320, 0.50)),
-            Positioned(bottom: 120, left: 20,  child: _bgCircle(80,  0.35)),
+            // ── Full-screen gradient background ───────────────────────
+            Container(
+              width: double.infinity,
+              height: double.infinity,
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [Color(0xFF9651F5), Color(0xFF7C3AED)],
+                ),
+              ),
+            ),
 
-            // ── Main content ──────────────────────────────────────────
-            SafeArea(
-              child: Column(
-                children: [
-                  const Spacer(flex: 3),
+            // ── Centered logo image ───────────────────────────────────
+            Center(
+              child: Image.asset(
+                'assets/images/quickdash_icon_1024.png',
+                width: screenWidth,
+                fit: BoxFit.fitWidth,
+              ),
+            ),
 
-                  // ── Logo mark ───────────────────────────────────────
-                  FadeTransition(
-                    opacity: _logoOpacity,
-                    child: ScaleTransition(
-                      scale: _logoScale,
-                      child: _buildLogoMark(),
-                    ),
-                  ),
-
-                  const SizedBox(height: 28),
-
-                  // ── Brand name ──────────────────────────────────────
-                  FadeTransition(
-                    opacity: _titleOpacity,
-                    child: SlideTransition(
-                      position: _titleSlide,
-                      child: const Text(
-                        'QuickDash',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                          color: brand,
-                          fontSize: 40,
-                          fontFamily: AppThemeData.bold,
-                          letterSpacing: 0.2,
-                          height: 1.1,
-                        ),
-                      ),
-                    ),
-                  ),
-
-                  const SizedBox(height: 18),
-
-                  // ── Service pills row ───────────────────────────────
-                  FadeTransition(
-                    opacity: _taglineOpacity,
-                    child: SlideTransition(
-                      position: _taglineSlide,
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          _servicePill('Delivery'),
-                          const SizedBox(width: 8),
-                          _servicePill('Dine-In'),
-                          const SizedBox(width: 8),
-                          _servicePill('TakeAway'),
-                        ],
-                      ),
-                    ),
-                  ),
-
-                  const SizedBox(height: 10),
-
-                  // ── Brand promise ───────────────────────────────────
-                  FadeTransition(
-                    opacity: _sublineOpacity,
-                    child: Text(
-                      'All in One with QuickDash',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: AppThemeData.primary300,
-                        fontSize: 13,
-                        fontFamily: AppThemeData.regular,
-                        letterSpacing: 0.4,
-                      ),
-                    ),
-                  ),
-
-                  const Spacer(flex: 3),
-
-                  // ── Loading indicator ───────────────────────────────
-                  FadeTransition(
-                    opacity: _loadingOpacity,
-                    child: const SizedBox(
+            // ── Loading indicator at bottom ───────────────────────────
+            Positioned(
+              bottom: bottomPad + 48,
+              left: 0,
+              right: 0,
+              child: FadeTransition(
+                opacity: _loadingOpacity,
+                child: const Column(
+                  children: [
+                    SizedBox(
                       width: 22,
                       height: 22,
                       child: CircularProgressIndicator(
-                        valueColor: AlwaysStoppedAnimation<Color>(brand),
+                        valueColor:
+                            AlwaysStoppedAnimation<Color>(Colors.white54),
                         strokeWidth: 2.0,
                       ),
                     ),
-                  ),
-                  const SizedBox(height: 12),
-                  FadeTransition(
-                    opacity: _loadingOpacity,
-                    child: Text(
-                      'Getting things ready…',
-                      style: TextStyle(
-                        color: AppThemeData.primary300,
-                        fontSize: 12,
-                        fontFamily: AppThemeData.regular,
-                        letterSpacing: 0.6,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 52),
-                ],
+                  ],
+                ),
               ),
             ),
           ],

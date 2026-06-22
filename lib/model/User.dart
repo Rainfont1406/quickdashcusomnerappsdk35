@@ -126,7 +126,7 @@ class User with ChangeNotifier {
             );
 
   String fullName() {
-    return ((email.isEmpty) && (phoneNumber.isEmpty)) ? 'Login to Manage' : '$firstName $lastName';
+    return ((email.isEmpty) && (phoneNumber.isEmpty)) ? 'Login to Manage' : '$firstName $lastName'.trim();
   }
 
   factory User.fromJson(Map<String, dynamic> parsedJson) {

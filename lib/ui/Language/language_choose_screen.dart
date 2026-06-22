@@ -44,6 +44,7 @@ class _LanguageChooceScreenState extends State<LanguageChooseScreen> with Single
   void loadData() async {
     languageList.clear();
     await FireStoreUtils.firestore.collection(Setting).doc("languages").get().then((value) {
+      if (!value.exists || value.data() == null) return;
       List list = value.data()!["list"];
       for (int i = 0; i < list.length; i++) {
         if (list[i]['isActive'] == true) {

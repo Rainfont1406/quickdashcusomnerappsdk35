@@ -8,6 +8,7 @@ import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/dineInScreen/dine_in_restaurant_details_screen.dart';
 import 'package:emartconsumer/ui/vendorProductsScreen/newVendorProductsScreen.dart';
+import 'package:emartconsumer/widget/coming_soon_view.dart';
 import 'package:flutter/material.dart';
 
 class CategoryDetailsScreen extends StatefulWidget {
@@ -53,6 +54,18 @@ class _CategoryDetailsScreenState extends State<CategoryDetailsScreen>
 
   @override
   Widget build(BuildContext context) {
+    return ValueListenableBuilder<bool>(
+      valueListenable: isDeliveryActiveNotifier,
+      builder: (context, deliveryActive, _) {
+        if (currentOrderTypeGlobal == 'Delivery'.tr() && !deliveryActive) {
+          return ComingSoonScreen(message: deliveryOffMessageNotifier.value);
+        }
+        return _buildScreen(context);
+      },
+    );
+  }
+
+  Widget _buildScreen(BuildContext context) {
     return Scaffold(
       backgroundColor:
           isDarkMode(context) ? AppThemeData.surfaceDark : AppThemeData.surface,

@@ -9,6 +9,7 @@ import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
+import 'package:emartconsumer/ui/container/ContainerScreen.dart';
 import 'package:emartconsumer/ui/home/HomeScreen.dart';
 import 'package:emartconsumer/ui/orderDetailsScreen/OrderDetailsScreen.dart';
 import 'package:flutter/material.dart';
@@ -18,9 +19,14 @@ enum _OrderState { processing, success, error }
 
 class PlaceOrderScreen extends StatefulWidget {
   final OrderModel orderModel;
+  // true = payment already collected (Razorpay / online); shows payment-specific steps
+  final bool isPaymentVerified;
 
-  const PlaceOrderScreen({Key? key, required this.orderModel})
-      : super(key: key);
+  const PlaceOrderScreen({
+    Key? key,
+    required this.orderModel,
+    this.isPaymentVerified = false,
+  }) : super(key: key);
 
   @override
   _PlaceOrderScreenState createState() => _PlaceOrderScreenState();
@@ -35,11 +41,7 @@ class _PlaceOrderScreenState extends State<PlaceOrderScreen>
 
   // ── Step messages ─────────────────────────────────────────────────────────
   int _currentStep = 0;
-  final List<String> _steps = [
-    'Creating your order',
-    'Notifying restaurant',
-    'Finalising your booking',
-  ];
+  late final List<String> _steps;
   Timer? _stepTimer;
 
   // ── Animations ────────────────────────────────────────────────────────────
@@ -55,6 +57,18 @@ class _PlaceOrderScreenState extends State<PlaceOrderScreen>
   @override
   void initState() {
     super.initState();
+
+    _steps = widget.isPaymentVerified
+        ? [
+            'Payment Successful',
+            'Payment in Transit',
+            'Order Confirmed',
+          ]
+        : [
+            'Creating your order',
+            'Notifying restaurant',
+            'Finalising your booking',
+          ];
 
     _pulseCtrl = AnimationController(
         vsync: this, duration: const Duration(milliseconds: 1100))
@@ -176,15 +190,21 @@ class _PlaceOrderScreenState extends State<PlaceOrderScreen>
     if (_navigationStarted || !mounted) return;
     _navigationStarted = true;
 
-    Navigator.of(context).pushAndRemoveUntil(
+    // Capture nav and orderModel before the first push — pushAndRemoveUntil
+    // deactivates this widget's context, so a second Navigator.of(context)
+    // call would trigger the _dependents.isEmpty assertion.
+    final nav = Navigator.of(context);
+    final orderModel = widget.orderModel;
+
+    nav.pushAndRemoveUntil(
       MaterialPageRoute(
-        builder: (_) => HomeScreen(user: MyAppState.currentUser),
+        builder: (_) => ContainerScreen(user: MyAppState.currentUser),
       ),
       (_) => false,
     );
-    Navigator.of(context).push(MaterialPageRoute(
+    nav.push(MaterialPageRoute(
       builder: (_) => OrderDetailsScreen(
-        orderModel: widget.orderModel,
+        orderModel: orderModel,
         hideBackButton: false,
       ),
     ));

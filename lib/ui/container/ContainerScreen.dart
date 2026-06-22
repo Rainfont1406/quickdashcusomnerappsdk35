@@ -138,14 +138,49 @@ class _ContainerScreen extends State<ContainerScreen> {
       sound: true,
     );
     getTaxList();
+    _listenDeliveryGate();
+  }
+
+  // Single, app-wide live listener for the Delivery on/off toggle, feeding
+  // the global isDeliveryActiveNotifier/deliveryOffMessageNotifier (see
+  // constants.dart) — ContainerScreen is the persistent shell for the whole
+  // logged-in session, so this stays alive regardless of which screen is
+  // currently shown, instead of every gated screen running its own listener.
+  StreamSubscription<DocumentSnapshot>? _deliveryGateSub;
+
+  void _listenDeliveryGate() {
+    final sectionId = sectionConstantModel?.id;
+    if (sectionId == null || sectionId.isEmpty) return;
+    isDeliveryActiveNotifier.value = sectionConstantModel?.deliveryActive ?? true;
+    deliveryOffMessageNotifier.value = sectionConstantModel?.deliveryOffMessage ?? '';
+    _deliveryGateSub = FireStoreUtils.firestore
+        .collection(SECTION)
+        .doc(sectionId)
+        .snapshots()
+        .listen((snap) {
+      if (!snap.exists) return;
+      final data = snap.data();
+      if (data == null) return;
+      isDeliveryActiveNotifier.value = data['delivery_active'] ?? true;
+      deliveryOffMessageNotifier.value = data['delivery_off_message'] ?? '';
+    });
+  }
+
+  @override
+  void dispose() {
+    _deliveryGateSub?.cancel();
+    super.dispose();
   }
 
   getTaxList() async {
-    await FireStoreUtils().getTaxList(sectionConstantModel!.id).then((value) {
-      if (value != null) {
-        taxList = value;
-      }
-    });
+    if (sectionConstantModel == null) return;
+    try {
+      await FireStoreUtils().getTaxList(sectionConstantModel!.id).then((value) {
+        if (value != null) taxList = value;
+      });
+    } catch (e) {
+      debugPrint('getTaxList error: $e');
+    }
   }
 
   @override
@@ -230,7 +265,7 @@ class _ContainerScreen extends State<ContainerScreen> {
                     const CuisinesScreen(),
                   ),
                 ),
-                if (sectionConstantModel!.dineInActive!)
+                if (sectionConstantModel?.dineInActive == true)
                   _drawerItem(
                     sel: DrawerSelection.dineIn,
                     icon: Icons.restaurant_menu_rounded,
@@ -239,7 +274,7 @@ class _ContainerScreen extends State<ContainerScreen> {
                     onTap: () => _navigate(
                       DrawerSelection.dineIn,
                       'Dine-In'.tr(),
-                      DineInScreen(user: MyAppState.currentUser!),
+                      DineInScreen(user: MyAppState.currentUser ?? User()),
                     ),
                   ),
 
@@ -281,7 +316,7 @@ class _ContainerScreen extends State<ContainerScreen> {
                       const WalletScreen(),
                     ),
                   ),
-                if (sectionConstantModel!.dineInActive!)
+                if (sectionConstantModel?.dineInActive == true)
                   _drawerItem(
                     sel: DrawerSelection.MyBooking,
                     icon: Icons.book_online_rounded,
@@ -677,9 +712,11 @@ class _ContainerScreen extends State<ContainerScreen> {
               pushAndRemoveUntil(context, const LoginScreen());
             } else {
               ShowToastDialog.showLoader('Please wait');
-              MyAppState.currentUser!.lastOnlineTimestamp = Timestamp.now();
-              MyAppState.currentUser!.fcmToken = '';
-              await FireStoreUtils.updateCurrentUser(MyAppState.currentUser!);
+              if (MyAppState.currentUser != null) {
+                MyAppState.currentUser!.lastOnlineTimestamp = Timestamp.now();
+                MyAppState.currentUser!.fcmToken = '';
+                await FireStoreUtils.updateCurrentUser(MyAppState.currentUser!);
+              }
               await auth.FirebaseAuth.instance.signOut();
               // Clear persisted phone user session
               final prefs = await SharedPreferences.getInstance();

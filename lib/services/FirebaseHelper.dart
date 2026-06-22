@@ -82,6 +82,22 @@ class FireStoreUtils {
     return auth.FirebaseAuth.instance.currentUser?.uid ?? '';
   }
 
+  /// Returns the current time according to Firestore's server clock.
+  /// Writes a sentinel document to get a server-authoritative timestamp so that
+  /// device clock manipulation cannot be used to unlock time-limited discounts.
+  /// Falls back to device time if the write fails (e.g. offline).
+  static Future<DateTime> getServerTime() async {
+    try {
+      final ref = firestore.collection('_serverPing').doc('ping');
+      await ref.set({'t': FieldValue.serverTimestamp()});
+      final snap = await ref.get();
+      final ts = snap.data()?['t'] as Timestamp?;
+      return ts?.toDate() ?? DateTime.now();
+    } catch (_) {
+      return DateTime.now();
+    }
+  }
+
   static Future<bool> userExistOrNot(String uid) async {
     bool isExist = false;
 
@@ -177,7 +193,7 @@ class FireStoreUtils {
     ReferralModel? referralModel;
     try {
       await firestore.collection(REFERRAL).doc(MyAppState.currentUser!.userID).get().then((value) {
-        referralModel = ReferralModel.fromJson(value.data()!);
+        if (value.exists) referralModel = ReferralModel.fromJson(value.data()!);
       });
     } catch (e, s) {
       print('FireStoreUtils.firebaseCreateNewUser $e $s');
@@ -338,6 +354,71 @@ class FireStoreUtils {
       print("nulllll");
       return null;
     }
+  }
+
+  /// Sums a vendor's per-product delivery sales over the last 30 daily
+  /// buckets (written by the vendor app at order-completion time — see
+  /// FireStoreUtils.updateOrder there). Returns {productId: unitsSold},
+  /// empty if the vendor has no sales data yet.
+  static Future<Map<String, int>> getRolling30DaySales(String vendorId) async {
+    final Map<String, int> totals = {};
+    try {
+      final snapshot = await firestore
+          .collection(VENDORS)
+          .doc(vendorId)
+          .collection('dailyProductSales')
+          .get();
+      for (final doc in snapshot.docs) {
+        final products = doc.data()['products'] as Map<String, dynamic>?;
+        if (products == null) continue;
+        products.forEach((productId, count) {
+          final n = (count as num?)?.toInt() ?? 0;
+          totals[productId] = (totals[productId] ?? 0) + n;
+        });
+      }
+    } catch (_) {}
+    return totals;
+  }
+
+  /// Up to [max] products to show in a vendor's delivery-card carousel.
+  /// Priority: rolling-30-day sales ranking → best-discounted products →
+  /// lowest-priced products. [vendorProducts] should already be filtered to
+  /// this vendor's published, delivery-enabled products.
+  static Future<List<ProductModel>> getCarouselProducts(
+      String vendorId, List<ProductModel> vendorProducts,
+      {int max = 5}) async {
+    if (vendorProducts.isEmpty) return [];
+
+    final salesCounts = await getRolling30DaySales(vendorId);
+    if (salesCounts.isNotEmpty) {
+      final ranked = vendorProducts
+          .where((p) => (salesCounts[p.id] ?? 0) > 0)
+          .toList()
+        ..sort((a, b) =>
+            (salesCounts[b.id] ?? 0).compareTo(salesCounts[a.id] ?? 0));
+      if (ranked.isNotEmpty) return ranked.take(max).toList();
+    }
+
+    double discountPercent(ProductModel p) {
+      try {
+        final double orig = double.parse(p.price);
+        final double disc = double.parse(p.disPrice ?? '0');
+        if (orig > 0 && disc > 0 && orig > disc) {
+          return ((orig - disc) / orig) * 100;
+        }
+      } catch (_) {}
+      return 0;
+    }
+
+    final discounted =
+        vendorProducts.where((p) => discountPercent(p) > 0).toList()
+          ..sort((a, b) => discountPercent(b).compareTo(discountPercent(a)));
+    if (discounted.isNotEmpty) return discounted.take(max).toList();
+
+    final byPrice = List<ProductModel>.from(vendorProducts)
+      ..sort((a, b) =>
+          (double.tryParse(a.price) ?? 0).compareTo(double.tryParse(b.price) ?? 0));
+    return byPrice.take(max).toList();
   }
 
   final geo = Geoflutterfire();
@@ -2535,7 +2616,7 @@ class FireStoreUtils {
   getContactUs() async {
     Map<String, dynamic> contactData = {};
     await firestore.collection(Setting).doc(CONTACT_US).get().then((value) {
-      contactData = value.data()!;
+      if (value.exists && value.data() != null) contactData = value.data()!;
     });
 
     return contactData;

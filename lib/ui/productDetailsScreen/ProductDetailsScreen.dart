@@ -28,6 +28,7 @@ import 'package:emartconsumer/ui/cartScreen/CartScreen.dart';
 import 'package:emartconsumer/ui/container/ContainerScreen.dart';
 import 'package:emartconsumer/ui/vendorProductsScreen/review.dart';
 import 'package:emartconsumer/services/app_dialog.dart';
+import 'package:emartconsumer/widget/coming_soon_view.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_rating_bar/flutter_rating_bar.dart';
 import 'package:provider/provider.dart';
@@ -74,25 +75,58 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
 
   statusCheck() {
     final now = DateTime.now();
-    var day = DateFormat('EEEE', 'en_US').format(now);
-    var date = DateFormat('dd-MM-yyyy').format(now);
+    final day = DateFormat('EEEE', 'en_US').format(now);
+    final date = DateFormat('dd-MM-yyyy').format(now);
+    final yesterday = now.subtract(const Duration(days: 1));
+    final yesterdayDay = DateFormat('EEEE', 'en_US').format(yesterday);
+    final yesterdayDate = DateFormat('dd-MM-yyyy').format(yesterday);
+    bool scheduleOpen = false;
+
+    // Mirrors VendorModel.isOpen() (home screen card) and the fixed
+    // statusCheck() in newVendorProductsScreen.dart. The previous version
+    // here had three separate bugs: (1) no midnight-crossing adjustment, so
+    // an overnight slot like 22:00-02:00 produced an inverted range that
+    // could never match; (2) no check of yesterday's slot extending into
+    // today, so an overnight slot already in progress from the day before
+    // was invisible; (3) it never looked at vendorModel.reststatus at all,
+    // so this screen's "Add to Cart" button stayed enabled even when the
+    // vendor had manually paused orders.
     for (var element in widget.vendorModel.workingHours) {
       if (day == element.day.toString()) {
-        if (element.timeslot!.isNotEmpty) {
-          for (var element in element.timeslot!) {
-            var start = DateFormat("dd-MM-yyyy HH:mm")
-                .parse(date + " " + element.from.toString());
+        for (var slot in (element.timeslot ?? [])) {
+          if (slot.from == null || slot.to == null) continue;
+          final start =
+              DateFormat("dd-MM-yyyy HH:mm").parse("$date ${slot.from}");
+          var end = DateFormat("dd-MM-yyyy HH:mm").parse("$date ${slot.to}");
+          if (!end.isAfter(start)) end = end.add(const Duration(days: 1));
+          if (isCurrentDateInRange(start, end)) scheduleOpen = true;
+        }
+      }
+    }
+    if (!scheduleOpen) {
+      for (var element in widget.vendorModel.workingHours) {
+        if (yesterdayDay == element.day.toString()) {
+          for (var slot in (element.timeslot ?? [])) {
+            if (slot.from == null || slot.to == null) continue;
+            final start = DateFormat("dd-MM-yyyy HH:mm")
+                .parse("$yesterdayDate ${slot.from}");
             var end = DateFormat("dd-MM-yyyy HH:mm")
-                .parse(date + " " + element.to.toString());
-            if (isCurrentDateInRange(start, end)) {
-              setState(() {
-                isOpen = true;
-              });
-            }
+                .parse("$yesterdayDate ${slot.to}");
+            if (end.isAfter(start)) continue; // doesn't cross midnight
+            end = end.add(const Duration(days: 1));
+            if (isCurrentDateInRange(start, end)) scheduleOpen = true;
           }
         }
       }
     }
+
+    // No working hours configured → treat as always schedulable (admin
+    // toggle alone decides availability).
+    if (widget.vendorModel.workingHours.isEmpty) scheduleOpen = true;
+
+    setState(() {
+      isOpen = widget.vendorModel.reststatus && scheduleOpen;
+    });
   }
 
   bool isCurrentDateInRange(DateTime startDate, DateTime endDate) {
@@ -345,6 +379,18 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    return ValueListenableBuilder<bool>(
+      valueListenable: isDeliveryActiveNotifier,
+      builder: (context, deliveryActive, _) {
+        if (selectedOrderType == 'Delivery'.tr() && !deliveryActive) {
+          return ComingSoonScreen(message: deliveryOffMessageNotifier.value);
+        }
+        return _buildScreen(context);
+      },
+    );
+  }
+
+  Widget _buildScreen(BuildContext context) {
     // A product has explicit order-type restrictions only when at least one flag is set.
     // Legacy products (all flags false) are treated as unrestricted.
     final bool _hasRestrictions = widget.productModel.deliveryOption ||
@@ -353,13 +399,15 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
     final bool _isDineaway = selectedOrderType == "Takeaway".tr() ||
         selectedOrderType == "Dineaway".tr();
 
+    final bool productSupportsDineaway =
+        widget.productModel.dineIn || widget.productModel.takeaway;
     bool showAddButton = !_hasRestrictions ||
-        (_isDineaway && widget.productModel.dineAway) ||
+        (_isDineaway && productSupportsDineaway) ||
         (selectedOrderType == "Delivery".tr() && widget.productModel.deliveryOption);
 
     String unavailabilityMessage = "";
     if (_hasRestrictions) {
-      if (_isDineaway && !widget.productModel.dineAway) {
+      if (_isDineaway && !productSupportsDineaway) {
         unavailabilityMessage = "This product is not available for DineAway";
       } else if (selectedOrderType == "Delivery".tr() &&
           !widget.productModel.deliveryOption) {
@@ -3543,7 +3591,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                     ),
                   ],
                 ),
-                padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 10),
+                padding: EdgeInsets.fromLTRB(30, 10, 30, 10 + MediaQuery.of(context).padding.bottom),
                 child: Row(
                   children: [
                     Expanded(
@@ -3638,7 +3686,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
           SnackBar(content: Text('Delivery order is not available.'.tr())));
         return;
       }
-      if (isDineawayMode && !productModel.dineAway) {
+      if (isDineawayMode && !productModel.dineIn && !productModel.takeaway) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('DineAway order is not available.'.tr())));
         return;
@@ -3778,7 +3826,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
           'service_perm_${widget.productModel.id}',
           jsonEncode({
             'delivery': widget.productModel.deliveryOption,
-            'dineaway': widget.productModel.dineAway,
+            'dineaway': widget.productModel.dineIn || widget.productModel.takeaway,
             'dineIn': widget.productModel.dineIn,
             'takeaway': widget.productModel.takeaway,
           }),

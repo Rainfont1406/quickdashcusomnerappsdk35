@@ -96,32 +96,47 @@ class _OrdersScreenState extends State<OrdersScreen> {
                 'assets/order_place_gif.gif',
               ),
             )
-          : StreamBuilder<List<OrderModel>>(
-              stream: ordersFuture,
-              builder: (context, snapshot) {
-                if (snapshot.connectionState == ConnectionState.waiting) {
-                  return Center(
-                    child: CircularProgressIndicator.adaptive(
-                      valueColor: AlwaysStoppedAnimation(AppThemeData.primary500),
-                    ),
-                  );
-                }
-                if (!snapshot.hasData || (snapshot.data?.isEmpty ?? true)) {
-                  return Center(
-                    child: showEmptyState('No Previous Orders'.tr(), context),
-                  );
-                } else {
-                  return ListView.builder(
-                    itemCount: snapshot.data!.length,
-                    padding: EdgeInsets.symmetric(
-                      horizontal: AppSpacing.spacing4,
-                      vertical: AppSpacing.spacing4,
-                    ),
-                    itemBuilder: (context, index) =>
-                        buildOrderItem(snapshot.data![index]),
-                  );
-                }
-              }),
+          : ValueListenableBuilder<bool>(
+              valueListenable: isDeliveryActiveNotifier,
+              builder: (context, deliveryActive, _) {
+                return StreamBuilder<List<OrderModel>>(
+                  stream: ordersFuture,
+                  builder: (context, snapshot) {
+                    if (snapshot.connectionState == ConnectionState.waiting) {
+                      return Center(
+                        child: CircularProgressIndicator.adaptive(
+                          valueColor: AlwaysStoppedAnimation(AppThemeData.primary500),
+                        ),
+                      );
+                    }
+                    // Delivery is off: hide only Delivery-type orders from
+                    // history (Dineaway/Takeaway order history stays visible),
+                    // same per-order isTakeaway check CartScreen uses for tax.
+                    final visibleOrders = (snapshot.data ?? []).where((order) {
+                      final bool isDeliveryOrder =
+                          order.takeAway == false || order.takeAway == null;
+                      return !(isDeliveryOrder && !deliveryActive);
+                    }).toList();
+
+                    if (visibleOrders.isEmpty) {
+                      return Center(
+                        child: showEmptyState('No Previous Orders'.tr(), context),
+                      );
+                    } else {
+                      return ListView.builder(
+                        itemCount: visibleOrders.length,
+                        padding: EdgeInsets.symmetric(
+                          horizontal: AppSpacing.spacing4,
+                          vertical: AppSpacing.spacing4,
+                        ),
+                        itemBuilder: (context, index) =>
+                            buildOrderItem(visibleOrders[index]),
+                      );
+                    }
+                  },
+                );
+              },
+            ),
     );
   }
 

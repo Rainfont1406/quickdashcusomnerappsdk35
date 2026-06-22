@@ -54,7 +54,7 @@ class _ViewAllPopularFoodNearByScreenState
     final filtered = <ProductModel>[];
     for (final product in allProducts) {
       final vendor = _vendorFor(product.vendorID);
-      if (vendor != null && (vendor.reststatus || vendor.isOpen())) {
+      if (vendor != null && vendor.isAcceptingOrders) {
         filtered.add(product);
       }
     }
@@ -219,7 +219,7 @@ class _ViewAllPopularFoodNearByScreenState
 
   Widget _buildProductCard(ProductModel product, VendorModel vendor) {
     final isDark = isDarkMode(context);
-    final isOpen = vendor.reststatus || vendor.isOpen();
+    final isOpen = vendor.isAcceptingOrders;
     return GestureDetector(
       onTap: () => push(context, NewVendorProductsScreen(vendorModel: vendor)),
       child: Padding(

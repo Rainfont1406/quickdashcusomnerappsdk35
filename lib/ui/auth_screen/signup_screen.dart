@@ -49,7 +49,6 @@ class _SignupScreenState extends State<SignupScreen> {
 
   String type = "";
   int phoneMaxLength = 10;
-  bool _showEmailForm = false;
 
   User userModel = User();
 
@@ -61,8 +60,6 @@ class _SignupScreenState extends State<SignupScreen> {
     if (type == "mobileNumber") {
       phoneNUmberEditingController.text = userModel.phoneNumber.toString();
       countryCodeEditingController.text = userModel.countryCode.toString();
-      // Mobile signup arrives with data pre-filled — show the form immediately
-      _showEmailForm = true;
     } else {
       if (countryCodeEditingController.text.isEmpty) {
         countryCodeEditingController.text = '+91';
@@ -305,52 +302,28 @@ class _SignupScreenState extends State<SignupScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: isDarkMode(context)
-          ? AppThemeData.surfaceDark
-          : const Color(0xFFF5F6FA),
-      body: GestureDetector(
-        onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
-        child: Column(
-          children: [
-            AuthHeader(
-              title: 'Create Your Account'.tr,
-              tagline:
-                  'Live restaurant menus. Direct ordering. No paper menus. Zero waiting time dining with QuickDash.',
-              subtitle: 'Join QuickDash and start enjoying faster dining experiences.'.tr,
-              showBackButton: true,
-            ),
-            Expanded(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.fromLTRB(24, 24, 24, 16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    AuthOutlinedButton(
-                      label: 'Sign up with Phone Number'.tr,
-                      iconPath: 'assets/icons/ic_phone.svg',
-                      onTap: () => push(context, const PhoneNumberScreen(isSignup: true)),
-                    ),
-                    const SizedBox(height: 16),
-                    AuthOutlinedButton(
-                      label: 'Sign up with Email Address'.tr,
-                      iconPath: 'assets/icons/ic_mail.svg',
-                      onTap: () {
-                        setState(() => _showEmailForm = !_showEmailForm);
-                      },
-                    ),
-                    AnimatedSize(
-                      duration: const Duration(milliseconds: 250),
-                      curve: Curves.easeInOut,
-                      child: _showEmailForm
-                          ? _buildEmailForm(context)
-                          : const SizedBox.shrink(),
-                    ),
-                  ],
+      backgroundColor: const Color(0xFF0D0620),
+      body: AuthBackground(
+        child: GestureDetector(
+          onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
+          child: Column(
+            children: [
+              AuthHeader(
+                title: 'Create Your Account'.tr,
+                subtitle: 'Join QuickDash and start enjoying faster dining experiences.'.tr,
+                showBackButton: true,
+              ),
+              Expanded(
+                child: AuthFormCard(
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.fromLTRB(24, 24, 24, 16),
+                  child: _buildEmailForm(context),
                 ),
               ),
-            ),
-            _buildFooter(context),
-          ],
+              ),
+              _buildFooter(context),
+            ],
+          ),
         ),
       ),
     );
@@ -360,9 +333,6 @@ class _SignupScreenState extends State<SignupScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const SizedBox(height: 24),
-        const AuthOrDivider(),
-        const SizedBox(height: 24),
         AuthFieldLabel(text: 'Full Name'.tr),
         AuthTextField(
           controller: fullNameEditingController,
@@ -395,36 +365,26 @@ class _SignupScreenState extends State<SignupScreen> {
             enabled: type != "mobileNumber",
             onChanged: (value) =>
                 _onCountryCodeChanged(value.dialCode.toString()),
-            dialogTextStyle: TextStyle(
-              color: isDarkMode(context)
-                  ? AppThemeData.grey50
-                  : AppThemeData.grey900,
+            dialogTextStyle: const TextStyle(
+              color: AppThemeData.grey50,
               fontWeight: FontWeight.w500,
               fontFamily: AppThemeData.medium,
             ),
-            dialogBackgroundColor: isDarkMode(context)
-                ? AppThemeData.grey800
-                : AppThemeData.grey100,
+            dialogBackgroundColor: AppThemeData.grey800,
             initialSelection: 'IN',
             favorite: const ['+91'],
             comparator: (a, b) =>
                 b.name!.compareTo(a.name.toString()),
-            textStyle: TextStyle(
+            textStyle: const TextStyle(
               fontSize: 14,
-              color: isDarkMode(context)
-                  ? AppThemeData.grey50
-                  : AppThemeData.grey900,
+              color: Colors.white,
               fontFamily: AppThemeData.medium,
             ),
-            searchDecoration: InputDecoration(
-              iconColor: isDarkMode(context)
-                  ? AppThemeData.grey50
-                  : AppThemeData.grey900,
+            searchDecoration: const InputDecoration(
+              iconColor: AppThemeData.grey50,
             ),
-            searchStyle: TextStyle(
-              color: isDarkMode(context)
-                  ? AppThemeData.grey50
-                  : AppThemeData.grey900,
+            searchStyle: const TextStyle(
+              color: AppThemeData.grey50,
               fontWeight: FontWeight.w500,
               fontFamily: AppThemeData.medium,
             ),
@@ -473,6 +433,25 @@ class _SignupScreenState extends State<SignupScreen> {
             }
           },
         ),
+        const SizedBox(height: 20),
+        const AuthOrDivider(),
+        const SizedBox(height: 16),
+        Center(
+          child: GestureDetector(
+            onTap: () => push(context, const PhoneNumberScreen(isSignup: true)),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Text(
+                'Sign up with Phone Number'.tr,
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.88),
+                  fontFamily: AppThemeData.semiBold,
+                  fontSize: 15,
+                ),
+              ),
+            ),
+          ),
+        ),
         const SizedBox(height: 8),
       ],
     );
@@ -491,9 +470,7 @@ class _SignupScreenState extends State<SignupScreen> {
               TextSpan(
                 text: 'Already have an account?  '.tr,
                 style: TextStyle(
-                  color: isDarkMode(context)
-                      ? AppThemeData.grey400
-                      : AppThemeData.grey500,
+                  color: Colors.white.withValues(alpha: 0.65),
                   fontFamily: AppThemeData.regular,
                   fontSize: 14,
                 ),
@@ -504,7 +481,7 @@ class _SignupScreenState extends State<SignupScreen> {
                       context, const LoginScreen()),
                 text: 'Login'.tr,
                 style: const TextStyle(
-                  color: AppThemeData.primary500,
+                  color: AppThemeData.primary400,
                   fontFamily: AppThemeData.bold,
                   fontSize: 14,
                 ),
