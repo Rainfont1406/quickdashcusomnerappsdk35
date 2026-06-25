@@ -222,13 +222,16 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
   getVendorCategoryById() async {
     vendorCategoryList.clear();
 
-    // Fetch all categories in parallel, then de-dup once all results are in.
-    // The old fire-and-forget .then() pattern caused a race where two futures
-    // completing simultaneously could both pass the "already in list?" check
-    // and add the same category twice.
-    final futures = productList
-        .map((e) =>
-            FireStoreUtils.getVendorCategoryById(e.categoryID.toString()))
+    // Many products share the same category — fetch each *distinct* category
+    // ID once instead of once per product (e.g. 40 products across 5
+    // categories means 5 reads instead of 40). Fetched in parallel, then
+    // de-dup once all results are in: the old fire-and-forget .then() pattern
+    // caused a race where two futures completing simultaneously could both
+    // pass the "already in list?" check and add the same category twice.
+    final uniqueCategoryIds =
+        productList.map((e) => e.categoryID.toString()).toSet();
+    final futures = uniqueCategoryIds
+        .map((id) => FireStoreUtils.getVendorCategoryById(id))
         .toList();
     final results = await Future.wait(futures);
     final seen = <String>{};
@@ -247,20 +250,17 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
     });
 
     if (MyAppState.currentUser != null) {
-      await FireStoreUtils.getFavouriteStore(FireStoreUtils.getCurrentUid())
-          .then(
+      // Not awaited: the heart icons can fill in a beat after first paint —
+      // they don't need to gate the skeleton.
+      FireStoreUtils.getFavouriteStore(FireStoreUtils.getCurrentUid()).then(
         (value) {
-          setState(() {
-            favouriteList = value;
-          });
+          if (mounted) setState(() => favouriteList = value);
         },
       );
 
-      await FireStoreUtils.getFavouriteItem().then(
+      FireStoreUtils.getFavouriteItem().then(
         (value) {
-          setState(() {
-            favouriteItemList = value;
-          });
+          if (mounted) setState(() => favouriteItemList = value);
         },
       );
     }

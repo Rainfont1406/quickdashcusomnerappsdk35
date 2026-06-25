@@ -319,31 +319,12 @@ class _CartScreenState extends State<CartScreen> {
     }
   }
 
-  // Add this method to fetch tax data
+  // Fetches tax data for the active section (not country-scoped - single-country deployment).
   Future<void> getTaxData() async {
     try {
-      print('Fetching tax data...');
-      // Try to get taxes from the tax collection
-      await FireStoreUtils.firestore
-          .collection('tax')
-          .where('enable', isEqualTo: true)
-          .get()
-          .then((value) {
-        if (value.docs.isNotEmpty) {
-          List<TaxModel> taxes = [];
-          for (var doc in value.docs) {
-            taxes.add(TaxModel.fromJson(doc.data()));
-          }
-          print('Tax data fetched: ${taxes.length} taxes found');
-          for (var tax in taxes) {
-            print('Tax: ${tax.title}, Type: ${tax.type}, Value: ${tax.tax}');
-          }
-          taxList = taxes;
-          setState(() {});
-        } else {
-          print('No tax data found from tax collection');
-        }
-      });
+      final taxes = await FireStoreUtils().getTaxList(sectionConstantModel?.id);
+      taxList = taxes ?? [];
+      setState(() {});
     } catch (e) {
       print('Error fetching tax data: $e');
       taxList = [];
