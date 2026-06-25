@@ -214,10 +214,17 @@ class _ChatScreensState extends State<ChatScreens> {
                           ),
                           onSubmitted: (value) async {
                             if (_messageController.text.isNotEmpty) {
-                              _sendMessage(_messageController.text, null, '', 'text');
-                              Timer(const Duration(milliseconds: 500), () => _controller.jumpTo(_controller.position.maxScrollExtent));
-                              _messageController.clear();
-                              setState(() {});
+                              final text = _messageController.text;
+                              try {
+                                await _sendMessage(text, null, '', 'text');
+                                _messageController.clear();
+                                Timer(const Duration(milliseconds: 500), () => _controller.jumpTo(_controller.position.maxScrollExtent));
+                                setState(() {});
+                              } catch (e) {
+                                if (mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to send message: $e')));
+                                }
+                              }
                             }
                           },
                         ),
@@ -231,9 +238,16 @@ class _ChatScreensState extends State<ChatScreens> {
                         child: IconButton(
                           onPressed: () async {
                             if (_messageController.text.isNotEmpty) {
-                              _sendMessage(_messageController.text, null, '', 'text');
-                              _messageController.clear();
-                              setState(() {});
+                              final text = _messageController.text;
+                              try {
+                                await _sendMessage(text, null, '', 'text');
+                                _messageController.clear();
+                                setState(() {});
+                              } catch (e) {
+                                if (mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to send message: $e')));
+                                }
+                              }
                             }
                           },
                           icon: const Icon(Icons.send_rounded),
@@ -508,7 +522,7 @@ class _ChatScreensState extends State<ChatScreens> {
     Map<String, dynamic> payLoad = <String, dynamic>{};
     if (widget.type == "cab_parcel_chat") {
       User? driver = await FireStoreUtils.getCurrentUser(widget.restaurantId.toString());
-      token = driver!.fcmToken;
+      token = driver?.fcmToken;
       payLoad = {
         "type": "cab_parcel_chat",
         "customerName": widget.customerName.toString(),
@@ -528,10 +542,10 @@ class _ChatScreensState extends State<ChatScreens> {
       });
       if (widget.chatType == "Restaurant") {
         User? restaurantUser = await FireStoreUtils.getCurrentUser(orderModel!.vendor.author);
-        token = restaurantUser!.fcmToken;
+        token = restaurantUser?.fcmToken;
       } else {
         User? driver = await FireStoreUtils.getCurrentUser(orderModel!.driverID.toString());
-        token = driver!.fcmToken;
+        token = driver?.fcmToken;
       }
       payLoad = {
         "type": "vendor_chat",
@@ -548,7 +562,7 @@ class _ChatScreensState extends State<ChatScreens> {
     } else {
       // Inbox screen
       User? restaurantUser = await FireStoreUtils.getCurrentUser(widget.restaurantId.toString());
-      token = restaurantUser!.fcmToken;
+      token = restaurantUser?.fcmToken;
       payLoad = {
         "customerName": widget.customerName.toString(),
         "restaurantName": widget.restaurantName.toString(),
@@ -562,11 +576,13 @@ class _ChatScreensState extends State<ChatScreens> {
       };
     }
 
-    SendNotification.sendChatFcmMessage(
-        "${MyAppState.currentUser!.fullName()} ${messageType == "image" ? "sent image to you" : messageType == "video" ? "sent video to you" : "sent message to you"}",
-        conversationModel.message.toString(),
-        token.toString(),
-        payLoad);
+    if (token != null && token!.isNotEmpty) {
+      SendNotification.sendChatFcmMessage(
+          "${MyAppState.currentUser!.fullName()} ${messageType == "image" ? "sent image to you" : messageType == "video" ? "sent video to you" : "sent message to you"}",
+          conversationModel.message.toString(),
+          token.toString(),
+          payLoad);
+    }
   }
 
   final ImagePicker _imagePicker = ImagePicker();
