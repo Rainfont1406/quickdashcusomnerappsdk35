@@ -1,5 +1,7 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
+import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/model/story_model.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
@@ -116,6 +118,7 @@ class _VendorStoryPage extends StatefulWidget {
 class _VendorStoryPageState extends State<_VendorStoryPage> {
   late StoryController _controller;
   late List<StoryItem> _items;
+  bool _viewRecorded = false;
 
   @override
   void initState() {
@@ -124,6 +127,48 @@ class _VendorStoryPageState extends State<_VendorStoryPage> {
     _items = _buildItems();
     // Page is built before it becomes visible — keep paused until active.
     if (!widget.isActive) _controller.pause();
+  }
+
+  // Records a unique view for this story, deduped per (story, user, day) so
+  // a returning viewer on a later calendar day still counts as a new view
+  // against the vendor's purchased view package - but re-opening the same
+  // story multiple times today does not.
+  Future<void> _recordView() async {
+    if (_viewRecorded) return;
+    _viewRecorded = true; // client-side debounce, set before await
+
+    final userID = MyAppState.currentUser?.userID;
+    final storyID = widget.story.storyID;
+    if (userID == null || userID.isEmpty || storyID == null || storyID.isEmpty) {
+      return;
+    }
+
+    final now = DateTime.now();
+    final dateKey =
+        '${now.year}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}';
+
+    final firestore = FirebaseFirestore.instance;
+    final viewRef =
+        firestore.collection('story_views').doc('${storyID}_${userID}_$dateKey');
+    final storyRef = firestore.collection(STORY).doc(storyID);
+
+    try {
+      await firestore.runTransaction((tx) async {
+        final existing = await tx.get(viewRef);
+        if (existing.exists) return; // already counted today
+        tx.set(viewRef, {
+          'storyID': storyID,
+          'userID': userID,
+          'vendorID': widget.story.vendorID,
+          'dateKey': dateKey,
+          'viewedAt': Timestamp.now(),
+        });
+        tx.update(storyRef, {'viewCount': FieldValue.increment(1)});
+      });
+    } catch (_) {
+      // Swallow - e.g. the story doc was deleted concurrently because
+      // another viewer's view just exhausted its package.
+    }
   }
 
   @override
@@ -154,14 +199,23 @@ class _VendorStoryPageState extends State<_VendorStoryPage> {
       }
     } else if ((widget.orderType == "Dineaway".tr() ||
             widget.orderType == "Takeaway".tr()) &&
-        story.takeaway &&
-        story.hasVideo) {
-      for (final url in story.videoUrl) {
-        final urlStr = url.toString();
-        if (urlStr.isNotEmpty) {
-          // Default 10 s — will be corrected to actual video length by
-          // StoryVideo → StoryController.notifyDuration → StoryViewState.
-          items.add(StoryItem.pageVideo(urlStr, controller: _controller));
+        story.takeaway) {
+      if (story.hasVideo) {
+        for (final url in story.videoUrl) {
+          final urlStr = url.toString();
+          if (urlStr.isNotEmpty) {
+            // Default 10 s — will be corrected to actual video length by
+            // StoryVideo → StoryController.notifyDuration → StoryViewState.
+            items.add(StoryItem.pageVideo(urlStr, controller: _controller));
+          }
+        }
+      } else if (story.hasImage) {
+        for (final url in story.imageUrl) {
+          items.add(StoryItem.pageImage(
+            url: url.toString(),
+            controller: _controller,
+            duration: const Duration(seconds: 5),
+          ));
         }
       }
     }
@@ -189,6 +243,7 @@ class _VendorStoryPageState extends State<_VendorStoryPage> {
           progressPosition: ProgressPosition.top,
           repeat: false,
           onComplete: widget.onComplete,
+          onStoryShow: (storyItem, index) => _recordView(),
           onVerticalSwipeComplete: (direction) {
             if (direction == Direction.down) widget.onClose();
           },

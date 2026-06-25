@@ -4,7 +4,6 @@ import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/AddressModel.dart';
 import 'package:emartconsumer/model/BannerModel.dart';
-import 'package:emartconsumer/model/FavouriteModel.dart';
 import 'package:emartconsumer/model/ProductModel.dart';
 import 'package:emartconsumer/model/User.dart';
 import 'package:emartconsumer/model/VendorCategoryModel.dart';
@@ -87,12 +86,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   final fireStoreUtils = FireStoreUtils();
 
-  late Future<List<ProductModel>> productsFuture;
+  // Nullable: deliberately unassigned until just after the skeleton is
+  // dismissed — see _startProductsFetchIfNeeded(). The whole-catalog query
+  // it triggers is too big to fire during the critical loading window.
+  Future<List<ProductModel>>? productsFuture;
+  bool _productsFetchStarted = false;
   List<VendorModel> vendors = [];
   List<VendorModel> popularRestaurantLst = [];
-  List<VendorModel> offerVendorList = [];
   List<VendorModel> newArrivalRestaurantList = [];
-  List<OfferModel> offersList = [];
   Stream<List<VendorModel>>? lstAllRestaurant;
   StreamSubscription<List<VendorModel>>? _vendorSub;
   // Live admin toggle: when false, the Delivery section shows a Coming Soon
@@ -403,10 +404,25 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (!mounted) return;
     _firstVendorReceived = true;
     _tryHideSkeleton();
+    // Now that the page is visible, it's safe to start the whole-catalog
+    // product fetch without it competing for bandwidth with first paint.
+    _startProductsFetchIfNeeded();
   }
 
-  late Future<List<FavouriteModel>> lstFavourites;
-  List<String> lstFav = [];
+  // Starts the (large, unscoped) product catalog fetch used for card menu
+  // previews, and wires up processing of its result. Only fires once per
+  // getData() cycle — see the reset in getData() — and only after the
+  // skeleton has already been dismissed.
+  void _startProductsFetchIfNeeded() {
+    if (_productsFetchStarted) return;
+    _productsFetchStarted = true;
+    final future = (selctedOrderTypeValue == "Takeaway".tr() ||
+            selctedOrderTypeValue == "Dineaway".tr())
+        ? fireStoreUtils.getAllTakeAWayProducts()
+        : fireStoreUtils.getAllDelevryProducts();
+    productsFuture = future;
+    future.then(_handleProducts);
+  }
 
   String? name = "";
 
@@ -468,7 +484,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   bool isListView = true;
   bool isHomeBannerLoading = true;
   bool isHomeBannerMiddleLoading = true;
-  List<OfferModel> offerList = [];
   List<VendorCategoryModel> vendorCategoryModel = [];
 
   getBanner() async {
@@ -481,18 +496,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         isHomeBannerLoading = false;
       });
     });
-
-    await fireStoreUtils.getHomeMiddleBanner().then((value) {
-      setState(() {
-        bannerMiddleHome = value;
-        isHomeBannerMiddleLoading = false;
-      });
-    });
-    await FireStoreUtils().getPublicCoupons().then((value) {
-      setState(() {
-        offerList = value;
-      });
-    });
     await FireStoreUtils.firestore
         .collection(Setting)
         .doc('story')
@@ -502,7 +505,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         storyEnable = value.data()?['isEnabled'] ?? false;
       });
     });
-    // Precache category and banner images so they are painted before the
+    // Precache category and top-banner images so they are painted before the
     // skeleton disappears. A 5-second timeout (inside _precacheBatch) ensures
     // we never block indefinitely on a slow network.
     if (mounted) {
@@ -513,14 +516,31 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         ...bannerTopHome
             .where((b) => (b.photo ?? '').isNotEmpty)
             .map((b) => b.photo!),
-        ...bannerMiddleHome
-            .where((b) => (b.photo ?? '').isNotEmpty)
-            .map((b) => b.photo!),
       ]);
     }
-    // All banner/category data is ready — signal and try to dismiss skeleton.
+    // Categories + top banner + story flag are everything visible at first
+    // paint — signal and try to dismiss skeleton without waiting on the
+    // middle banner, which is below the fold.
     _bannerReady = true;
     _tryHideSkeleton();
+
+    // Middle banner renders after "New Arrivals" — load it independently so
+    // it never delays the skeleton.
+    _loadMiddleBanner();
+  }
+
+  void _loadMiddleBanner() {
+    fireStoreUtils.getHomeMiddleBanner().then((value) {
+      if (!mounted) return;
+      setState(() {
+        bannerMiddleHome = value;
+        isHomeBannerMiddleLoading = false;
+      });
+      _precacheBatch(value
+          .where((b) => (b.photo ?? '').isNotEmpty)
+          .map((b) => b.photo!)
+          .toList());
+    });
   }
 
   @override
@@ -994,7 +1014,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                   "Dineaway".tr()) &&
                               storyList.any((story) =>
                               story.takeaway &&
-                                  story.hasVideo)) ||
+                                  (story.hasVideo || story.hasImage))) ||
                           (selctedOrderTypeValue ==
                               "Delivery".tr() &&
                               storyList.any((story) =>
@@ -1016,6 +1036,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                             orderType:
                             selctedOrderTypeValue ??
                                 "Delivery".tr(),
+                            vendors: vendors,
+                            deliveryProductsByVendor: _deliveryProductsByVendor,
                           ),
                         ],
                       )
@@ -1348,19 +1370,19 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(icon,
-                size: 14,
+                size: 16,
                 color: selected
                     ? Colors.white
-                    : (dark ? AppThemeData.grey300 : AppThemeData.grey600)),
+                    : (dark ? Colors.white : Colors.black)),
             const SizedBox(width: 5),
             Text(
               label,
               style: TextStyle(
-                fontSize: 12,
+                fontSize: 14,
                 fontFamily: AppThemeData.semiBold,
                 color: selected
                     ? Colors.white
-                    : (dark ? AppThemeData.grey300 : AppThemeData.grey600),
+                    : (dark ? Colors.white : Colors.black),
               ),
             ),
           ],
@@ -1447,12 +1469,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         currentOrderTypeGlobal = selctedOrderTypeValue!;
       });
     }
-    if (selctedOrderTypeValue == "Takeaway".tr() ||
-        selctedOrderTypeValue == "Dineaway".tr()) {
-      productsFuture = fireStoreUtils.getAllTakeAWayProducts();
-    } else {
-      productsFuture = fireStoreUtils.getAllDelevryProducts();
-    }
+    // The actual product-catalog fetch is started later, by
+    // _startProductsFetchIfNeeded() — see _precacheVendorsAndShow().
   }
 
   List<StoryModel> storyList = [];
@@ -1508,7 +1526,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           } else if ((selctedOrderTypeValue == "Dineaway".tr() ||
               selctedOrderTypeValue == "Takeaway".tr()) &&
               element1.takeaway) {
-            if (element1.hasVideo) {
+            if (element1.hasVideo || element1.hasImage) {
               shouldAdd = true;
             }
           }
@@ -1558,6 +1576,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     // location cannot fire after a new location has been selected.
     await _vendorSub?.cancel();
     _vendorSub = null;
+    _productsFetchStarted = false;
     getFoodType();
     lstNearByFood.clear();
     _loadNormalOffersForRanking();
@@ -1565,12 +1584,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         fireStoreUtils.getAllStores().asBroadcastStream();
 
     if (MyAppState.currentUser != null) {
-      lstFavourites =
-          FireStoreUtils.getFavouriteStore(MyAppState.currentUser!.userID);
-      lstFavourites.then((event) {
-        lstFav.clear();
-        lstFav.addAll(event.map((e) => e.store_id!));
-      });
       name = toBeginningOfSentenceCase(widget.user!.firstName);
     }
 
@@ -1589,42 +1602,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       allstoreList.clear();
       allstoreList.addAll(vendors);
 
-      productsFuture.then((value) {
-        _productsByVendor.clear();
-        for (var product in value.take(20)) {
-          _productsByVendor
-              .putIfAbsent(product.vendorID, () => [])
-              .add(product);
-        }
-
-        _deliveryProductsByVendor.clear();
-        for (var product in value) {
-          if (!product.publish || !product.deliveryOption) continue;
-          if (product.productStatus != 'approved') continue;
-          _deliveryProductsByVendor
-              .putIfAbsent(product.vendorID, () => [])
-              .add(product);
-        }
-        if (mounted) setState(() {});
-
-        for (var vendor in event) {
-          if (vendor.isAcceptingOrders) {
-            final vendorProducts = _productsByVendor[vendor.id];
-            if (vendorProducts != null) {
-              for (var product in vendorProducts) {
-                if (!lstNearByFood.contains(product)) {
-                  lstNearByFood.add(product);
-                }
-              }
-            }
-          }
-        }
-
-        recommendedProducts.clear();
-        List<ProductModel> shuffledProducts = List.from(lstNearByFood);
-        shuffledProducts.shuffle();
-        recommendedProducts = shuffledProducts.take(20).toList();
-      });
+      // Only processes if the fetch has already been started (it deliberately
+      // hasn't been, on the very first batch — see _startProductsFetchIfNeeded).
+      productsFuture?.then(_handleProducts);
 
       popularRestaurantLst.addAll(event);
       newArrivalRestaurantList.addAll(event);
@@ -1714,21 +1694,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         setState(() {});
       }
 
-      FireStoreUtils().getPublicCoupons().then((value) {
-        offersList.clear();
-        offerVendorList.clear();
-        value.forEach((element1) {
-          vendors.forEach((element) {
-            if (element1.storeId == element.id &&
-                element1.expireOfferDate!.toDate().isAfter(DateTime.now())) {
-              offersList.add(element1);
-              offerVendorList.add(element);
-            }
-          });
-        });
-        setState(() {});
-      });
-
       if (_storiesLoaded && allStories.isNotEmpty) {
         _filterStories();
       }
@@ -1743,6 +1708,47 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     });
   }
 
+  // Processes the whole-catalog product fetch's result into the per-vendor
+  // lookup maps the card menu carousels read from. Called once the fetch
+  // resolves, and again on every later vendor-stream event so live updates
+  // (new vendor, order-type toggle) stay reflected — uses `vendors` (the
+  // current list) rather than a stream-event snapshot, since this can run
+  // well after the event that originally triggered the fetch.
+  void _handleProducts(List<ProductModel> value) {
+    _productsByVendor.clear();
+    for (var product in value.take(20)) {
+      _productsByVendor.putIfAbsent(product.vendorID, () => []).add(product);
+    }
+
+    _deliveryProductsByVendor.clear();
+    for (var product in value) {
+      if (!product.publish || !product.deliveryOption) continue;
+      if (product.productStatus != 'approved') continue;
+      _deliveryProductsByVendor
+          .putIfAbsent(product.vendorID, () => [])
+          .add(product);
+    }
+    if (mounted) setState(() {});
+
+    for (var vendor in vendors) {
+      if (vendor.isAcceptingOrders) {
+        final vendorProducts = _productsByVendor[vendor.id];
+        if (vendorProducts != null) {
+          for (var product in vendorProducts) {
+            if (!lstNearByFood.contains(product)) {
+              lstNearByFood.add(product);
+            }
+          }
+        }
+      }
+    }
+
+    recommendedProducts.clear();
+    List<ProductModel> shuffledProducts = List.from(lstNearByFood);
+    shuffledProducts.shuffle();
+    recommendedProducts = shuffledProducts.take(20).toList();
+  }
+
   final StoryController controller = StoryController();
 }
 
@@ -1752,9 +1758,19 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 class StoryView extends StatefulWidget {
   final List<StoryModel> storyList;
   final String orderType;
+  // Vendors are already loaded by HomeScreen's getData() — every story here
+  // was already matched to one of these by _filterStories(), so looking
+  // vendors up here instead of re-fetching by ID is always safe.
+  final List<VendorModel> vendors;
+  final Map<String, List<ProductModel>> deliveryProductsByVendor;
 
-  const StoryView(
-      {super.key, required this.storyList, required this.orderType});
+  const StoryView({
+    super.key,
+    required this.storyList,
+    required this.orderType,
+    required this.vendors,
+    required this.deliveryProductsByVendor,
+  });
 
   @override
   State<StoryView> createState() => _StoryViewState();
@@ -1811,6 +1827,11 @@ class _StoryViewState extends State<StoryView> {
     final double _storyExt = (_sw * 0.34).clamp(110.0, 155.0);
     final double _videoH = (_sw * 0.50).clamp(155.0, 220.0);
     final double _videoExt = (_sw * 0.40).clamp(130.0, 190.0);
+    // Built once per build() (not per item) and reused for every story card
+    // below — vendors are already in memory, no per-card Firestore reads.
+    final Map<String, VendorModel> vendorsById = {
+      for (final v in widget.vendors) v.id: v
+    };
     if (widget.orderType == "Delivery".tr()) {
       return SizedBox(
         height: _storyH,
@@ -1824,7 +1845,7 @@ class _StoryViewState extends State<StoryView> {
           addRepaintBoundaries: true,
           itemExtent: _storyExt,
           itemBuilder: (context, index) =>
-              _buildStoryItem(widget.storyList[index], index),
+              _buildStoryItem(widget.storyList[index], index, vendorsById),
         ),
       );
     }
@@ -1964,46 +1985,16 @@ class _StoryViewState extends State<StoryView> {
                           ),
                         ),
 
-                      // Vendor info overlay at bottom
-                      Positioned(
-                        left: 8,
-                        right: 8,
-                        bottom: 8,
-                        child: FutureBuilder(
-                          future: FireStoreUtils.getVendor(
-                              storyModel.vendorID.toString()),
-                          builder: (context, snapshot) {
-                            if (snapshot.connectionState ==
-                                ConnectionState.waiting) {
-                              return Column(
-                                mainAxisSize: MainAxisSize.min,
-                                crossAxisAlignment:
-                                    CrossAxisAlignment.start,
-                                children: [
-                                  Container(
-                                      height: 8,
-                                      width: 80,
-                                      decoration: BoxDecoration(
-                                          color: Colors.white
-                                              .withValues(alpha: 0.3),
-                                          borderRadius:
-                                              BorderRadius.circular(4))),
-                                  const SizedBox(height: 4),
-                                  Container(
-                                      height: 7,
-                                      width: 55,
-                                      decoration: BoxDecoration(
-                                          color: Colors.white
-                                              .withValues(alpha: 0.2),
-                                          borderRadius:
-                                              BorderRadius.circular(4))),
-                                ],
-                              );
-                            }
-                            if (snapshot.data == null) {
-                              return const SizedBox.shrink();
-                            }
-                            final VendorModel vm = snapshot.data!;
+                      // Vendor info overlay at bottom — looked up from the
+                      // already-loaded vendor list, no per-card fetch.
+                      if (vendorsById[storyModel.vendorID.toString()] != null)
+                        Positioned(
+                          left: 8,
+                          right: 8,
+                          bottom: 8,
+                          child: Builder(builder: (context) {
+                            final VendorModel vm =
+                                vendorsById[storyModel.vendorID.toString()]!;
                             return Row(
                               crossAxisAlignment:
                                   CrossAxisAlignment.center,
@@ -2072,9 +2063,8 @@ class _StoryViewState extends State<StoryView> {
                                 ),
                               ],
                             );
-                          },
+                          }),
                         ),
-                      ),
                     ],
                   ),
                 ),
@@ -2086,7 +2076,8 @@ class _StoryViewState extends State<StoryView> {
     );
   }
 
-  Widget _buildStoryItem(StoryModel storyModel, int originalIndex) {
+  Widget _buildStoryItem(StoryModel storyModel, int originalIndex,
+      Map<String, VendorModel> vendorsById) {
     final double _sw = MediaQuery.of(context).size.width;
     final double _cardW = (_sw * 0.34).clamp(110.0, 155.0) - 10;
     final double _imgH = (_cardW * 0.80).clamp(85.0, 124.0);
@@ -2101,87 +2092,48 @@ class _StoryViewState extends State<StoryView> {
 
     final dark = isDarkMode(context);
 
+    // Both lookups are synchronous — the vendor is already in memory (every
+    // story here was matched to one by _filterStories()), and so is its
+    // delivery product list (_deliveryProductsByVendor), so no per-card
+    // Firestore reads are needed here anymore.
+    final VendorModel? vendorModel =
+        vendorsById[storyModel.vendorID.toString()];
+    if (vendorModel == null) {
+      return const SizedBox();
+    }
+    double rating = 0.0;
+    if (vendorModel.reviewsCount > 0) {
+      rating = (vendorModel.reviewsSum / vendorModel.reviewsCount);
+    }
+    final List<ProductModel> vendorProducts =
+        widget.deliveryProductsByVendor[vendorModel.id] ?? [];
+    double highestDiscountPercent = 0.0;
+    bool hasDiscount = false;
+    for (var product in vendorProducts) {
+      if (product.disPrice != null &&
+          product.disPrice != "" &&
+          product.disPrice != "0") {
+        try {
+          double originalPrice = double.parse(product.price);
+          double discountedPrice = double.parse(product.disPrice ?? "0");
+          if (originalPrice > discountedPrice && originalPrice > 0) {
+            double discountPercent =
+                ((originalPrice - discountedPrice) / originalPrice) * 100;
+            if (discountPercent > highestDiscountPercent) {
+              highestDiscountPercent = discountPercent;
+              hasDiscount = true;
+            }
+          }
+        } catch (e) {}
+      }
+    }
+
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 5),
-      child: FutureBuilder(
-        future: FireStoreUtils.getVendor(storyModel.vendorID.toString()),
-        builder: (context, vendorSnapshot) {
-          // Premium shimmer skeleton
-          if (vendorSnapshot.connectionState == ConnectionState.waiting) {
-            return SizedBox(
-              width: _cardW,
-              child: Container(
-                clipBehavior: Clip.antiAlias,
-                decoration: BoxDecoration(
-                  color: dark ? AppThemeData.darkBgSecondary : Colors.white,
-                  borderRadius: BorderRadius.circular(16),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.07),
-                      blurRadius: 12,
-                      offset: const Offset(0, 4),
-                    ),
-                  ],
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    _StoryShimmer(height: _imgH, borderRadius: 0),
-                    Padding(
-                      padding: const EdgeInsets.all(8),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          _StoryShimmer(height: 10, width: 48, borderRadius: 5),
-                          const SizedBox(height: 6),
-                          _StoryShimmer(height: 13, width: 90, borderRadius: 5),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            );
-          } else if (vendorSnapshot.hasError || vendorSnapshot.data == null) {
-            return const SizedBox();
-          } else {
-            VendorModel vendorModel = vendorSnapshot.data!;
-            double rating = 0.0;
-            if (vendorModel.reviewsCount > 0) {
-              rating = (vendorModel.reviewsSum / vendorModel.reviewsCount);
-            }
-            return FutureBuilder<List<ProductModel>>(
-              future: FireStoreUtils()
-                  .getVendorProducts(vendorModel.id.toString()),
-              builder: (context, productsSnapshot) {
-                double highestDiscountPercent = 0.0;
-                bool hasDiscount = false;
-                if (productsSnapshot.hasData && productsSnapshot.data != null) {
-                  for (var product in productsSnapshot.data!) {
-                    if (product.disPrice != null &&
-                        product.disPrice != "" &&
-                        product.disPrice != "0") {
-                      try {
-                        double originalPrice = double.parse(product.price);
-                        double discountedPrice =
-                            double.parse(product.disPrice ?? "0");
-                        if (originalPrice > discountedPrice &&
-                            originalPrice > 0) {
-                          double discountPercent =
-                              ((originalPrice - discountedPrice) /
-                                      originalPrice) *
-                                  100;
-                          if (discountPercent > highestDiscountPercent) {
-                            highestDiscountPercent = discountPercent;
-                            hasDiscount = true;
-                          }
-                        }
-                      } catch (e) {}
-                    }
-                  }
-                }
-
-                return GestureDetector(
+      child: Builder(
+        builder: (context) {
+          {
+            return GestureDetector(
                   onTap: () {
                     if (widget.orderType == "Delivery".tr() &&
                         storyModel.hasImage) {
@@ -2353,8 +2305,6 @@ class _StoryViewState extends State<StoryView> {
                     ),
                   ),
                 );
-              },
-            );
           }
         },
       ),
