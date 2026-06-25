@@ -14,6 +14,13 @@ class StoryModel {
   bool approved = false;
   String? storyType;
 
+  // View-package model (replaces day-based `duration` for new stories).
+  int? viewPackageSize; // total unique views purchased
+  int viewCount = 0; // atomically incremented per unique viewer (per day)
+  double? pricePerView;
+  double? amountPaid;
+  Timestamp? backstopExpiresAt; // hard cap, locked at purchase time
+
   StoryModel({
     this.videoThumbnail,
     this.videoUrl = const [],
@@ -27,6 +34,11 @@ class StoryModel {
     this.delivery = false,
     this.approved = false,
     this.storyType,
+    this.viewPackageSize,
+    this.viewCount = 0,
+    this.pricePerView,
+    this.amountPaid,
+    this.backstopExpiresAt,
   });
 
   // Helper method to normalize URL fields (handle both string and array formats)
@@ -62,6 +74,15 @@ class StoryModel {
     delivery = json['delivery'] ?? false;
     approved = json['approved'] ?? false;
     storyType = json['storyType'];
+    viewPackageSize = json['viewPackageSize'];
+    viewCount = json['viewCount'] ?? 0;
+    pricePerView = json['pricePerView'] != null
+        ? (json['pricePerView'] as num).toDouble()
+        : null;
+    amountPaid = json['amountPaid'] != null
+        ? (json['amountPaid'] as num).toDouble()
+        : null;
+    backstopExpiresAt = json['backstopExpiresAt'];
 
     // Debug logs
   }
@@ -80,6 +101,11 @@ class StoryModel {
     data['delivery'] = delivery;
     data['approved'] = approved;
     data['storyType'] = storyType;
+    data['viewPackageSize'] = viewPackageSize;
+    data['viewCount'] = viewCount;
+    data['pricePerView'] = pricePerView;
+    data['amountPaid'] = amountPaid;
+    data['backstopExpiresAt'] = backstopExpiresAt;
     return data;
   }
 
@@ -90,23 +116,34 @@ class StoryModel {
   bool get isImageStory => hasImage && !hasVideo;
   bool get hasBothTypes => hasVideo && hasImage;
   
-  // Check if story is expired
-  // Stories expire based on createdAt + duration (in seconds)
+  // Check if story is expired.
+  // View-package stories: expired once views are exhausted or the backstop
+  // day-cap is hit, whichever comes first. Legacy day-based stories (no
+  // viewPackageSize/backstopExpiresAt - pre-migration docs) fall back to the
+  // old createdAt+duration check.
   bool get isExpired {
+    if (viewPackageSize != null || backstopExpiresAt != null) {
+      final viewsExhausted =
+          viewPackageSize != null && viewCount >= viewPackageSize!;
+      final backstopHit = backstopExpiresAt != null &&
+          DateTime.now().isAfter(backstopExpiresAt!.toDate());
+      return viewsExhausted || backstopHit;
+    }
+
     final now = DateTime.now();
-    
+
     // Calculate expiration based on createdAt + duration
     if (createdAt != null && duration != null && duration! > 0) {
       final expirationTime = createdAt!.toDate().add(Duration(seconds: duration!));
       return expirationTime.isBefore(now);
     }
-    
+
     // If no duration specified, default to 24 hours from creation time
     if (createdAt != null) {
       final expirationTime = createdAt!.toDate().add(const Duration(hours: 24));
       return expirationTime.isBefore(now);
     }
-    
+
     // If no createdAt, consider it expired (shouldn't happen, but safety check)
     return true;
   }
