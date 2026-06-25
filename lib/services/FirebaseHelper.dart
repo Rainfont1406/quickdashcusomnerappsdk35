@@ -206,7 +206,14 @@ class FireStoreUtils {
 
   Future<List<StoryModel>> getStory() async {
     List<StoryModel> story = [];
-    QuerySnapshot<Map<String, dynamic>> storyQuery = await firestore.collection(STORY).where('sectionID', isEqualTo: sectionConstantModel!.id).get();
+    // Must filter approved==true server-side, not just client-side in
+    // HomeScreen._filterStories() - the Firestore rule for story/{id} only
+    // allows reads where resource.data.approved == true (or owner/admin).
+    // A query without this filter can match unapproved docs from OTHER
+    // vendors in the same section, which Firestore can't prove are
+    // readable, so it denies the ENTIRE query with permission-denied -
+    // silently hiding every story in the section, approved or not.
+    QuerySnapshot<Map<String, dynamic>> storyQuery = await firestore.collection(STORY).where('sectionID', isEqualTo: sectionConstantModel!.id).where('approved', isEqualTo: true).get();
     await Future.forEach(storyQuery.docs, (QueryDocumentSnapshot<Map<String, dynamic>> document) {
       try {
         story.add(StoryModel.fromJson(document.data()));
@@ -356,11 +363,32 @@ class FireStoreUtils {
     }
   }
 
+  // vendorId -> (in-flight/resolved fetch, when it was started). Sales data
+  // is a slow-changing 30-day rolling aggregate, so a short cache avoids
+  // re-querying the dailyProductSales subcollection for the same vendor on
+  // every live vendor-list update (cards rebuild often; sales data doesn't
+  // change minute to minute). Cleared naturally on app restart.
+  static final Map<String, (Future<Map<String, int>>, DateTime)>
+      _rollingSalesCache = {};
+  static const Duration _rollingSalesCacheTtl = Duration(minutes: 10);
+
   /// Sums a vendor's per-product delivery sales over the last 30 daily
   /// buckets (written by the vendor app at order-completion time — see
   /// FireStoreUtils.updateOrder there). Returns {productId: unitsSold},
   /// empty if the vendor has no sales data yet.
-  static Future<Map<String, int>> getRolling30DaySales(String vendorId) async {
+  static Future<Map<String, int>> getRolling30DaySales(String vendorId) {
+    final cached = _rollingSalesCache[vendorId];
+    if (cached != null &&
+        DateTime.now().difference(cached.$2) < _rollingSalesCacheTtl) {
+      return cached.$1;
+    }
+    final future = _fetchRolling30DaySales(vendorId);
+    _rollingSalesCache[vendorId] = (future, DateTime.now());
+    return future;
+  }
+
+  static Future<Map<String, int>> _fetchRolling30DaySales(
+      String vendorId) async {
     final Map<String, int> totals = {};
     try {
       final snapshot = await firestore
@@ -598,7 +626,7 @@ class FireStoreUtils {
 
   Future<List<TaxModel>?> getTaxList(String? sectionId) async {
     List<TaxModel> taxList = [];
-    await firestore.collection(tax).where('country', isEqualTo: country).where('sectionId', isEqualTo: sectionId).where('enable', isEqualTo: true).get().then((value) {
+    await firestore.collection(tax).where('sectionId', isEqualTo: sectionId).where('enable', isEqualTo: true).get().then((value) {
       for (var element in value.docs) {
         TaxModel taxModel = TaxModel.fromJson(element.data());
         taxList.add(taxModel);
@@ -2141,56 +2169,32 @@ class FireStoreUtils {
   }
 
   static Future updateOtherWalletAmount({required String userId, required amount}) async {
-    dynamic walletAmount = 0;
-
-    await firestore.collection(USERS).doc(userId).get().then((value) async {
-      DocumentSnapshot<Map<String, dynamic>> userDocument = value;
-      if (userDocument.data() != null && userDocument.exists) {
-        try {
-          print(userDocument.data());
-          await firestore.collection(USERS).doc(userId).update({"wallet_amount": (num.parse(userDocument.data()!['wallet_amount'].toString()) + amount)}).then((value) {
-            MyAppState.currentUser!.wallet_amount = num.parse(userDocument.data()!['wallet_amount'].toString()) + amount;
-          });
-        } catch (error) {
-          print(error);
-          if (error.toString() == "Bad state: field does not exist within the DocumentSnapshotPlatform") {
-            print("does not exist");
-          } else {
-            print("went wrong!!");
-            walletAmount = "ERROR";
-          }
-        }
-        return walletAmount; //User.fromJson(userDocument.data()!);
-      } else {
-        return 0.111;
-      }
-    });
+    try {
+      // Atomic increment — no read needed, eliminates double-spend race condition.
+      await firestore.collection(USERS).doc(userId).update({
+        "wallet_amount": FieldValue.increment(double.parse(amount.toString())),
+      });
+    } catch (error) {
+      print('updateOtherWalletAmount error: $error');
+    }
   }
 
   static Future updateWalletAmount({required amount}) async {
-    dynamic walletAmount = 0;
     final userId = MyAppState.currentUser!.userID;
-    await firestore.collection(USERS).doc(userId).get().then((value) async {
-      DocumentSnapshot<Map<String, dynamic>> userDocument = value;
-      if (userDocument.data() != null && userDocument.exists) {
-        try {
-          print(userDocument.data());
-          User user = User.fromJson(userDocument.data()!);
-          MyAppState.currentUser = user;
-
-          await firestore.collection(USERS).doc(userId).update({"wallet_amount": user.wallet_amount + double.parse(amount.toString())}).then((value) => print("north"));
-
-          DocumentSnapshot<Map<String, dynamic>> newUserDocument = await firestore.collection(USERS).doc(userId).get();
-          MyAppState.currentUser = User.fromJson(newUserDocument.data()!);
-          print(MyAppState.currentUser);
-        } catch (error) {
-          print(error);
-        }
-        return walletAmount; //User.fromJson(userDocument.data()!);
-      } else {
-        return 0.111;
+    try {
+      // Atomic increment — no read-before-write, eliminates double-spend race.
+      // Pass a negative amount to deduct (e.g. amount = -orderTotal).
+      await firestore.collection(USERS).doc(userId).update({
+        "wallet_amount": FieldValue.increment(double.parse(amount.toString())),
+      });
+      // Re-read to sync local state with the server-committed balance.
+      final updated = await firestore.collection(USERS).doc(userId).get();
+      if (updated.data() != null) {
+        MyAppState.currentUser = User.fromJson(updated.data()!);
       }
-    });
+    } catch (error) {
+      print('updateWalletAmount error: $error');
+    }
   }
 
   static sendTopUpMail({required String amount, required String paymentMethod, required String tractionId}) async {

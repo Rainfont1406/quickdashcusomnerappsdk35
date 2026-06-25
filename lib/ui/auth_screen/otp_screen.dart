@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:easy_localization/easy_localization.dart';
@@ -16,11 +17,16 @@ import 'package:emartconsumer/ui/auth_screen/login_screen.dart';
 import 'package:emartconsumer/ui/auth_screen/signup_screen.dart';
 import 'package:emartconsumer/ui/location_permission_screen.dart';
 import 'package:emartconsumer/ui/service_list_screen.dart';
+import 'package:firebase_auth/firebase_auth.dart' as firebase_auth;
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:pin_code_fields/pin_code_fields.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sms_autofill/sms_autofill.dart';
 import 'package:uuid/uuid.dart';
+
+// Base URL of the QuickDash admin/API server.
+const _kApiBase = 'https://admin.quickdash.co.in';
 
 class OtpScreen extends StatefulWidget {
   final String? countryCode;
@@ -158,7 +164,7 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
     }
   }
 
-  // ── Verify via MSG91 → Firestore lookup ───────────────────────────────
+  // ── Server-side OTP verification → Firebase Auth → Firestore ─────────
   Future<void> _verifyOtp() async {
     if (_isVerifying) return;
     final otp = _otpController.text.trim();
@@ -171,22 +177,55 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
     ShowToastDialog.showLoader('Verifying your account...');
 
     try {
-      // ── Step 1: verify OTP with MSG91 ──────────────────────────────
-      final verifyResult =
-          await Msg91Service.verifyOtp(countryCode, phoneNumber, otp);
+      // ── Step 1: For signup, generate the UUID now so the server can mint
+      //            a token for it. For login the server does the Firestore
+      //            lookup and returns the existing userID.
+      final newUid = widget.isSignup ? const Uuid().v4() : null;
 
-      if (!verifyResult.success) {
+      // ── Step 2: Call the admin server to verify OTP with MSG91 and
+      //            return a Firebase custom token. The server is the sole
+      //            verifier — doing it here prevents the authKey from ever
+      //            leaving the server and closes the single-use OTP race.
+      final mobile = '${countryCode.replaceAll('+', '')}$phoneNumber';
+      final body = {
+        'otp': otp,
+        'mobile': mobile,
+        'phone_number': phoneNumber,
+        'country_code': countryCode,
+        'role': USER_ROLE_CUSTOMER,
+        'is_signup': widget.isSignup,
+        if (newUid != null) 'new_user_id': newUid,
+      };
+
+      final resp = await http
+          .post(
+            Uri.parse('$_kApiBase/api/auth/verify-otp'),
+            headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+            body: jsonEncode(body),
+          )
+          .timeout(const Duration(seconds: 20));
+
+      final respJson = jsonDecode(resp.body) as Map<String, dynamic>;
+
+      if (resp.statusCode != 200) {
         ShowToastDialog.closeLoader();
         if (mounted) setState(() => _isVerifying = false);
-        ShowToastDialog.showToast(verifyResult.message.isNotEmpty
-            ? verifyResult.message
-            : 'Incorrect OTP. Please try again.');
+        ShowToastDialog.showToast(
+            (respJson['error'] as String?) ?? 'OTP verification failed. Please try again.');
         return;
       }
 
+      final firebaseToken = respJson['firebase_token'] as String;
+
+      // ── Step 3: Establish a real Firebase Auth session so request.auth.uid
+      //            equals the user's Firestore document ID for all subsequent
+      //            Firestore writes.
+      await firebase_auth.FirebaseAuth.instance
+          .signInWithCustomToken(firebaseToken);
+
       if (!mounted) return;
 
-      // ── Step 2a: LOGIN flow ────────────────────────────────────────
+      // ── Step 4a: LOGIN flow ────────────────────────────────────────
       if (!widget.isSignup) {
         final snap = await FirebaseFirestore.instance
             .collection(USERS)
@@ -227,14 +266,12 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
         }
 
         userModel.fcmToken = await NotificationService.getToken();
+        // This write now succeeds: request.auth.uid == userModel.userID
         await FireStoreUtils.updateCurrentUser(userModel);
 
-        // Persist phone user ID so the session survives app restarts
         final prefs = await SharedPreferences.getInstance();
         await prefs.setString(PHONE_AUTH_USER_ID, userModel.userID);
 
-        // Set global user state so ServiceListScreen / LocationPermissionScreen
-        // see an authenticated user instead of navigating as a guest.
         MyAppState.currentUser = userModel;
 
         if (!mounted) return;
@@ -258,11 +295,10 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
         return;
       }
 
-      // ── Step 2b: SIGNUP flow ───────────────────────────────────────
+      // ── Step 4b: SIGNUP flow ───────────────────────────────────────
       final fcmToken = await NotificationService.getToken();
-      final newUid = const Uuid().v4();
       final User userModel = User()
-        ..userID = newUid
+        ..userID = newUid!
         ..countryCode = countryCode
         ..phoneNumber = phoneNumber
         ..fcmToken = fcmToken;
@@ -276,8 +312,7 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
       if (msg.contains('SocketException') ||
           msg.contains('TimeoutException') ||
           msg.contains('NetworkException')) {
-        ShowToastDialog.showToast(
-            'No internet connection. Please try again.');
+        ShowToastDialog.showToast('No internet connection. Please try again.');
       } else {
         ShowToastDialog.showToast('Something went wrong. Please try again.');
       }
