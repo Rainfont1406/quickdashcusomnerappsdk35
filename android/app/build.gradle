@@ -58,6 +58,22 @@ android {
         versionName flutterVersionName
     }
 
+    flavorDimensions "env"
+    productFlavors {
+        production {
+            dimension "env"
+            // Uses the existing android/app/google-services.json (quick-dash-84f6a) as-is.
+        }
+        staging {
+            dimension "env"
+            applicationIdSuffix ".staging"
+            versionNameSuffix "-staging"
+            // App name override lives in android/app/src/staging/res/values/strings.xml
+            // (a resValue here collides with the existing app_name string resource).
+            // Drop the quickdash-staging google-services.json at android/app/src/staging/google-services.json
+        }
+    }
+
     buildTypes {
         release {
             signingConfig signingConfigs.release

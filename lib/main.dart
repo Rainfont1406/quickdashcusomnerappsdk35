@@ -6,6 +6,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/firebase_options.dart';
+import 'package:emartconsumer/firebase_options_staging.dart' as staging;
 import 'package:emartconsumer/model/AddressModel.dart';
 import 'package:emartconsumer/model/CurrencyModel.dart';
 import 'package:emartconsumer/model/mail_setting.dart';
@@ -35,38 +36,34 @@ import 'model/User.dart';
 import 'theme/app_them_data.dart';
 import 'utils/DarkThemeProvider.dart';
 
+/// Picks staging vs production Firebase config based on the `--flavor` the
+/// app was built with (set in android/app/build.gradle productFlavors).
+FirebaseOptions get _activeFirebaseOptions => appFlavor == 'staging'
+    ? staging.DefaultFirebaseOptions.currentPlatform
+    : DefaultFirebaseOptions.currentPlatform;
+
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await Firebase.initializeApp(
-    options: DefaultFirebaseOptions.currentPlatform,
+    options: _activeFirebaseOptions,
   );
 }
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
-  await FirebaseAppCheck.instance.activate(
+  await Firebase.initializeApp(options: _activeFirebaseOptions);
+
+  // Fire-and-forget: Play Integrity/App Attest attestation is a network
+  // round-trip and must not delay the first frame. (Notification permission
+  // request and FCM presentation options are handled once, in
+  // NotificationService.initInfo(), after the first frame.)
+  unawaited(FirebaseAppCheck.instance.activate(
     androidProvider: kReleaseMode ? AndroidProvider.playIntegrity : AndroidProvider.debug,
     appleProvider: kReleaseMode ? AppleProvider.appAttest : AppleProvider.debug,
-  );
+  ));
+
   await EasyLocalization.ensureInitialized();
 
   FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
-
-  await FirebaseMessaging.instance.setForegroundNotificationPresentationOptions(
-    alert: true,
-    badge: true,
-    sound: true,
-  );
-
-  await FirebaseMessaging.instance.requestPermission(
-    alert: true,
-    announcement: false,
-    badge: true,
-    carPlay: false,
-    criticalAlert: false,
-    provisional: false,
-    sound: true,
-  );
 
   await UserPreference.init();
 
@@ -133,67 +130,47 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
   // Define an async function to initialize FlutterFire
   void initializeFlutterFire() async {
     try {
-      await FireStoreUtils.firestore
-          .collection(Setting)
-          .doc("globalSettings")
-          .get()
-          .then((value) {
-        if (value.exists) {
-          AppThemeData.primary300 = Color(int.parse(
-              value.data()!['app_customer_color'].replaceFirst("#", "0xff")));
-        }
-      });
-      await FireStoreUtils.firestore
-          .collection(Setting)
-          .doc("emailSetting")
-          .get()
-          .then((value) {
-        if (value.exists) {
-          mailSettings = MailSettings.fromJson(value.data()!);
-        }
-      });
-      await FireStoreUtils.firestore
-          .collection(Setting)
-          .doc("Version")
-          .get()
-          .then((value) {
-        if (value.exists) appVersion = value.data()!['app_version'].toString();
-      });
+      // These 7 settings docs are independent of each other — fetch them
+      // concurrently instead of awaiting each network round-trip in series.
+      final settingsCollection = FireStoreUtils.firestore.collection(Setting);
+      final results = await Future.wait([
+        settingsCollection.doc("globalSettings").get(),
+        settingsCollection.doc("emailSetting").get(),
+        settingsCollection.doc("Version").get(),
+        settingsCollection.doc("googleMapKey").get(),
+        settingsCollection.doc("DriverNearBy").get(),
+        settingsCollection.doc("notification_setting").get(),
+        settingsCollection.doc("placeHolderImage").get(),
+      ]);
 
-      await FireStoreUtils.firestore
-          .collection(Setting)
-          .doc("googleMapKey")
-          .get()
-          .then((value) {
-        if (value.exists) GOOGLE_API_KEY = value.data()!['key'].toString();
-      });
+      final globalSettings = results[0];
+      if (globalSettings.exists) {
+        AppThemeData.primary300 = Color(int.parse(
+            globalSettings.data()!['app_customer_color'].replaceFirst("#", "0xff")));
+      }
 
-      await FireStoreUtils.firestore
-          .collection(Setting)
-          .doc("DriverNearBy")
-          .get()
-          .then((value) {
-        if (value.exists) selectedMapType = value.data()!['selectedMapType'].toString();
-      });
+      final emailSetting = results[1];
+      if (emailSetting.exists) {
+        mailSettings = MailSettings.fromJson(emailSetting.data()!);
+      }
 
-      await FireStoreUtils.firestore
-          .collection(Setting)
-          .doc("notification_setting")
-          .get()
-          .then((value) {
-        if (value.exists) {
-          senderId = value.data()!['senderId'].toString();
-          jsonNotificationFileURL = value.data()!['serviceJson'].toString();
-        }
-      });
+      final version = results[2];
+      if (version.exists) appVersion = version.data()!['app_version'].toString();
 
-      await FireStoreUtils.firestore
-          .collection(Setting)
-          .doc("placeHolderImage")
-          .get()
-          .then((value) {
-        if (value.exists) placeholderImage = value.data()!['image'].toString();
-      });
+      final googleMapKey = results[3];
+      if (googleMapKey.exists) GOOGLE_API_KEY = googleMapKey.data()!['key'].toString();
+
+      final driverNearBy = results[4];
+      if (driverNearBy.exists) selectedMapType = driverNearBy.data()!['selectedMapType'].toString();
+
+      final notificationSetting = results[5];
+      if (notificationSetting.exists) {
+        senderId = notificationSetting.data()!['senderId'].toString();
+        jsonNotificationFileURL = notificationSetting.data()!['serviceJson'].toString();
+      }
+
+      final placeHolderImage = results[6];
+      if (placeHolderImage.exists) placeholderImage = placeHolderImage.data()!['image'].toString();
 
       SharedPreferences sp = await SharedPreferences.getInstance();
       final langCode = sp.getString("languageCode");
@@ -304,168 +281,186 @@ class OnBoardingState extends State<OnBoarding> with TickerProviderStateMixin {
   late final Animation<double> _sublineOpacity;
   late final Animation<double> _loadingOpacity;
 
+  // Guards against acting twice if hasFinishedOnBoarding() finishes around
+  // the same moment the initState() timeout/error fallback fires.
+  bool _navigated = false;
+
+  void _safeNavigate(VoidCallback navigate) {
+    if (_navigated || !mounted) return;
+    _navigated = true;
+    navigate();
+  }
+
   // ── Firebase routing ───────────────────────────────────────────────────
   Future hasFinishedOnBoarding() async {
-    SharedPreferences prefs = await SharedPreferences.getInstance();
-    bool finishedOnBoarding = (prefs.getBool(FINISHED_ON_BOARDING) ?? false);
+    try {
+      SharedPreferences prefs = await SharedPreferences.getInstance();
+      bool finishedOnBoarding = (prefs.getBool(FINISHED_ON_BOARDING) ?? false);
 
-    if (finishedOnBoarding) {
-      auth.User? firebaseUser = auth.FirebaseAuth.instance.currentUser;
-      if (firebaseUser != null) {
-        User? user = await FireStoreUtils.getCurrentUser(firebaseUser.uid);
-        if (user != null && user.role == USER_ROLE_CUSTOMER) {
-          if (user.active) {
-            user.active = true;
-            user.role = USER_ROLE_CUSTOMER;
-            user.fcmToken =
-                await FireStoreUtils.firebaseMessaging.getToken() ?? '';
-            await FireStoreUtils.updateCurrentUser(user);
-            MyAppState.currentUser = user;
+      if (finishedOnBoarding) {
+        auth.User? firebaseUser = auth.FirebaseAuth.instance.currentUser;
+        if (firebaseUser != null) {
+          User? user = await FireStoreUtils.getCurrentUser(firebaseUser.uid);
+          if (user != null && user.role == USER_ROLE_CUSTOMER) {
+            if (user.active) {
+              user.active = true;
+              user.role = USER_ROLE_CUSTOMER;
+              user.fcmToken =
+                  await FireStoreUtils.firebaseMessaging.getToken() ?? '';
+              await FireStoreUtils.updateCurrentUser(user);
+              MyAppState.currentUser = user;
 
-            if (MyAppState.currentUser!.shippingAddress != null &&
-                MyAppState.currentUser!.shippingAddress!.isNotEmpty) {
-              if (MyAppState.currentUser!.shippingAddress!
-                  .where((element) => element.isDefault == true)
-                  .isNotEmpty) {
-                MyAppState.selectedPosotion = MyAppState
-                    .currentUser!.shippingAddress!
+              if (MyAppState.currentUser!.shippingAddress != null &&
+                  MyAppState.currentUser!.shippingAddress!.isNotEmpty) {
+                if (MyAppState.currentUser!.shippingAddress!
                     .where((element) => element.isDefault == true)
-                    .single;
-              } else {
-                MyAppState.selectedPosotion =
-                    MyAppState.currentUser!.shippingAddress!.first;
-              }
-              // --- Begin: Set section info as ServiceListScreen does ---
-              final sections = await FireStoreUtils.getSections();
-              if (sections.isNotEmpty) {
-                sectionConstantModel = sections.first;
+                    .isNotEmpty) {
+                  MyAppState.selectedPosotion = MyAppState
+                      .currentUser!.shippingAddress!
+                      .where((element) => element.isDefault == true)
+                      .single;
+                } else {
+                  MyAppState.selectedPosotion =
+                      MyAppState.currentUser!.shippingAddress!.first;
+                }
+                // --- Begin: Set section info as ServiceListScreen does ---
+                final sections = await FireStoreUtils.getSections();
+                if (sections.isNotEmpty) {
+                  sectionConstantModel = sections.first;
 
-                if (sectionConstantModel?.color != null) {
-                  AppThemeData.primary300 = Color(
-                    int.parse(sectionConstantModel!.color!
-                        .replaceFirst("#", "0xff")),
-                  );
+                  if (sectionConstantModel?.color != null) {
+                    AppThemeData.primary300 = Color(
+                      int.parse(sectionConstantModel!.color!
+                          .replaceFirst("#", "0xff")),
+                    );
+                  }
+
+                  // Payment gateway methods use .then() internally and return
+                  // immediately — kick them off now so their Firestore requests
+                  // run in the background while we navigate to Home
+                  FireStoreUtils.getRazorPayDemo();
+                  FireStoreUtils.getPaypalSettingData();
+                  FireStoreUtils.getStripeSettingData();
+                  FireStoreUtils.getPayStackSettingData();
+                  FireStoreUtils.getFlutterWaveSettingData();
+                  FireStoreUtils.getPaytmSettingData();
+                  FireStoreUtils.getPayFastSettingData();
+                  FireStoreUtils.getWalletSettingData();
+                  FireStoreUtils.getMercadoPagoSettingData();
+                  FireStoreUtils.getOrangeMoneySettingData();
+                  FireStoreUtils.getXenditSettingData();
+                  FireStoreUtils.getMidTransSettingData();
+                  FireStoreUtils.getPhonePaySettingData();
+                  // fcmToken was already fetched and written above —
+                  // no need to re-fetch and re-write it here.
                 }
 
-                // Payment gateway methods use .then() internally and return
-                // immediately — kick them off now so their Firestore requests
-                // run while we await the FCM token
-                FireStoreUtils.getRazorPayDemo();
-                FireStoreUtils.getPaypalSettingData();
-                FireStoreUtils.getStripeSettingData();
-                FireStoreUtils.getPayStackSettingData();
-                FireStoreUtils.getFlutterWaveSettingData();
-                FireStoreUtils.getPaytmSettingData();
-                FireStoreUtils.getPayFastSettingData();
-                FireStoreUtils.getWalletSettingData();
-                FireStoreUtils.getMercadoPagoSettingData();
-                FireStoreUtils.getOrangeMoneySettingData();
-                FireStoreUtils.getXenditSettingData();
-                FireStoreUtils.getMidTransSettingData();
-                FireStoreUtils.getPhonePaySettingData();
-
-                MyAppState.currentUser!.fcmToken =
-                    await FireStoreUtils.firebaseMessaging.getToken() ?? '';
-                await FireStoreUtils.updateCurrentUser(
-                    MyAppState.currentUser!);
+                // Push to HomeScreen with drawer support
+                _safeNavigate(() => pushReplacement(
+                    context,
+                    ContainerScreen(
+                      user: MyAppState.currentUser!,
+                      currentWidget: HomeScreen(user: MyAppState.currentUser!),
+                      appBarTitle: 'Home',
+                      drawerSelection: DrawerSelection.Home,
+                    )));
+                // --- End ---
+              } else {
+                _safeNavigate(() =>
+                    pushAndRemoveUntil(context, LocationPermissionScreen()));
               }
-
-              // Push to HomeScreen with drawer support
-              pushReplacement(
-                  context,
-                  ContainerScreen(
-                    user: MyAppState.currentUser!,
-                    currentWidget: HomeScreen(user: MyAppState.currentUser!),
-                    appBarTitle: 'Home',
-                    drawerSelection: DrawerSelection.Home,
-                  ));
-              // --- End ---
             } else {
-              pushAndRemoveUntil(context, LocationPermissionScreen());
+              user.lastOnlineTimestamp = Timestamp.now();
+              user.fcmToken = "";
+              await FireStoreUtils.updateCurrentUser(user);
+              await auth.FirebaseAuth.instance.signOut();
+              MyAppState.currentUser = null;
+              _safeNavigate(
+                  () => pushReplacement(context, const LoginScreen()));
+            }
+
+            //UserPreference.setUserId(userID: user.userID);
+            //
+          } else {
+            _safeNavigate(() => pushReplacement(context, const LoginScreen()));
+          }
+        } else {
+          // No Firebase Auth session — try to restore a MSG91 phone user's session
+          final savedPhoneUid = prefs.getString(PHONE_AUTH_USER_ID);
+          if (savedPhoneUid != null && savedPhoneUid.isNotEmpty) {
+            User? user = await FireStoreUtils.getCurrentUser(savedPhoneUid);
+            if (user != null && user.role == USER_ROLE_CUSTOMER && user.active) {
+              user.fcmToken =
+                  await FireStoreUtils.firebaseMessaging.getToken() ?? '';
+              await FireStoreUtils.updateCurrentUser(user);
+              MyAppState.currentUser = user;
+
+              if (MyAppState.currentUser!.shippingAddress != null &&
+                  MyAppState.currentUser!.shippingAddress!.isNotEmpty) {
+                if (MyAppState.currentUser!.shippingAddress!
+                    .where((element) => element.isDefault == true)
+                    .isNotEmpty) {
+                  MyAppState.selectedPosotion = MyAppState
+                      .currentUser!.shippingAddress!
+                      .where((element) => element.isDefault == true)
+                      .single;
+                } else {
+                  MyAppState.selectedPosotion =
+                      MyAppState.currentUser!.shippingAddress!.first;
+                }
+                final sections = await FireStoreUtils.getSections();
+                if (sections.isNotEmpty) {
+                  sectionConstantModel = sections.first;
+                  if (sectionConstantModel?.color != null) {
+                    AppThemeData.primary300 = Color(
+                      int.parse(sectionConstantModel!.color!
+                          .replaceFirst("#", "0xff")),
+                    );
+                  }
+                  FireStoreUtils.getRazorPayDemo();
+                  FireStoreUtils.getPaypalSettingData();
+                  FireStoreUtils.getStripeSettingData();
+                  FireStoreUtils.getPayStackSettingData();
+                  FireStoreUtils.getFlutterWaveSettingData();
+                  FireStoreUtils.getPaytmSettingData();
+                  FireStoreUtils.getPayFastSettingData();
+                  FireStoreUtils.getWalletSettingData();
+                  FireStoreUtils.getMercadoPagoSettingData();
+                  FireStoreUtils.getOrangeMoneySettingData();
+                  FireStoreUtils.getXenditSettingData();
+                  FireStoreUtils.getMidTransSettingData();
+                  FireStoreUtils.getPhonePaySettingData();
+                }
+                _safeNavigate(() => pushReplacement(
+                    context,
+                    ContainerScreen(
+                      user: MyAppState.currentUser!,
+                      currentWidget: HomeScreen(user: MyAppState.currentUser!),
+                      appBarTitle: 'Home',
+                      drawerSelection: DrawerSelection.Home,
+                    )));
+              } else {
+                _safeNavigate(() =>
+                    pushAndRemoveUntil(context, LocationPermissionScreen()));
+              }
+            } else {
+              // Stored session is invalid or user deactivated — clear it
+              await prefs.remove(PHONE_AUTH_USER_ID);
+              _safeNavigate(
+                  () => pushReplacement(context, const LoginScreen()));
             }
           } else {
-            user.lastOnlineTimestamp = Timestamp.now();
-            user.fcmToken = "";
-            await FireStoreUtils.updateCurrentUser(user);
-            await auth.FirebaseAuth.instance.signOut();
-            MyAppState.currentUser = null;
-            pushReplacement(context, const LoginScreen());
+            _safeNavigate(() => pushReplacement(context, const LoginScreen()));
           }
-
-          //UserPreference.setUserId(userID: user.userID);
-          //
-        } else {
-          pushReplacement(context, const LoginScreen());
         }
       } else {
-        // No Firebase Auth session — try to restore a MSG91 phone user's session
-        final savedPhoneUid = prefs.getString(PHONE_AUTH_USER_ID);
-        if (savedPhoneUid != null && savedPhoneUid.isNotEmpty) {
-          User? user = await FireStoreUtils.getCurrentUser(savedPhoneUid);
-          if (user != null && user.role == USER_ROLE_CUSTOMER && user.active) {
-            user.fcmToken =
-                await FireStoreUtils.firebaseMessaging.getToken() ?? '';
-            await FireStoreUtils.updateCurrentUser(user);
-            MyAppState.currentUser = user;
-
-            if (MyAppState.currentUser!.shippingAddress != null &&
-                MyAppState.currentUser!.shippingAddress!.isNotEmpty) {
-              if (MyAppState.currentUser!.shippingAddress!
-                  .where((element) => element.isDefault == true)
-                  .isNotEmpty) {
-                MyAppState.selectedPosotion = MyAppState
-                    .currentUser!.shippingAddress!
-                    .where((element) => element.isDefault == true)
-                    .single;
-              } else {
-                MyAppState.selectedPosotion =
-                    MyAppState.currentUser!.shippingAddress!.first;
-              }
-              final sections = await FireStoreUtils.getSections();
-              if (sections.isNotEmpty) {
-                sectionConstantModel = sections.first;
-                if (sectionConstantModel?.color != null) {
-                  AppThemeData.primary300 = Color(
-                    int.parse(sectionConstantModel!.color!
-                        .replaceFirst("#", "0xff")),
-                  );
-                }
-                FireStoreUtils.getRazorPayDemo();
-                FireStoreUtils.getPaypalSettingData();
-                FireStoreUtils.getStripeSettingData();
-                FireStoreUtils.getPayStackSettingData();
-                FireStoreUtils.getFlutterWaveSettingData();
-                FireStoreUtils.getPaytmSettingData();
-                FireStoreUtils.getPayFastSettingData();
-                FireStoreUtils.getWalletSettingData();
-                FireStoreUtils.getMercadoPagoSettingData();
-                FireStoreUtils.getOrangeMoneySettingData();
-                FireStoreUtils.getXenditSettingData();
-                FireStoreUtils.getMidTransSettingData();
-                FireStoreUtils.getPhonePaySettingData();
-              }
-              pushReplacement(
-                  context,
-                  ContainerScreen(
-                    user: MyAppState.currentUser!,
-                    currentWidget: HomeScreen(user: MyAppState.currentUser!),
-                    appBarTitle: 'Home',
-                    drawerSelection: DrawerSelection.Home,
-                  ));
-            } else {
-              pushAndRemoveUntil(context, LocationPermissionScreen());
-            }
-          } else {
-            // Stored session is invalid or user deactivated — clear it
-            await prefs.remove(PHONE_AUTH_USER_ID);
-            pushReplacement(context, const LoginScreen());
-          }
-        } else {
-          pushReplacement(context, const LoginScreen());
-        }
+        _safeNavigate(() => pushReplacement(context, const OnBoardingScreen()));
       }
-    } else {
-      pushReplacement(context, const OnBoardingScreen());
+    } catch (e, st) {
+      debugPrint('hasFinishedOnBoarding failed: $e\n$st');
+      // Any failure above (network blip, FCM token fetch, malformed user
+      // data, etc.) must not leave the user stuck on this splash screen.
+      _safeNavigate(() => pushReplacement(context, const LoginScreen()));
     }
   }
 
@@ -473,7 +468,16 @@ class OnBoardingState extends State<OnBoarding> with TickerProviderStateMixin {
   void initState() {
     super.initState();
     _initAnimations();
-    hasFinishedOnBoarding();
+    // Safety net for hangs that never throw (e.g. a stalled network call) —
+    // the try/catch above only catches failures that actually throw. This
+    // guarantees the splash can never get stuck on this screen forever.
+    hasFinishedOnBoarding().timeout(
+      const Duration(seconds: 15),
+      onTimeout: () {
+        debugPrint('hasFinishedOnBoarding timed out after 15s');
+        _safeNavigate(() => pushReplacement(context, const LoginScreen()));
+      },
+    );
   }
 
   void _initAnimations() {

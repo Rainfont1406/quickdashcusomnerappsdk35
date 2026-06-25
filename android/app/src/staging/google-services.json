@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "812164926263",
+    "project_id": "quickdash-staging",
+    "storage_bucket": "quickdash-staging.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:812164926263:android:4868598ed9f699b19f28b2",
+        "android_client_info": {
+          "package_name": "com.quickdash.customer.staging"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDgF-6rQUl4o-6F1jcIlFFDxa57vzSrZYM"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
