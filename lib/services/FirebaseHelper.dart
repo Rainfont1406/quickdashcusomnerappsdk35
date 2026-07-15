@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:developer';
 import 'dart:io';
 
@@ -64,6 +65,7 @@ import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/services.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 import 'package:video_thumbnail/video_thumbnail.dart';
@@ -71,6 +73,10 @@ import 'package:video_thumbnail/video_thumbnail.dart';
 import '../constants.dart';
 import '../model/FlutterWaveSettingDataModel.dart';
 import '../model/PayStackSettingsModel.dart';
+import 'bunny_storage.dart';
+
+// Base URL of the QuickDash admin/API server.
+const _kApiBase = 'https://admin.quickdash.co.in';
 
 class FireStoreUtils {
   static FirebaseMessaging firebaseMessaging = FirebaseMessaging.instance;
@@ -82,17 +88,29 @@ class FireStoreUtils {
     return auth.FirebaseAuth.instance.currentUser?.uid ?? '';
   }
 
+  static DateTime? _cachedServerTime;
+  static DateTime? _serverTimeFetchedAt;
+  static const Duration _serverTimeTtl = Duration(minutes: 5);
+
   /// Returns the current time according to Firestore's server clock.
-  /// Writes a sentinel document to get a server-authoritative timestamp so that
-  /// device clock manipulation cannot be used to unlock time-limited discounts.
+  /// Cached for 5 minutes — adjusted forward by elapsed wall-clock time so
+  /// the returned value stays accurate within the TTL window.
   /// Falls back to device time if the write fails (e.g. offline).
   static Future<DateTime> getServerTime() async {
+    final now = DateTime.now();
+    if (_cachedServerTime != null && _serverTimeFetchedAt != null &&
+        now.difference(_serverTimeFetchedAt!) < _serverTimeTtl) {
+      return _cachedServerTime!.add(now.difference(_serverTimeFetchedAt!));
+    }
     try {
       final ref = firestore.collection('_serverPing').doc('ping');
       await ref.set({'t': FieldValue.serverTimestamp()});
       final snap = await ref.get();
       final ts = snap.data()?['t'] as Timestamp?;
-      return ts?.toDate() ?? DateTime.now();
+      final serverTime = ts?.toDate() ?? DateTime.now();
+      _cachedServerTime = serverTime;
+      _serverTimeFetchedAt = DateTime.now();
+      return serverTime;
     } catch (_) {
       return DateTime.now();
     }
@@ -204,7 +222,21 @@ class FireStoreUtils {
 
   List<BlockUserModel> blockedList = [];
 
+  static List<StoryModel>? _storyCache;
+  static DateTime? _storyCachedAt;
+  static const Duration _storyCacheTtl = Duration(minutes: 10);
+
+  static void clearStoryCache() {
+    _storyCache = null;
+    _storyCachedAt = null;
+  }
+
   Future<List<StoryModel>> getStory() async {
+    final now = DateTime.now();
+    if (_storyCache != null && _storyCachedAt != null &&
+        now.difference(_storyCachedAt!) < _storyCacheTtl) {
+      return _storyCache!;
+    }
     List<StoryModel> story = [];
     // Must filter approved==true server-side, not just client-side in
     // HomeScreen._filterStories() - the Firestore rule for story/{id} only
@@ -221,7 +253,59 @@ class FireStoreUtils {
         print('FireStoreUtils.getAllProducts Parse error $e');
       }
     });
+    _storyCache = story;
+    _storyCachedAt = now;
     return story;
+  }
+
+  /// Asks the server which of [vendorIds] fall within the active section's
+  /// nearByRadius of (lat, lng). Story-visibility radius filtering was
+  /// asked to be computed server-side rather than via a client-side
+  /// distance check, so this calls the admin panel instead of doing the
+  /// math here. Returns null (meaning "unknown, don't filter yet") on any
+  /// network/parse failure so a transient API hiccup never hides stories
+  /// outright - callers should keep their previous result until this
+  /// succeeds.
+  Future<Set<String>?> getNearbyVendorIds({
+    required double lat,
+    required double lng,
+    required List<String> vendorIds,
+  }) async {
+    if (vendorIds.isEmpty || sectionConstantModel?.id == null) return null;
+
+    try {
+      final idToken = await auth.FirebaseAuth.instance.currentUser?.getIdToken();
+      if (idToken == null) return null;
+
+      final resp = await http
+          .post(
+            Uri.parse('$_kApiBase/api/vendors/nearby'),
+            headers: {
+              'Authorization': 'Bearer $idToken',
+              'Content-Type': 'application/json',
+              'Accept': 'application/json',
+            },
+            body: jsonEncode({
+              'lat': lat,
+              'lng': lng,
+              'section_id': sectionConstantModel!.id,
+              'vendor_ids': vendorIds,
+            }),
+          )
+          .timeout(const Duration(seconds: 10));
+
+      if (resp.statusCode != 200) {
+        print('getNearbyVendorIds failed (${resp.statusCode}): ${resp.body}');
+        return null;
+      }
+
+      final decoded = jsonDecode(resp.body);
+      final ids = (decoded['vendor_ids'] as List?)?.cast<String>();
+      return ids == null ? null : Set<String>.from(ids);
+    } catch (e) {
+      print('getNearbyVendorIds skipped: $e');
+      return null;
+    }
   }
 
   static Future<List<AttributesModel>> getAttributes() async {
@@ -353,6 +437,26 @@ class FireStoreUtils {
     yield* ordersByIdStreamController.stream;
   }
 
+  // Customer declines a pending vendor-initiated Bill Pay request.
+  Future<void> declineBillPayRequest(String orderId) async {
+    await firestore.collection(ORDERS).doc(orderId).update({
+      'status': BILLPAY_STATUS_DECLINED,
+      'billPayRespondedAt': Timestamp.now(),
+    });
+  }
+
+  // Opportunistic client-side expiry: only flips status if still pending,
+  // so it never clobbers a decline/accept that raced it.
+  Future<void> expireBillPayRequestIfPending(String orderId) async {
+    final ref = firestore.collection(ORDERS).doc(orderId);
+    await firestore.runTransaction((tx) async {
+      final snap = await tx.get(ref);
+      if (snap.data()?['status'] == BILLPAY_STATUS_PENDING_APPROVAL) {
+        tx.update(ref, {'status': BILLPAY_STATUS_EXPIRED});
+      }
+    });
+  }
+
   static Future<VendorModel?> getVendor(String vid) async {
     DocumentSnapshot<Map<String, dynamic>> userDocument = await firestore.collection(VENDORS).doc(vid).get();
     if (userDocument.data() != null && userDocument.exists) {
@@ -362,6 +466,7 @@ class FireStoreUtils {
       return null;
     }
   }
+
 
   // vendorId -> (in-flight/resolved fetch, when it was started). Sales data
   // is a slow-changing 30-day rolling aggregate, so a short cache avoids
@@ -638,15 +743,7 @@ class FireStoreUtils {
   }
 
   Future<String> uploadProductImage(File image, String progress) async {
-    var uniqueID = const Uuid().v4();
-    Reference upload = storage.child(STORAGE_ROOT +
-        '/productImages/$uniqueID'
-            '.png');
-    UploadTask uploadTask = upload.putFile(image);
-    uploadTask.whenComplete(() {}).catchError((onError) => print((onError as PlatformException).message));
-    var storageRef = (await uploadTask.whenComplete(() {})).ref;
-    var downloadUrl = await storageRef.getDownloadURL();
-    return downloadUrl.toString();
+    return uploadImageToBunny(image, 'store/products');
   }
 
   static Future<ProductModel?> getProductById(String productId) async {
@@ -665,7 +762,19 @@ class FireStoreUtils {
   }
 
   static Future<User?> updateCurrentUser(User user) async {
-    return await firestore.collection(USERS).doc(user.userID).set(user.toJson()).then((document) {
+    // wallet_amount is server-authoritative now (Cloud Functions / Laravel
+    // Admin SDK only) — firestore.rules rejects any customer-owned update
+    // that touches it at all, even to write back the same value it already
+    // has. A plain full-document .set() would include whatever value the
+    // in-memory User object happens to be holding (which drifts from the
+    // real server balance constantly — right after any order/payment), so
+    // every ordinary profile edit would fail the moment that drift exists.
+    // Strip the field entirely and merge instead of replacing outright, so
+    // this write never touches wallet_amount and never deletes any field
+    // this model doesn't know about.
+    final json = user.toJson();
+    json.remove('wallet_amount');
+    return await firestore.collection(USERS).doc(user.userID).set(json, SetOptions(merge: true)).then((document) {
       MyAppState.currentUser = user;
       return user;
     });
@@ -693,10 +802,7 @@ class FireStoreUtils {
   }
 
   static Future<String> uploadUserImageToFireStorage(File image, String userID) async {
-    Reference upload = storage.child(STORAGE_ROOT + '/User/images/$userID.png');
-    UploadTask uploadTask = upload.putFile(image);
-    var downloadUrl = await (await uploadTask.whenComplete(() {})).ref.getDownloadURL();
-    return downloadUrl.toString();
+    return uploadImageToBunny(image, 'profiles');
   }
 
   Future<Url> uploadChatImageToFireStorage(File image, BuildContext context) async {
@@ -990,57 +1096,81 @@ class FireStoreUtils {
     }
   }
 
-  Future<List<ProductModel>> getAllProducts() async {
-    List<ProductModel> products = [];
+  // ── Product list cache ─────────────────────────────────────────────────────
+  // Keyed by "${sectionId}_${type}" so A→B→A re-uses the cached A list.
+  static final Map<String, List<ProductModel>> _productsCache = {};
+  static final Map<String, DateTime> _productsCachedAt = {};
+  static const Duration _productsCacheTtl = Duration(minutes: 10);
 
-    QuerySnapshot<Map<String, dynamic>> productsQuery =
-        await firestore.collection(PRODUCTS).where("section_id", isEqualTo: sectionConstantModel!.id).where('publish', isEqualTo: true).get();
-    await Future.forEach(productsQuery.docs, (QueryDocumentSnapshot<Map<String, dynamic>> document) {
+  static void clearProductsCache() {
+    _productsCache.clear();
+    _productsCachedAt.clear();
+  }
+
+  // Clears only one vendor's cached product list (key: "${vendorID}_vendor_all").
+  // Used by manual pull-to-refresh so refreshing one restaurant doesn't evict
+  // every other vendor's still-fresh cache.
+  static void clearVendorProductsCache(String vendorID) {
+    final key = '${vendorID}_vendor_all';
+    _productsCache.remove(key);
+    _productsCachedAt.remove(key);
+  }
+
+  Future<List<ProductModel>> _fetchProducts(String cacheKey, Query<Map<String, dynamic>> query) async {
+    final now = DateTime.now();
+    final cached = _productsCache[cacheKey];
+    final cachedAt = _productsCachedAt[cacheKey];
+    if (cached != null && cachedAt != null &&
+        now.difference(cachedAt) < _productsCacheTtl) {
+      return cached;
+    }
+    final List<ProductModel> products = [];
+    final snapshot = await query.get();
+    for (final doc in snapshot.docs) {
       try {
-        products.add(ProductModel.fromJson(document.data()));
+        products.add(ProductModel.fromJson(doc.data()));
       } catch (e) {
-        print('productspppp**-FireStoreUtils.getAllProducts Parse error $e');
+        print('FireStoreUtils.getAllProducts parse error $e');
       }
-    });
+    }
+    _productsCache[cacheKey] = products;
+    _productsCachedAt[cacheKey] = now;
     return products;
+  }
+
+  Future<List<ProductModel>> getAllProducts() async {
+    final key = '${sectionConstantModel!.id}_all';
+    return _fetchProducts(
+      key,
+      firestore
+          .collection(PRODUCTS)
+          .where("section_id", isEqualTo: sectionConstantModel!.id)
+          .where('publish', isEqualTo: true),
+    );
   }
 
   Future<List<ProductModel>> getAllDelevryProducts() async {
-    List<ProductModel> products = [];
-
-    QuerySnapshot<Map<String, dynamic>> productsQuery = await firestore
-        .collection(PRODUCTS)
-        // .where("deliveryOption", isEqualTo: true)
-        .where("section_id", isEqualTo: sectionConstantModel!.id)
-        .where('publish', isEqualTo: true)
-        .get();
-    await Future.forEach(productsQuery.docs, (QueryDocumentSnapshot<Map<String, dynamic>> document) {
-      try {
-        products.add(ProductModel.fromJson(document.data()));
-      } catch (e) {
-        print('productspppp**-FireStoreUtils.getAllProducts Parse error $e');
-      }
-    });
-    return products;
+    final key = '${sectionConstantModel!.id}_delivery';
+    return _fetchProducts(
+      key,
+      firestore
+          .collection(PRODUCTS)
+          // .where("deliveryOption", isEqualTo: true)
+          .where("section_id", isEqualTo: sectionConstantModel!.id)
+          .where('publish', isEqualTo: true),
+    );
   }
 
   Future<List<ProductModel>> getAllTakeAWayProducts() async {
-    List<ProductModel> products = [];
-
-    QuerySnapshot<Map<String, dynamic>> productsQuery = await firestore
-        .collection(PRODUCTS)
-        // .where("takeawayOption", isEqualTo: true)
-        .where("section_id", isEqualTo: sectionConstantModel!.id)
-        .where('publish', isEqualTo: true)
-        .get();
-    await Future.forEach(productsQuery.docs, (QueryDocumentSnapshot<Map<String, dynamic>> document) {
-      try {
-        products.add(ProductModel.fromJson(document.data()));
-      } catch (e) {
-        print('productspppp**-123--FireStoreUtils.getAllProducts Parse error $e');
-      }
-    });
-    return products;
+    final key = '${sectionConstantModel!.id}_takeaway';
+    return _fetchProducts(
+      key,
+      firestore
+          .collection(PRODUCTS)
+          // .where("takeawayOption", isEqualTo: true)
+          .where("section_id", isEqualTo: sectionConstantModel!.id)
+          .where('publish', isEqualTo: true),
+    );
   }
 
   Future<bool> blockUser(User blockedUser, String type) async {
@@ -1120,23 +1250,46 @@ class FireStoreUtils {
     return cuisines;
   }
 
-  Stream<List<VendorModel>> getAllDineInRestaurants() {
-    return firestore
-        .collection(VENDORS)
-        .where("section_id", isEqualTo: sectionConstantModel!.id)
-        .where("enabledDiveInFuture", isEqualTo: true)
-        .snapshots()
-        .map((snapshot) {
-      final List<VendorModel> vendors = [];
-      for (var doc in snapshot.docs) {
-        try {
-          vendors.add(VendorModel.fromJson(doc.data()));
-        } catch (e) {
-          print('getAllDineInRestaurants parse error: $e');
+  StreamController<List<VendorModel>>? dineInStreamController;
+
+  // Same geoflutterfire radius filter as getAllStores()/getVendorsByCuisineID()
+  // - this previously queried the whole section with no distance check at
+  // all, so the Dine In tab could show vendors far outside nearByRadius.
+  Stream<List<VendorModel>> getAllDineInRestaurants() async* {
+    dineInStreamController = StreamController<List<VendorModel>>.broadcast();
+
+    try {
+      var collectionReference = firestore
+          .collection(VENDORS)
+          .where("section_id", isEqualTo: sectionConstantModel!.id)
+          .where("enabledDiveInFuture", isEqualTo: true);
+
+      GeoFirePoint center = geo.point(
+          latitude: MyAppState.selectedPosotion.location!.latitude,
+          longitude: MyAppState.selectedPosotion.location!.longitude);
+
+      Stream<List<DocumentSnapshot>> stream = geo
+          .collection(collectionRef: collectionReference)
+          .within(center: center, radius: double.parse(sectionConstantModel!.nearByRadius.toString()), field: 'g', strictMode: true);
+
+      stream.listen((List<DocumentSnapshot> documentList) {
+        final List<VendorModel> vendors = [];
+        for (var doc in documentList) {
+          try {
+            vendors.add(VendorModel.fromJson(doc.data() as Map<String, dynamic>));
+          } catch (e) {
+            print('getAllDineInRestaurants parse error: $e');
+          }
         }
-      }
-      return vendors;
-    });
+        if (dineInStreamController?.isClosed == false) {
+          dineInStreamController!.add(vendors);
+        }
+      });
+    } catch (e) {
+      print('getAllDineInRestaurants setup error: $e');
+    }
+
+    yield* dineInStreamController!.stream;
   }
 
   late StreamSubscription vendorStreamSub;
@@ -1242,6 +1395,7 @@ class FireStoreUtils {
         .where('authorID', isEqualTo: userID)
         .where('section_id', isEqualTo: sectionConstantModel!.id)
         .orderBy('createdAt', descending: true)
+        .limit(20)
         .snapshots()
         .listen((onData) async {
       orders.clear();
@@ -1439,14 +1593,19 @@ class FireStoreUtils {
 
   Future<List<OfferModel>> getViewAllOffer() async {
     List<OfferModel> offersData = [];
-
+    // Single-field filter only — no composite index required.
+    // expiresAt is checked client-side.
+    final nowTs = Timestamp.now();
     QuerySnapshot<Map<String, dynamic>> vendorsQuery =
-        await firestore.collection(COUPONS).where("isEnabled", isEqualTo: true).where('expiresAt', isGreaterThanOrEqualTo: Timestamp.now()).get();
+        await firestore.collection(COUPONS).where("isEnabled", isEqualTo: true).get();
     await Future.forEach(vendorsQuery.docs, (QueryDocumentSnapshot<Map<String, dynamic>> document) {
       try {
-        offersData.add(OfferModel.fromJson(document.data()));
+        final offer = OfferModel.fromJson(document.data());
+        if (offer.expireOfferDate == null || offer.expireOfferDate!.compareTo(nowTs) >= 0) {
+          offersData.add(offer);
+        }
       } catch (e) {
-        print('FireStoreUtils.getVendors Parse error $e');
+        print('FireStoreUtils.getViewAllOffer Parse error $e');
       }
     });
     return offersData;
@@ -1509,22 +1668,13 @@ class FireStoreUtils {
   }
 
   Future<List<OfferModel>> getOfferByVendorID(String vendorID) async {
-    List<OfferModel> offers = [];
-    QuerySnapshot<Map<String, dynamic>> bannerHomeQuery = await firestore
-        .collection(COUPONS)
-        .where("vendorID", isEqualTo: vendorID)
-        .where("isEnabled", isEqualTo: true)
-        .where("isPublic", isEqualTo: true)
-        .where('expiresAt', isGreaterThanOrEqualTo: Timestamp.now())
-        .get();
-    await Future.forEach(bannerHomeQuery.docs, (QueryDocumentSnapshot<Map<String, dynamic>> document) {
-      try {
-        offers.add(OfferModel.fromJson(document.data()));
-      } catch (e) {
-        print('FireStoreUtils.getCuisines Parse error $e');
-      }
-    });
-    return offers;
+    // Reuse the cached getAllCoupons() result (same query the cart uses) and
+    // filter client-side. The old multi-field Firestore query required a
+    // composite index that may not exist, causing silent empty results.
+    final all = await getAllCoupons();
+    return all
+        .where((c) => c.storeId == vendorID && (c.isPublic ?? false))
+        .toList();
   }
 
   closeOfferStream() {
@@ -1613,34 +1763,49 @@ class FireStoreUtils {
     return currency;
   }
 
-  Future<List<OfferModel>> getPublicCoupons() async {
-    List<OfferModel> coupon = [];
+  static List<OfferModel>? _allCouponsCache;
+  static DateTime? _allCouponsCachedAt;
+  static const Duration _couponsCacheTtl = Duration(minutes: 30);
 
+  // Lets manual pull-to-refresh force a fresh coupon fetch instead of
+  // waiting out the 30-minute TTL, same pattern as clearVendorProductsCache.
+  static void clearAllCouponsCache() {
+    _allCouponsCache = null;
+    _allCouponsCachedAt = null;
+  }
+
+  /// Returns all enabled, non-expired coupons. Cached for 30 minutes.
+  Future<List<OfferModel>> getAllCoupons() async {
+    final now = DateTime.now();
+    if (_allCouponsCache != null && _allCouponsCachedAt != null &&
+        now.difference(_allCouponsCachedAt!) < _couponsCacheTtl) {
+      return _allCouponsCache!;
+    }
+    List<OfferModel> coupon = [];
+    // Single-field filter only — avoids composite index on (isEnabled, expiresAt)
+    // which may not exist. expiresAt validity is enforced client-side.
+    final nowTs = Timestamp.now();
     QuerySnapshot<Map<String, dynamic>> couponsQuery =
-        await firestore.collection(COUPON).where('expiresAt', isGreaterThanOrEqualTo: Timestamp.now()).where("isEnabled", isEqualTo: true).where("isPublic", isEqualTo: true).get();
+        await firestore.collection(COUPONS).where('isEnabled', isEqualTo: true).get();
     await Future.forEach(couponsQuery.docs, (QueryDocumentSnapshot<Map<String, dynamic>> document) {
       try {
-        coupon.add(OfferModel.fromJson(document.data()));
+        final offer = OfferModel.fromJson(document.data());
+        if (offer.expireOfferDate == null || offer.expireOfferDate!.compareTo(nowTs) >= 0) {
+          coupon.add(offer);
+        }
       } catch (e) {
-        print('FireStoreUtils.getAllProducts Parse error $e');
+        print('FireStoreUtils.getAllCoupons Parse error $e');
       }
     });
+    _allCouponsCache = coupon;
+    _allCouponsCachedAt = now;
     return coupon;
   }
 
-  Future<List<OfferModel>> getAllCoupons() async {
-    List<OfferModel> coupon = [];
-
-    QuerySnapshot<Map<String, dynamic>> couponsQuery =
-        await firestore.collection(COUPON).where('isEnabled', isEqualTo: true).where('expiresAt', isGreaterThanOrEqualTo: Timestamp.now()).get();
-    await Future.forEach(couponsQuery.docs, (QueryDocumentSnapshot<Map<String, dynamic>> document) {
-      try {
-        coupon.add(OfferModel.fromJson(document.data()));
-      } catch (e) {
-        print('FireStoreUtils.getAllProducts Parse error $e');
-      }
-    });
-    return coupon;
+  /// Returns only public-visible coupons. Uses cached getAllCoupons() result.
+  Future<List<OfferModel>> getPublicCoupons() async {
+    final all = await getAllCoupons();
+    return all.where((c) => c.isPublic == true).toList();
   }
 
   Future<List<OfferModel>> getOfferByCabCoupons() async {
@@ -1749,55 +1914,43 @@ class FireStoreUtils {
   }
 
   Future<List<ProductModel>> getVendorProducts(String vendorID) async {
-    List<ProductModel> products = [];
-
-    QuerySnapshot<Map<String, dynamic>> productsQuery = await firestore.collection(PRODUCTS).where('vendorID', isEqualTo: vendorID).where('publish', isEqualTo: true).get();
-    await Future.forEach(productsQuery.docs, (QueryDocumentSnapshot<Map<String, dynamic>> document) {
-      try {
-        products.add(ProductModel.fromJson(document.data()));
-      } catch (e) {
-        print('FireStoreUtils.getVendorProducts Parse error $e');
-      }
-    });
-    return products;
+    // Shared cache key with getVendorProductsDelivery/TakeAWay — same query.
+    final key = '${vendorID}_vendor_all';
+    return _fetchProducts(
+      key,
+      firestore
+          .collection(PRODUCTS)
+          .where('vendorID', isEqualTo: vendorID)
+          .where('publish', isEqualTo: true),
+    );
   }
 
   Future<List<ProductModel>> getVendorProductsTakeAWay(String vendorID) async {
-    List<ProductModel> products = [];
-
-    QuerySnapshot<Map<String, dynamic>> productsQuery = await firestore
-        .collection(PRODUCTS)
-        .where('vendorID', isEqualTo: vendorID)
-        // .where('takeaway', isEqualTo: true)
-        .where('publish', isEqualTo: true)
-        .get();
-    await Future.forEach(productsQuery.docs, (QueryDocumentSnapshot<Map<String, dynamic>> document) {
-      try {
-        products.add(ProductModel.fromJson(document.data()));
-      } catch (e) {
-        print('FireStoreUtils.getVendorProducts Parse error $e');
-      }
-    });
-    return products;
+    // Delivery/TakeAway filters are commented out server-side; filtering is
+    // done client-side in newVendorProductsScreen. Same query → share cache.
+    final key = '${vendorID}_vendor_all';
+    return _fetchProducts(
+      key,
+      firestore
+          .collection(PRODUCTS)
+          .where('vendorID', isEqualTo: vendorID)
+          // .where('takeaway', isEqualTo: true)
+          .where('publish', isEqualTo: true),
+    );
   }
 
   Future<List<ProductModel>> getVendorProductsDelivery(String vendorID) async {
-    List<ProductModel> products = [];
-
-    QuerySnapshot<Map<String, dynamic>> productsQuery = await firestore
-        .collection(PRODUCTS)
-        .where('vendorID', isEqualTo: vendorID)
-        // .where('deliveryOption', isEqualTo: true)
-        .where('publish', isEqualTo: true)
-        .get();
-    await Future.forEach(productsQuery.docs, (QueryDocumentSnapshot<Map<String, dynamic>> document) {
-      try {
-        products.add(ProductModel.fromJson(document.data()));
-      } catch (e) {
-        print('FireStoreUtils.getVendorProducts Parse error $e');
-      }
-    });
-    return products;
+    // Same query as getVendorProductsTakeAWay → shared cache key means
+    // switching order type Delivery↔DineAway costs zero extra Firestore reads.
+    final key = '${vendorID}_vendor_all';
+    return _fetchProducts(
+      key,
+      firestore
+          .collection(PRODUCTS)
+          .where('vendorID', isEqualTo: vendorID)
+          // .where('deliveryOption', isEqualTo: true)
+          .where('publish', isEqualTo: true),
+    );
   }
 
   //  Future<List<ProductModel>> updatevendorProduct(ProductModel productModel) async {
@@ -2030,7 +2183,12 @@ class FireStoreUtils {
   }
 
   Future<BookTableModel> bookTable(BookTableModel orderModel) async {
-    DocumentReference documentReference = firestore.collection(ORDERS_TABLE).doc();
+    // Respects a pre-generated id (e.g. the same one already used to key the
+    // wallet payment intent for a paid booking) instead of always minting a
+    // fresh one — same pattern as placeOrderWithTakeAWay.
+    DocumentReference documentReference = orderModel.id.isNotEmpty
+        ? firestore.collection(ORDERS_TABLE).doc(orderModel.id)
+        : firestore.collection(ORDERS_TABLE).doc();
     orderModel.id = documentReference.id;
     await documentReference.set(orderModel.toJson());
     return orderModel;
@@ -2095,7 +2253,7 @@ class FireStoreUtils {
   static Future<List<TopupTranHistoryModel>> getTopUpTransaction() async {
     final userId = MyAppState.currentUser!.userID; //UserPreference.getUserId();
     List<TopupTranHistoryModel> topUpHistoryList = [];
-    QuerySnapshot<Map<String, dynamic>> documentReference = await firestore.collection(Wallet).where('user_id', isEqualTo: userId).get();
+    QuerySnapshot<Map<String, dynamic>> documentReference = await firestore.collection(Wallet).where('user_id', isEqualTo: userId).orderBy('date', descending: true).limit(20).get();
     await Future.forEach(documentReference.docs, (QueryDocumentSnapshot<Map<String, dynamic>> document) {
       try {
         topUpHistoryList.add(TopupTranHistoryModel.fromJson(document.data()));
@@ -2713,13 +2871,39 @@ class FireStoreUtils {
 
   static Future<List<RatingModel>> getVendorReviews(String vendorId) async {
     List<RatingModel> ratingList = [];
-    await firestore.collection(Order_Rating).where('VendorId', isEqualTo: vendorId).get().then((value) {
+    await firestore.collection(Order_Rating).where('VendorId', isEqualTo: vendorId).limit(20).get().then((value) {
       for (var element in value.docs) {
         RatingModel giftCardsOrderModel = RatingModel.fromJson(element.data());
         ratingList.add(giftCardsOrderModel);
       }
     });
     return ratingList;
+  }
+
+  /// Paginated vendor reviews. Pass [lastDoc] to fetch the next page.
+  static Future<(List<RatingModel>, DocumentSnapshot?)> getVendorReviewsPaginated(
+    String vendorId, {
+    DocumentSnapshot? lastDoc,
+    int limit = 20,
+  }) async {
+    Query<Map<String, dynamic>> query = firestore
+        .collection(Order_Rating)
+        .where('VendorId', isEqualTo: vendorId)
+        .limit(limit);
+    if (lastDoc != null) query = query.startAfterDocument(lastDoc);
+    final snapshot = await query.get();
+    final models = snapshot.docs
+        .map((d) {
+          try {
+            return RatingModel.fromJson(d.data());
+          } catch (_) {
+            return null;
+          }
+        })
+        .whereType<RatingModel>()
+        .toList();
+    final next = snapshot.docs.isNotEmpty ? snapshot.docs.last : null;
+    return (models, next);
   }
 
 }

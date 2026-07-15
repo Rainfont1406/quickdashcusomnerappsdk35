@@ -2,10 +2,15 @@ import 'dart:convert';
 
 import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/model/CurrencyModel.dart';
+import 'package:emartconsumer/model/TaxModel.dart';
 import 'package:emartconsumer/model/createRazorPayOrderModel.dart';
 import 'package:emartconsumer/model/razorpayKeyModel.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/device_session_service.dart';
+import 'package:emartconsumer/services/localDatabase.dart';
+import 'package:emartconsumer/services/notification_service.dart';
 import 'package:emartconsumer/userPrefrence.dart';
+import 'package:firebase_auth/firebase_auth.dart' as auth;
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:uuid/uuid.dart';
@@ -34,7 +39,361 @@ class RazorPayResult {
   bool get isSuccess => order != null && errorType == RazorPayErrorType.none;
 }
 
+// Result of createVerifiedOrderPayment / createWalletTopupOrder: the amount
+// (and, for orders, the discount breakdown) is whatever the Cloud Function
+// computed server-side from Firestore, NOT anything this client sent.
+class VerifiedPaymentOrderResult {
+  final bool success;
+  final String? errorMessage;
+  final String? razorpayOrderId;
+  final String? razorpayKey;
+  final double amount;
+  final double verifiedDiscount;
+  final double verifiedSpecialDiscount;
+  // True when the server denied this specifically because another device is
+  // the account's active one within its 2h cooldown (device_superseded) —
+  // distinct from every other failure reason. The caller must treat this
+  // like any other "not the active device" signal: sign out and redirect to
+  // login, not just show an inline error and leave the user on this screen.
+  final bool deviceSuperseded;
+  // True when a wallet payment was denied because the server's own read of
+  // the real, current wallet_amount (inside the same transaction as the
+  // deduction) was insufficient for the verified total — distinct from a
+  // generic error since the UI should point the user at topping up.
+  final bool insufficientBalance;
+
+  VerifiedPaymentOrderResult({
+    this.success = false,
+    this.errorMessage,
+    this.razorpayOrderId,
+    this.razorpayKey,
+    this.amount = 0,
+    this.verifiedDiscount = 0,
+    this.verifiedSpecialDiscount = 0,
+    this.deviceSuperseded = false,
+    this.insufficientBalance = false,
+  });
+}
+
+class VerifyPaymentResult {
+  final bool success;
+  final String? errorMessage;
+
+  VerifyPaymentResult({this.success = false, this.errorMessage});
+}
+
 class RazorPayController {
+  Future<String?> _idToken() async => auth.FirebaseAuth.instance.currentUser?.getIdToken();
+
+  // Pre-payment verification for a cart checkout: the server recomputes
+  // subtotal/coupon/special-discount from Firestore and only creates a real
+  // Razorpay order for that verified total — the client can no longer choose
+  // what gets charged (Razorpay rejects a checkout payment that doesn't
+  // match the order's amount).
+  Future<VerifiedPaymentOrderResult> createVerifiedOrderPayment({
+    required String vendorID,
+    required List<CartProduct> products,
+    String? couponId,
+    String? sectionId,
+    bool takeAway = false,
+    String? deliveryCharge,
+    String? tipValue,
+    List<TaxModel>? taxSetting,
+    String currency = 'INR',
+  }) async {
+    final idToken = await _idToken();
+    if (idToken == null) {
+      return VerifiedPaymentOrderResult(errorMessage: 'Not signed in.');
+    }
+    try {
+      final deviceId = await DeviceSessionService.getDeviceId();
+      final fcmToken = await NotificationService.getToken();
+
+      final resp = await http
+          .post(
+            Uri.parse('$CloudFunctionsBaseURL/createVerifiedOrderPayment'),
+            headers: {'Authorization': 'Bearer $idToken', 'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'vendorID': vendorID,
+              'products': products.map((p) => p.toJson()).toList(),
+              'couponId': couponId,
+              'sectionId': sectionId,
+              'takeAway': takeAway,
+              'deliveryCharge': deliveryCharge,
+              'tipValue': tipValue,
+              'taxSetting': taxSetting?.map((t) => t.toJson()).toList(),
+              'currency': currency,
+              'deviceId': deviceId,
+              'fcmToken': fcmToken,
+            }),
+          )
+          .timeout(const Duration(seconds: 30));
+
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      if (resp.statusCode == 200) {
+        return VerifiedPaymentOrderResult(
+          success: true,
+          razorpayOrderId: data['razorpayOrderId']?.toString(),
+          razorpayKey: data['razorpayKey']?.toString(),
+          amount: (data['verifiedTotal'] as num?)?.toDouble() ?? 0,
+          verifiedDiscount: (data['verifiedDiscount'] as num?)?.toDouble() ?? 0,
+          verifiedSpecialDiscount: (data['verifiedSpecialDiscount'] as num?)?.toDouble() ?? 0,
+        );
+      }
+      if (data['error'] == 'vendor_closed') {
+        return VerifiedPaymentOrderResult(errorMessage: 'This restaurant is currently closed.');
+      }
+      if (data['error'] == 'device_superseded') {
+        final retryAtRaw = data['retry_at'] as String?;
+        final retryAt = retryAtRaw != null ? DateTime.tryParse(retryAtRaw) : null;
+        final baseMessage = (data['message'] as String?) ??
+            'This account is active on another device. You can switch devices after 2 hours.';
+        return VerifiedPaymentOrderResult(
+          deviceSuperseded: true,
+          errorMessage: DeviceSessionService.withRetryTime(baseMessage, retryAt),
+        );
+      }
+      return VerifiedPaymentOrderResult(
+          errorMessage: data['error']?.toString() ?? 'Unable to initialize payment. Please try again later.');
+    } catch (e) {
+      debugPrint('[createVerifiedOrderPayment] $e');
+      return VerifiedPaymentOrderResult(errorMessage: 'Unable to initialize payment. Please try again later.');
+    }
+  }
+
+  // Pre-payment verification AND atomic deduction for a WALLET-paid order —
+  // the server recomputes subtotal/coupon/special-discount/vendor-open
+  // status exactly like createVerifiedOrderPayment, then (since there's no
+  // external gateway to enforce the charged amount the way Razorpay does)
+  // performs the wallet deduction itself, atomically, checking the real
+  // current balance in the same transaction. The client can no longer
+  // choose what leaves its own wallet, and a stale locally-cached balance
+  // can't race into an overdraft.
+  //
+  // `orderId` must be the same id the caller is about to write the
+  // vendor_orders document under (same generateOrderId() call already used
+  // for every order type) — it's what lets verifyOrder.js recognise this
+  // order's deduction already happened correctly server-side.
+  Future<VerifiedPaymentOrderResult> createVerifiedWalletOrder({
+    required String vendorID,
+    required List<CartProduct> products,
+    required String orderId,
+    String? couponId,
+    String? sectionId,
+    bool takeAway = false,
+    String? deliveryCharge,
+    String? tipValue,
+    List<TaxModel>? taxSetting,
+  }) async {
+    final idToken = await _idToken();
+    if (idToken == null) {
+      return VerifiedPaymentOrderResult(errorMessage: 'Not signed in.');
+    }
+    try {
+      final deviceId = await DeviceSessionService.getDeviceId();
+      final fcmToken = await NotificationService.getToken();
+
+      final resp = await http
+          .post(
+            Uri.parse('$CloudFunctionsBaseURL/createVerifiedWalletOrder'),
+            headers: {'Authorization': 'Bearer $idToken', 'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'vendorID': vendorID,
+              'products': products.map((p) => p.toJson()).toList(),
+              'orderId': orderId,
+              'couponId': couponId,
+              'sectionId': sectionId,
+              'takeAway': takeAway,
+              'deliveryCharge': deliveryCharge,
+              'tipValue': tipValue,
+              'taxSetting': taxSetting?.map((t) => t.toJson()).toList(),
+              'deviceId': deviceId,
+              'fcmToken': fcmToken,
+            }),
+          )
+          .timeout(const Duration(seconds: 30));
+
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      if (resp.statusCode == 200) {
+        return VerifiedPaymentOrderResult(
+          success: true,
+          amount: (data['verifiedTotal'] as num?)?.toDouble() ?? 0,
+          verifiedDiscount: (data['verifiedDiscount'] as num?)?.toDouble() ?? 0,
+          verifiedSpecialDiscount: (data['verifiedSpecialDiscount'] as num?)?.toDouble() ?? 0,
+        );
+      }
+      if (data['error'] == 'vendor_closed') {
+        return VerifiedPaymentOrderResult(errorMessage: 'This restaurant is currently closed.');
+      }
+      if (data['error'] == 'insufficient_balance') {
+        return VerifiedPaymentOrderResult(
+          insufficientBalance: true,
+          errorMessage: 'Insufficient wallet balance. Please top up your wallet or choose another payment method.',
+        );
+      }
+      if (data['error'] == 'already_paid') {
+        // Same orderId already paid for (retry/double-tap) — treat as
+        // success from the caller's perspective, nothing left to charge.
+        return VerifiedPaymentOrderResult(success: true);
+      }
+      if (data['error'] == 'device_superseded') {
+        final retryAtRaw = data['retry_at'] as String?;
+        final retryAt = retryAtRaw != null ? DateTime.tryParse(retryAtRaw) : null;
+        final baseMessage = (data['message'] as String?) ??
+            'This account is active on another device. You can switch devices after 2 hours.';
+        return VerifiedPaymentOrderResult(
+          deviceSuperseded: true,
+          errorMessage: DeviceSessionService.withRetryTime(baseMessage, retryAt),
+        );
+      }
+      return VerifiedPaymentOrderResult(
+          errorMessage: data['error']?.toString() ?? 'Unable to complete wallet payment. Please try again later.');
+    } catch (e) {
+      debugPrint('[createVerifiedWalletOrder] $e');
+      return VerifiedPaymentOrderResult(errorMessage: 'Unable to complete wallet payment. Please try again later.');
+    }
+  }
+
+  // Verified, atomic wallet payment for a Dine-In table booking deposit —
+  // same shape as createVerifiedWalletOrder, but the server recomputes the
+  // charge from the vendor's own bookingPricingModel/bookingCharge config
+  // instead of a cart. `bookingId` must be the same id the caller is about
+  // to write the booked_table document under (see FirebaseHelper.bookTable).
+  Future<VerifiedPaymentOrderResult> createVerifiedTableBookingPayment({
+    required String vendorID,
+    required int guestCount,
+    required String bookingId,
+  }) async {
+    final idToken = await _idToken();
+    if (idToken == null) {
+      return VerifiedPaymentOrderResult(errorMessage: 'Not signed in.');
+    }
+    try {
+      final deviceId = await DeviceSessionService.getDeviceId();
+      final fcmToken = await NotificationService.getToken();
+
+      final resp = await http
+          .post(
+            Uri.parse('$CloudFunctionsBaseURL/createVerifiedTableBookingPayment'),
+            headers: {'Authorization': 'Bearer $idToken', 'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'vendorID': vendorID,
+              'guestCount': guestCount,
+              'bookingId': bookingId,
+              'deviceId': deviceId,
+              'fcmToken': fcmToken,
+            }),
+          )
+          .timeout(const Duration(seconds: 30));
+
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      if (resp.statusCode == 200) {
+        return VerifiedPaymentOrderResult(
+          success: true,
+          amount: (data['verifiedCharge'] as num?)?.toDouble() ?? 0,
+        );
+      }
+      if (data['error'] == 'insufficient_balance') {
+        return VerifiedPaymentOrderResult(
+          insufficientBalance: true,
+          errorMessage: 'Insufficient wallet balance. Please top up your wallet or choose another payment method.',
+        );
+      }
+      if (data['error'] == 'already_paid') {
+        return VerifiedPaymentOrderResult(success: true);
+      }
+      if (data['error'] == 'device_superseded') {
+        final retryAtRaw = data['retry_at'] as String?;
+        final retryAt = retryAtRaw != null ? DateTime.tryParse(retryAtRaw) : null;
+        final baseMessage = (data['message'] as String?) ??
+            'This account is active on another device. You can switch devices after 2 hours.';
+        return VerifiedPaymentOrderResult(
+          deviceSuperseded: true,
+          errorMessage: DeviceSessionService.withRetryTime(baseMessage, retryAt),
+        );
+      }
+      return VerifiedPaymentOrderResult(
+          errorMessage: data['error']?.toString() ?? 'Unable to complete booking payment. Please try again later.');
+    } catch (e) {
+      debugPrint('[createVerifiedTableBookingPayment] $e');
+      return VerifiedPaymentOrderResult(errorMessage: 'Unable to complete booking payment. Please try again later.');
+    }
+  }
+
+  // Wallet top-up has no "true" server-known amount — the fix is guaranteeing
+  // the credited amount is exactly what Razorpay actually confirms was paid.
+  Future<VerifiedPaymentOrderResult> createWalletTopupOrder({required double amount}) async {
+    final idToken = await _idToken();
+    if (idToken == null) {
+      return VerifiedPaymentOrderResult(errorMessage: 'Not signed in.');
+    }
+    try {
+      final resp = await http
+          .post(
+            Uri.parse('$CloudFunctionsBaseURL/createWalletTopupOrder'),
+            headers: {'Authorization': 'Bearer $idToken', 'Content-Type': 'application/json'},
+            body: jsonEncode({'amount': amount}),
+          )
+          .timeout(const Duration(seconds: 30));
+
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      if (resp.statusCode == 200) {
+        return VerifiedPaymentOrderResult(
+          success: true,
+          razorpayOrderId: data['razorpayOrderId']?.toString(),
+          razorpayKey: data['razorpayKey']?.toString(),
+          amount: (data['amount'] as num?)?.toDouble() ?? amount,
+        );
+      }
+      return VerifiedPaymentOrderResult(
+          errorMessage: data['error']?.toString() ?? 'Unable to initialize payment. Please try again later.');
+    } catch (e) {
+      debugPrint('[createWalletTopupOrder] $e');
+      return VerifiedPaymentOrderResult(errorMessage: 'Unable to initialize payment. Please try again later.');
+    }
+  }
+
+  // Verifies the Razorpay payment signature server-side before the app is
+  // allowed to treat the payment as legitimate. purpose is 'order' or
+  // 'wallet_topup'; for 'wallet_topup' this is also what actually credits
+  // the wallet (server-side, once — replay-guarded by the intent's
+  // `consumed` flag).
+  Future<VerifyPaymentResult> verifyPayment({
+    required String razorpayOrderId,
+    required String razorpayPaymentId,
+    required String razorpaySignature,
+    required String purpose,
+  }) async {
+    final idToken = await _idToken();
+    if (idToken == null) {
+      return VerifyPaymentResult(errorMessage: 'Not signed in.');
+    }
+    try {
+      final resp = await http
+          .post(
+            Uri.parse('$CloudFunctionsBaseURL/verifyRazorpayPayment'),
+            headers: {'Authorization': 'Bearer $idToken', 'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'razorpayOrderId': razorpayOrderId,
+              'razorpayPaymentId': razorpayPaymentId,
+              'razorpaySignature': razorpaySignature,
+              'purpose': purpose,
+            }),
+          )
+          .timeout(const Duration(seconds: 30));
+
+      if (resp.statusCode == 200) {
+        return VerifyPaymentResult(success: true);
+      }
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      return VerifyPaymentResult(
+          errorMessage: data['error']?.toString() ?? 'Payment verification failed. Please contact support.');
+    } catch (e) {
+      debugPrint('[verifyPayment] $e');
+      return VerifyPaymentResult(errorMessage: 'Payment verification failed. Please contact support.');
+    }
+  }
+
   Future<RazorPayResult> createOrderRazorPay(
       {required double amount, bool isTopup = false}) async {
     final RazorPayModel? razorPayData = UserPreference.getRazorPayData();
@@ -71,6 +430,18 @@ class RazorPayController {
 
     const url = "${GlobalURL}payments/razorpay/createorder";
 
+    // This endpoint now requires a signed-in caller (verify.firebase
+    // middleware) — previously open/unauthenticated. Still used by gift-card
+    // purchase and dine-in booking (order-payment and wallet-topup flows
+    // moved to createVerifiedOrderPayment/createWalletTopupOrder above).
+    final idToken = await _idToken();
+    if (idToken == null) {
+      return RazorPayResult(
+        errorType: RazorPayErrorType.missingCredentials,
+        errorMessage: 'Not signed in.',
+      );
+    }
+
     try {
       final requestBody = {
         "amount": ((amount * 100).toInt()).toString(),
@@ -82,7 +453,7 @@ class RazorPayController {
       };
 
       final response = await http
-          .post(Uri.parse(url), body: requestBody)
+          .post(Uri.parse(url), headers: {'Authorization': 'Bearer $idToken'}, body: requestBody)
           .timeout(const Duration(seconds: 30), onTimeout: () {
         throw Exception('Request timeout');
       });

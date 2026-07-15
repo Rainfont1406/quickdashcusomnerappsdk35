@@ -11,6 +11,7 @@ import 'package:emartconsumer/model/AddressModel.dart';
 import 'package:emartconsumer/model/CurrencyModel.dart';
 import 'package:emartconsumer/model/mail_setting.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/connectivity_gate.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/services/notification_service.dart';
@@ -52,6 +53,13 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(options: _activeFirebaseOptions);
 
+  // Replace the default red/yellow crash screen with a friendly error page.
+  // This catches any widget that throws during build() — navigation errors,
+  // null assertions, assertion failures from Flutter framework, etc.
+  ErrorWidget.builder = (FlutterErrorDetails details) {
+    return _AppErrorScreen(details: details);
+  };
+
   // Fire-and-forget: Play Integrity/App Attest attestation is a network
   // round-trip and must not delay the first frame. (Notification permission
   // request and FCM presentation options are handled once, in
@@ -61,7 +69,31 @@ void main() async {
     appleProvider: kReleaseMode ? AppleProvider.appAttest : AppleProvider.debug,
   ));
 
+  // Fire-and-forget Firestore warm-up: measured startup logs showed the
+  // *first* Firestore call in a session pays a one-time gRPC channel/
+  // connection-setup cost of ~5.7-6.2s, vs ~400-700ms for every call after
+  // it (confirmed to be Firestore itself, not an Auth token refresh — the ID
+  // token was fetched separately and returned in ~150ms). Reading a small,
+  // publicly-readable doc here, concurrently with the rest of this
+  // function's startup work, pays that one-time cost off the user's path so
+  // hasFinishedOnBoarding()'s real getCurrentUser() call — which used to be
+  // the one eating this cost inline — hits an already-warm connection.
+  // Result is discarded either way; only the connection side effect matters.
+  unawaited(_timedStep(
+          'Firestore warm-up (globalSettings, throwaway)',
+          () => FireStoreUtils.firestore
+              .collection(Setting)
+              .doc('globalSettings')
+              .get())
+      .catchError((_) {}));
+
   await EasyLocalization.ensureInitialized();
+
+  // Pre-decode splash logo into image cache so the first Flutter frame
+  // renders it immediately — no blank-purple-then-logo flash.
+  const AssetImage('assets/images/quickdash_logo_white.png')
+      .resolve(const ImageConfiguration())
+      .addListener(ImageStreamListener((_, __) {}));
 
   FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
 
@@ -147,6 +179,11 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
       if (globalSettings.exists) {
         AppThemeData.primary300 = Color(int.parse(
             globalSettings.data()!['app_customer_color'].replaceFirst("#", "0xff")));
+        final rawMaxCombined = globalSettings.data()!['maxCombinedDiscountPercent'];
+        final parsedMaxCombined = double.tryParse(rawMaxCombined?.toString() ?? '');
+        if (parsedMaxCombined != null && parsedMaxCombined > 0 && parsedMaxCombined <= 100) {
+          maxCombinedDiscountPercent = parsedMaxCombined;
+        }
       }
 
       final emailSetting = results[1];
@@ -201,7 +238,8 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
               theme: Styles.themeData(false, context),
               darkTheme: Styles.themeData(true, context),
               themeMode: themeChangeProvider.darkTheme ? ThemeMode.dark : ThemeMode.light,
-              builder: EasyLoading.init(),
+              builder: (context, child) =>
+                  ConnectivityGate(child: EasyLoading.init()(context, child)),
               home: const OnBoarding());
         },
       ),
@@ -257,6 +295,25 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
   }
 }
 
+// ── TEMPORARY STARTUP PERF LOGGING ──────────────────────────────────────────
+// Instrumentation only, no behavior change. Wraps an awaited operation with
+// start/end/elapsed logging so we can see exactly which step inside
+// hasFinishedOnBoarding() is slow. Remove once the bottleneck is identified.
+Future<T> _timedStep<T>(String label, Future<T> Function() op) async {
+  final sw = Stopwatch()..start();
+  debugPrint('[STARTUP-PERF] $label START at ${DateTime.now().toIso8601String()}');
+  try {
+    final result = await op();
+    sw.stop();
+    debugPrint('[STARTUP-PERF] $label END — elapsed ${sw.elapsedMilliseconds}ms');
+    return result;
+  } catch (e) {
+    sw.stop();
+    debugPrint('[STARTUP-PERF] $label FAILED after ${sw.elapsedMilliseconds}ms — $e');
+    rethrow;
+  }
+}
+
 class OnBoarding extends StatefulWidget {
   const OnBoarding({Key? key}) : super(key: key);
 
@@ -266,23 +323,8 @@ class OnBoarding extends StatefulWidget {
   }
 }
 
-class OnBoardingState extends State<OnBoarding> with TickerProviderStateMixin {
+class OnBoardingState extends State<OnBoarding> {
 
-  // ── Animation controllers ──────────────────────────────────────────────
-  late final AnimationController _logoCtrl;
-  late final AnimationController _contentCtrl;
-
-  late final Animation<double> _logoOpacity;
-  late final Animation<double> _logoScale;
-  late final Animation<double> _titleOpacity;
-  late final Animation<Offset> _titleSlide;
-  late final Animation<double> _taglineOpacity;
-  late final Animation<Offset> _taglineSlide;
-  late final Animation<double> _sublineOpacity;
-  late final Animation<double> _loadingOpacity;
-
-  // Guards against acting twice if hasFinishedOnBoarding() finishes around
-  // the same moment the initState() timeout/error fallback fires.
   bool _navigated = false;
 
   void _safeNavigate(VoidCallback navigate) {
@@ -293,21 +335,57 @@ class OnBoardingState extends State<OnBoarding> with TickerProviderStateMixin {
 
   // ── Firebase routing ───────────────────────────────────────────────────
   Future hasFinishedOnBoarding() async {
+    // TEMPORARY: total wall-clock time for the whole routing decision, plus
+    // which path it exited through — see _timedStep for per-step timings.
+    final totalStopwatch = Stopwatch()..start();
+    String completionPath = 'normal';
     try {
-      SharedPreferences prefs = await SharedPreferences.getInstance();
+      SharedPreferences prefs = await _timedStep(
+          'SharedPreferences.getInstance', () => SharedPreferences.getInstance());
       bool finishedOnBoarding = (prefs.getBool(FINISHED_ON_BOARDING) ?? false);
 
       if (finishedOnBoarding) {
+        // .currentUser is a synchronous getter (cached in memory by the
+        // native SDK, no I/O) — logged mainly to establish a t=0 reference
+        // point for the token/query breakdown below.
         auth.User? firebaseUser = auth.FirebaseAuth.instance.currentUser;
+        debugPrint(
+            '[STARTUP-PERF] FirebaseAuth.currentUser (sync) — uid=${firebaseUser?.uid ?? "null"} '
+            'at ${DateTime.now().toIso8601String()}');
         if (firebaseUser != null) {
-          User? user = await FireStoreUtils.getCurrentUser(firebaseUser.uid);
+          // TEMPORARY: isolate ID-token acquisition from the Firestore query
+          // itself. getIdToken() returns the cached token instantly if it
+          // hasn't expired, or makes a network round trip to Google's
+          // token-refresh endpoint if it has expired — this tells us whether
+          // the ~5.7s delay we measured is Auth refreshing the token, or
+          // Firestore's own connection/query time. Firestore's internal
+          // AuthTokenProvider reads from this same cached-token state, so
+          // this call also pre-warms whatever getCurrentUser() below would
+          // have had to wait on internally.
+          final idToken = await _timedStep(
+              'FirebaseAuth.getIdToken (cached, or refreshed if expired)',
+              () => firebaseUser.getIdToken());
+          debugPrint(
+              '[STARTUP-PERF] ID token acquired — length=${idToken?.length ?? 0}, '
+              'at ${DateTime.now().toIso8601String()}');
+          User? user = await _timedStep(
+              'getCurrentUser (auth branch) [Firestore .get() only, token already warm]',
+              () => FireStoreUtils.getCurrentUser(firebaseUser.uid));
           if (user != null && user.role == USER_ROLE_CUSTOMER) {
             if (user.active) {
               user.active = true;
               user.role = USER_ROLE_CUSTOMER;
-              user.fcmToken =
-                  await FireStoreUtils.firebaseMessaging.getToken() ?? '';
-              await FireStoreUtils.updateCurrentUser(user);
+              user.fcmToken = await _timedStep(
+                      'FirebaseMessaging.getToken (auth branch)',
+                      () => FireStoreUtils.firebaseMessaging.getToken()) ??
+                  '';
+              // Fire-and-forget: this only persists the refreshed
+              // fcmToken/active flag to Firestore. MyAppState.currentUser is
+              // set from this in-memory `user` object immediately below, so
+              // navigation doesn't need to wait on the write's round trip
+              // (measured at ~1.5s, the single biggest chunk of this path).
+              unawaited(_timedStep('updateCurrentUser (auth branch, active)',
+                  () => FireStoreUtils.updateCurrentUser(user)));
               MyAppState.currentUser = user;
 
               if (MyAppState.currentUser!.shippingAddress != null &&
@@ -324,7 +402,8 @@ class OnBoardingState extends State<OnBoarding> with TickerProviderStateMixin {
                       MyAppState.currentUser!.shippingAddress!.first;
                 }
                 // --- Begin: Set section info as ServiceListScreen does ---
-                final sections = await FireStoreUtils.getSections();
+                final sections = await _timedStep('getSections (auth branch)',
+                    () => FireStoreUtils.getSections());
                 if (sections.isNotEmpty) {
                   sectionConstantModel = sections.first;
 
@@ -372,7 +451,9 @@ class OnBoardingState extends State<OnBoarding> with TickerProviderStateMixin {
             } else {
               user.lastOnlineTimestamp = Timestamp.now();
               user.fcmToken = "";
-              await FireStoreUtils.updateCurrentUser(user);
+              await _timedStep(
+                  'updateCurrentUser (auth branch, inactive/signout)',
+                  () => FireStoreUtils.updateCurrentUser(user));
               await auth.FirebaseAuth.instance.signOut();
               MyAppState.currentUser = null;
               _safeNavigate(
@@ -388,11 +469,17 @@ class OnBoardingState extends State<OnBoarding> with TickerProviderStateMixin {
           // No Firebase Auth session — try to restore a MSG91 phone user's session
           final savedPhoneUid = prefs.getString(PHONE_AUTH_USER_ID);
           if (savedPhoneUid != null && savedPhoneUid.isNotEmpty) {
-            User? user = await FireStoreUtils.getCurrentUser(savedPhoneUid);
+            User? user = await _timedStep('getCurrentUser (msg91 branch)',
+                () => FireStoreUtils.getCurrentUser(savedPhoneUid));
             if (user != null && user.role == USER_ROLE_CUSTOMER && user.active) {
-              user.fcmToken =
-                  await FireStoreUtils.firebaseMessaging.getToken() ?? '';
-              await FireStoreUtils.updateCurrentUser(user);
+              user.fcmToken = await _timedStep(
+                      'FirebaseMessaging.getToken (msg91 branch)',
+                      () => FireStoreUtils.firebaseMessaging.getToken()) ??
+                  '';
+              // Fire-and-forget — see the identical comment in the auth
+              // branch above.
+              unawaited(_timedStep('updateCurrentUser (msg91 branch)',
+                  () => FireStoreUtils.updateCurrentUser(user)));
               MyAppState.currentUser = user;
 
               if (MyAppState.currentUser!.shippingAddress != null &&
@@ -408,7 +495,8 @@ class OnBoardingState extends State<OnBoarding> with TickerProviderStateMixin {
                   MyAppState.selectedPosotion =
                       MyAppState.currentUser!.shippingAddress!.first;
                 }
-                final sections = await FireStoreUtils.getSections();
+                final sections = await _timedStep('getSections (msg91 branch)',
+                    () => FireStoreUtils.getSections());
                 if (sections.isNotEmpty) {
                   sectionConstantModel = sections.first;
                   if (sectionConstantModel?.color != null) {
@@ -457,217 +545,90 @@ class OnBoardingState extends State<OnBoarding> with TickerProviderStateMixin {
         _safeNavigate(() => pushReplacement(context, const OnBoardingScreen()));
       }
     } catch (e, st) {
+      completionPath = 'error';
       debugPrint('hasFinishedOnBoarding failed: $e\n$st');
       // Any failure above (network blip, FCM token fetch, malformed user
       // data, etc.) must not leave the user stuck on this splash screen.
       _safeNavigate(() => pushReplacement(context, const LoginScreen()));
+    } finally {
+      totalStopwatch.stop();
+      // TEMPORARY: if this prints with elapsed >15000ms and the timeout log
+      // below already fired, the timeout path won the race — the UI already
+      // moved on to LoginScreen before this finished computing in the
+      // background. If it prints under 15000ms with path "normal"/"error",
+      // hasFinishedOnBoarding itself resolved before the timeout.
+      debugPrint(
+          '[STARTUP-PERF] hasFinishedOnBoarding TOTAL: ${totalStopwatch.elapsedMilliseconds}ms (completion path: $completionPath)');
     }
   }
 
   @override
   void initState() {
     super.initState();
-    _initAnimations();
-    // Safety net for hangs that never throw (e.g. a stalled network call) —
-    // the try/catch above only catches failures that actually throw. This
-    // guarantees the splash can never get stuck on this screen forever.
     hasFinishedOnBoarding().timeout(
       const Duration(seconds: 15),
       onTimeout: () {
-        debugPrint('hasFinishedOnBoarding timed out after 15s');
+        debugPrint(
+            '[STARTUP-PERF] hasFinishedOnBoarding TIMEOUT PATH fired at 15000ms — navigating to LoginScreen as fallback (hasFinishedOnBoarding keeps running in the background; watch for its TOTAL log line afterward)');
         _safeNavigate(() => pushReplacement(context, const LoginScreen()));
       },
     );
   }
 
-  void _initAnimations() {
-    // Logo: scale-in + fade-in
-    _logoCtrl = AnimationController(
-      duration: const Duration(milliseconds: 650),
-      vsync: this,
-    );
-    _logoOpacity = CurvedAnimation(parent: _logoCtrl, curve: Curves.easeOut);
-    _logoScale = Tween<double>(begin: 0.72, end: 1.0).animate(
-      CurvedAnimation(parent: _logoCtrl, curve: Curves.easeOutBack),
-    );
-
-    // Staggered text content
-    _contentCtrl = AnimationController(
-      duration: const Duration(milliseconds: 900),
-      vsync: this,
-    );
-    _titleOpacity = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _contentCtrl,
-          curve: const Interval(0.0, 0.55, curve: Curves.easeOut)),
-    );
-    _titleSlide = Tween<Offset>(
-            begin: const Offset(0, 0.35), end: Offset.zero)
-        .animate(CurvedAnimation(parent: _contentCtrl,
-            curve: const Interval(0.0, 0.6, curve: Curves.easeOut)));
-    _taglineOpacity = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _contentCtrl,
-          curve: const Interval(0.2, 0.75, curve: Curves.easeOut)),
-    );
-    _taglineSlide = Tween<Offset>(
-            begin: const Offset(0, 0.4), end: Offset.zero)
-        .animate(CurvedAnimation(parent: _contentCtrl,
-            curve: const Interval(0.25, 0.8, curve: Curves.easeOut)));
-    _sublineOpacity = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _contentCtrl,
-          curve: const Interval(0.4, 0.9, curve: Curves.easeOut)),
-    );
-    _loadingOpacity = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _contentCtrl,
-          curve: const Interval(0.65, 1.0, curve: Curves.easeOut)),
-    );
-
-    _logoCtrl.forward();
-    Future.delayed(const Duration(milliseconds: 320), () {
-      if (mounted) _contentCtrl.forward();
-    });
-  }
-
-  @override
-  void dispose() {
-    _logoCtrl.dispose();
-    _contentCtrl.dispose();
-    super.dispose();
-  }
-
-  // ── Logo mark: blue rounded container with white "Q" ─────────────────
-
-  Widget _buildLogoMark() {
-    return Container(
-      width: 116,
-      height: 116,
-      decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [AppThemeData.primary400, AppThemeData.primary600],
-        ),
-        borderRadius: BorderRadius.circular(32),
-        boxShadow: [
-          BoxShadow(
-            color: AppThemeData.primary500.withValues(alpha: 0.28),
-            blurRadius: 40,
-            offset: const Offset(0, 16),
-            spreadRadius: -4,
-          ),
-          BoxShadow(
-            color: AppThemeData.primary500.withValues(alpha: 0.12),
-            blurRadius: 80,
-            offset: const Offset(0, 32),
-            spreadRadius: -8,
-          ),
-        ],
-      ),
-      child: const Center(
-        child: Text(
-          'Q',
-          style: TextStyle(
-            fontSize: 66,
-            fontFamily: AppThemeData.bold,
-            color: Colors.white,
-            height: 1.0,
-            letterSpacing: -3.0,
-          ),
-        ),
-      ),
-    );
-  }
-
-  // ── Subtle blue-tinted decorative circle (for white bg) ───────────────
-
-  Widget _bgCircle(double size, double opacity) => Container(
-        width: size,
-        height: size,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          color: AppThemeData.primary100.withValues(alpha: opacity),
-        ),
-      );
-
-  // ── Outlined service pill (blue border + fill on white bg) ────────────
-
-  Widget _servicePill(String label) => Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-        decoration: BoxDecoration(
-          color: AppThemeData.primary50,
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(
-            color: AppThemeData.primary200,
-            width: 1.2,
-          ),
-        ),
-        child: Text(
-          label,
-          style: const TextStyle(
-            color: AppThemeData.primary500,
-            fontSize: 11.5,
-            fontFamily: AppThemeData.semiBold,
-            letterSpacing: 0.3,
-            height: 1.2,
-          ),
-        ),
-      );
-
   @override
   Widget build(BuildContext context) {
     final screenWidth = MediaQuery.of(context).size.width;
-    final bottomPad = MediaQuery.of(context).padding.bottom;
-
     return Scaffold(
       backgroundColor: const Color(0xFF7C3AED),
-      body: FadeTransition(
-        opacity: _logoOpacity,
-        child: Stack(
-          children: [
-            // ── Full-screen gradient background ───────────────────────
-            Container(
-              width: double.infinity,
-              height: double.infinity,
-              decoration: const BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: [Color(0xFF9651F5), Color(0xFF7C3AED)],
+      body: Center(
+        child: Image.asset(
+          'assets/images/quickdash_logo_white.png',
+          width: screenWidth * 0.72,
+        ),
+      ),
+    );
+  }
+}
+
+// ── Global friendly error screen ─────────────────────────────────────────────
+// Replaces Flutter's default red/yellow crash screen for any widget build error.
+
+class _AppErrorScreen extends StatelessWidget {
+  final FlutterErrorDetails details;
+  const _AppErrorScreen({required this.details});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFF8F8FA),
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 32),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Container(
+                width: 80,
+                height: 80,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFFEEEB),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(Icons.error_outline_rounded,
+                    size: 40, color: Color(0xFFE53935)),
+              ),
+              const SizedBox(height: 24),
+              const Text(
+                'Something went wrong. Please try again later.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w700,
+                  color: Color(0xFF1A1A2E),
                 ),
               ),
-            ),
-
-            // ── Centered logo image ───────────────────────────────────
-            Center(
-              child: Image.asset(
-                'assets/images/quickdash_icon_1024.png',
-                width: screenWidth,
-                fit: BoxFit.fitWidth,
-              ),
-            ),
-
-            // ── Loading indicator at bottom ───────────────────────────
-            Positioned(
-              bottom: bottomPad + 48,
-              left: 0,
-              right: 0,
-              child: FadeTransition(
-                opacity: _loadingOpacity,
-                child: const Column(
-                  children: [
-                    SizedBox(
-                      width: 22,
-                      height: 22,
-                      child: CircularProgressIndicator(
-                        valueColor:
-                            AlwaysStoppedAnimation<Color>(Colors.white54),
-                        strokeWidth: 2.0,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

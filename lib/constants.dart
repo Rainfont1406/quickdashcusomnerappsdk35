@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
@@ -36,6 +37,11 @@ const ORDER_STATUS_CANCELLED = "Order Cancelled";
 const ORDER_STATUS_ASSIGNED = "Order Assigned";
 
 String appVersion = '';
+// A coupon and a vendor's special discount can stack, but combined they can
+// never discount more than this percentage of the order amount. Populated
+// from settings/globalSettings at startup (see main.dart); this default is
+// the fallback when that field hasn't been set by an admin yet.
+double maxCombinedDiscountPercent = 70;
 const List colorList = [
   Color(0xFFFFBC99),
   const Color(0xFFCABDFF),
@@ -105,10 +111,21 @@ const ORDER_STATUS_SHIPPED = 'Order Shipped';
 const ORDER_STATUS_IN_TRANSIT = 'In Transit';
 const ORDER_REACHED_DESTINATION = 'Reached Destination';
 
+// Vendor-initiated Bill Pay request — pre-payment gate statuses (order.status).
+// Must match the identical constants in the vendor app / vendor web.
+const BILLPAY_STATUS_PENDING_APPROVAL = 'Pending Approval';
+const BILLPAY_STATUS_DECLINED = 'Declined by Customer';
+const BILLPAY_STATUS_EXPIRED = 'Expired';
+const BILLPAY_STATUS_CANCELLED = 'Cancelled by Vendor';
+
 const dineInPlaced = "dinein_placed";
 const orderPlaced = "order_placed";
 const scheduleOrder = "schedule_order";
 const rentalBooked = "rental_booked";
+// dynamicNotification content-template types for vendor-initiated Bill Pay —
+// falls back to a generic placeholder message if no admin template exists yet.
+const billPayRequestDeclined = "bill_pay_request_declined";
+const billPayRequestAccepted = "bill_pay_request_accepted";
 
 const walletTopup = "wallet_topup";
 const newVendorSignup = "new_vendor_signup";
@@ -129,7 +146,6 @@ const USER_ROLE_PROVIDER = 'provider';
 const tax = 'tax';
 const Order_Rating = 'items_review';
 const CONTACT_US = 'ContactUs';
-const COUPON = 'coupons';
 const Wallet = "wallet";
 const RIDESORDER = "rides";
 const PARCELORDER = "parcel_orders";
@@ -149,6 +165,7 @@ const TermsAndConditions = 'terms_and_condition';
 const GIFT_CARDS = 'gift_cards';
 const GIFT_PURCHASES = 'gift_purchases';
 const GlobalURL = "https://admin.quickdash.co.in/";
+const CloudFunctionsBaseURL = "https://us-central1-quick-dash-84f6a.cloudfunctions.net";
 const Currency = 'currencies';
 const STORAGE_ROOT = 'emart';
 
@@ -162,10 +179,20 @@ List<VendorModel> allstoreList = [];
 // not just whichever screen happens to be mounted.
 final ValueNotifier<bool> isDeliveryActiveNotifier = ValueNotifier<bool>(true);
 final ValueNotifier<String> deliveryOffMessageNotifier = ValueNotifier<String>('');
+
+// Set true by PaymentScreen while a gateway checkout sheet (Razorpay/UPI/
+// Card, PayFast's WebView, etc.) is actually open, false once it closes.
+// The global offline ConnectivityGate checks this before popping itself
+// over the app — a gateway's own native UI has its own network handling,
+// and a connectivity blip mid-payment must not force our overlay on top of
+// it (see ConnectivityGate in lib/services/connectivity_gate.dart).
+final ValueNotifier<bool> paymentInProgressNotifier = ValueNotifier<bool>(false);
 // Mirrors HomeScreen's selctedOrderTypeValue so other screens (Search, Map,
 // etc.) can synchronously check the current mode without re-reading
 // SharedPreferences. Set whenever HomeScreen's order-type switch changes.
-String currentOrderTypeGlobal = 'Delivery';
+// Defaults to Dineaway, matching HomeScreen's default — Delivery is
+// currently gated behind isDeliveryActiveNotifier and shows "Coming Soon".
+String currentOrderTypeGlobal = 'Dineaway';
 
 String placeholderImage = '';
 List<TaxModel>? taxList = [];
@@ -355,6 +382,16 @@ String getKm(UserLocation pos1, UserLocation pos2) {
 // Keyed by rounded coords so minor GPS jitter doesn't create duplicate entries.
 final Map<String, String> _roadDistanceCache = {};
 
+// In-flight request dedup: without this, every RoadDistanceText widget that
+// happens to render the same vendor+user-location pair before the first
+// call resolves (e.g. the same vendor shown in both a horizontal carousel
+// and a vertical list) fires its own independent OSRM request, since the
+// completed-result cache above isn't populated until a request finishes.
+// That multiplies traffic against the public OSRM demo server, which is
+// rate-limited — the extra concurrent requests are a direct cause of
+// otherwise-avoidable fallbacks to Haversine.
+final Map<String, Future<String>> _roadDistanceInFlight = {};
+
 /// Call this whenever the user changes their delivery address so stale
 /// distance values are not served from the cache.
 void clearRoadDistanceCache() => _roadDistanceCache.clear();
@@ -366,6 +403,29 @@ Future<String> getRoadDistanceKm(UserLocation pos1, UserLocation pos2) async {
       '${pos1.latitude.toStringAsFixed(4)},${pos1.longitude.toStringAsFixed(4)}'
       '-${pos2.latitude.toStringAsFixed(4)},${pos2.longitude.toStringAsFixed(4)}';
   if (_roadDistanceCache.containsKey(key)) return _roadDistanceCache[key]!;
+  final existing = _roadDistanceInFlight[key];
+  if (existing != null) return existing;
+
+  final future = _fetchRoadDistanceKm(pos1, pos2, key);
+  _roadDistanceInFlight[key] = future;
+  try {
+    return await future;
+  } finally {
+    _roadDistanceInFlight.remove(key);
+  }
+}
+
+Future<String> _fetchRoadDistanceKm(
+    UserLocation pos1, UserLocation pos2, String key) async {
+  final startedAt = DateTime.now();
+  final haversineKm = double.tryParse(getKm(pos1, pos2)) ?? 0;
+
+  int? httpStatus;
+  String? routeCode;
+  double? osrmKm;
+  bool fallbackUsed = false;
+  String? errorDetail;
+  String result;
 
   try {
     // OSRM expects lon,lat order (opposite of lat,lon convention)
@@ -377,24 +437,50 @@ Future<String> getRoadDistanceKm(UserLocation pos1, UserLocation pos2) async {
     );
     final response =
         await http.get(url).timeout(const Duration(seconds: 10));
+    httpStatus = response.statusCode;
     if (response.statusCode == 200) {
       final data = json.decode(response.body) as Map<String, dynamic>;
+      routeCode = data['code'] as String?;
       final routes = data['routes'] as List?;
-      if (data['code'] == 'Ok' && routes != null && routes.isNotEmpty) {
+      if (routeCode == 'Ok' && routes != null && routes.isNotEmpty) {
         final meters = (routes[0]['distance'] as num).toDouble();
-        final km = meters / 1000;
-        debugPrint('RoadDistanceKm (OSRM): $km');
-        final result = km.toStringAsFixed(2);
-        _roadDistanceCache[key] = result;
-        return result;
+        osrmKm = meters / 1000;
+        result = osrmKm.toStringAsFixed(2);
+      } else {
+        fallbackUsed = true;
+        result = haversineKm.toStringAsFixed(2);
       }
+    } else {
+      fallbackUsed = true;
+      result = haversineKm.toStringAsFixed(2);
     }
+  } on TimeoutException catch (e) {
+    fallbackUsed = true;
+    errorDetail = 'TIMEOUT: $e';
+    result = haversineKm.toStringAsFixed(2);
   } catch (e) {
-    debugPrint('OSRM unavailable, falling back to straight-line: $e');
+    fallbackUsed = true;
+    errorDetail = e.toString();
+    result = haversineKm.toStringAsFixed(2);
   }
-  final fallback = getKm(pos1, pos2);
-  _roadDistanceCache[key] = fallback;
-  return fallback;
+
+  final finishedAt = DateTime.now();
+  debugPrint(
+    '[RoadDistance] key=$key '
+    'requestStarted=${startedAt.toIso8601String()} '
+    'requestFinished=${finishedAt.toIso8601String()} '
+    'elapsedMs=${finishedAt.difference(startedAt).inMilliseconds} '
+    'httpStatus=${httpStatus ?? "N/A"} '
+    'routeCode=${routeCode ?? "N/A"} '
+    'osrmDistanceKm=${osrmKm?.toStringAsFixed(3) ?? "N/A"} '
+    'haversineDistanceKm=${haversineKm.toStringAsFixed(3)} '
+    'fallbackUsed=$fallbackUsed '
+    'finalDistanceDisplayedKm=$result '
+    'error=${errorDetail ?? "none"}',
+  );
+
+  _roadDistanceCache[key] = result;
+  return result;
 }
 
 String getImageVAlidUrl(String? url) {

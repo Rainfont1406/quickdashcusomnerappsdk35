@@ -6,6 +6,7 @@ import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/User.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/device_session_service.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
@@ -21,6 +22,7 @@ import 'package:emartconsumer/ui/dineInScreen/my_booking_screen.dart';
 import 'package:emartconsumer/ui/home/HomeScreen.dart';
 import 'package:emartconsumer/ui/home/favourite_item.dart';
 import 'package:emartconsumer/ui/home/favourite_store.dart';
+import 'package:emartconsumer/ui/location_permission_screen.dart';
 import 'package:emartconsumer/ui/mapView/MapViewScreen.dart';
 import 'package:emartconsumer/ui/ordersScreen/OrdersScreen.dart';
 import 'package:emartconsumer/ui/privacy_policy/privacy_policy.dart';
@@ -32,6 +34,7 @@ import 'package:emartconsumer/ui/wallet/walletScreen.dart';
 import 'package:emartconsumer/userPrefrence.dart';
 import 'package:emartconsumer/widget/userAvatar.dart';
 import 'package:firebase_auth/firebase_auth.dart' as auth;
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:provider/provider.dart';
@@ -90,7 +93,7 @@ class ContainerScreen extends StatefulWidget {
   }
 }
 
-class _ContainerScreen extends State<ContainerScreen> {
+class _ContainerScreen extends State<ContainerScreen> with WidgetsBindingObserver {
   var key = GlobalKey<ScaffoldState>();
 
   late CartDatabase cartDatabase;
@@ -139,6 +142,28 @@ class _ContainerScreen extends State<ContainerScreen> {
     );
     getTaxList();
     _listenDeliveryGate();
+    WidgetsBinding.instance.addObserver(this);
+
+    // A cold start (app fully relaunched, not just resumed from background)
+    // never fires didChangeAppLifecycleState(resumed) below — Firebase Auth
+    // restores the session locally and lands the user straight here with no
+    // device-session check at all until the next background/resume cycle or
+    // gated action. Closes that gap, especially relevant for a device that
+    // was force-killed while offline and relaunched later.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) DeviceSessionService.enforceActive(context);
+    });
+  }
+
+  // A login-time device-session check alone misses the case where this
+  // device gets switched out by another login while the app is backgrounded
+  // or offline and never receives the FCM force-logout push. Re-checking on
+  // every resume closes that gap (see DeviceSessionService.checkActive).
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      DeviceSessionService.enforceActive(context);
+    }
   }
 
   // Single, app-wide live listener for the Delivery on/off toggle, feeding
@@ -168,6 +193,7 @@ class _ContainerScreen extends State<ContainerScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _deliveryGateSub?.cancel();
     super.dispose();
   }
@@ -254,17 +280,8 @@ class _ContainerScreen extends State<ContainerScreen> {
                     ),
                   ),
                 ),
-                _drawerItem(
-                  sel: DrawerSelection.Cuisines,
-                  icon: Icons.grid_view_rounded,
-                  label: 'Categories',
-                  dark: dark,
-                  onTap: () => _navigate(
-                    DrawerSelection.Cuisines,
-                    'Categories'.tr(),
-                    const CuisinesScreen(),
-                  ),
-                ),
+                // Categories hidden from drawer for now
+
                 if (sectionConstantModel?.dineInActive == true)
                   _drawerItem(
                     sel: DrawerSelection.dineIn,
@@ -329,31 +346,33 @@ class _ContainerScreen extends State<ContainerScreen> {
                     ),
                   ),
 
-                _sectionGap(dark),
-
-                _sectionLabel('Favourites', dark),
-                _drawerItem(
-                  sel: DrawerSelection.LikedStore,
-                  icon: Icons.favorite_border_rounded,
-                  label: 'Favourite Stores',
-                  dark: dark,
-                  onTap: () => _navigateAuth(
-                    DrawerSelection.LikedStore,
-                    'Favourite Stores'.tr(),
-                    const FavouriteStoreScreen(),
-                  ),
-                ),
-                _drawerItem(
-                  sel: DrawerSelection.LikedProduct,
-                  icon: Icons.bookmark_border_rounded,
-                  label: 'Favourite Items',
-                  dark: dark,
-                  onTap: () => _navigateAuth(
-                    DrawerSelection.LikedProduct,
-                    'Favourite Item'.tr(),
-                    const FavouriteItemScreen(),
-                  ),
-                ),
+                // Favourites section (Favourite Stores / Favourite Items)
+                // hidden from the drawer for now, per request — re-enable
+                // by restoring this block.
+                // _sectionGap(dark),
+                // _sectionLabel('Favourites', dark),
+                // _drawerItem(
+                //   sel: DrawerSelection.LikedStore,
+                //   icon: Icons.favorite_border_rounded,
+                //   label: 'Favourite Stores',
+                //   dark: dark,
+                //   onTap: () => _navigateAuth(
+                //     DrawerSelection.LikedStore,
+                //     'Favourite Stores'.tr(),
+                //     const FavouriteStoreScreen(),
+                //   ),
+                // ),
+                // _drawerItem(
+                //   sel: DrawerSelection.LikedProduct,
+                //   icon: Icons.bookmark_border_rounded,
+                //   label: 'Favourite Items',
+                //   dark: dark,
+                //   onTap: () => _navigateAuth(
+                //     DrawerSelection.LikedProduct,
+                //     'Favourite Item'.tr(),
+                //     const FavouriteItemScreen(),
+                //   ),
+                // ),
 
                 _sectionGap(dark),
 
@@ -384,6 +403,26 @@ class _ContainerScreen extends State<ContainerScreen> {
                     LanguageChooseScreen(isContainer: true),
                   ),
                 ),
+
+                // Debug-only entry point to reach LocationPermissionScreen
+                // for design QA — that screen normally only shows once
+                // during onboarding, so there's no other way to get back to
+                // it without clearing app data. Never appears in a release
+                // build (kDebugMode is false there).
+                if (kDebugMode) ...[
+                  _sectionGap(dark),
+                  _sectionLabel('Debug', dark),
+                  _drawerItem(
+                    sel: DrawerSelection.Home,
+                    icon: Icons.bug_report_outlined,
+                    label: 'Location Screen (Debug)',
+                    dark: dark,
+                    onTap: () {
+                      Navigator.pop(context);
+                      push(context, const LocationPermissionScreen());
+                    },
+                  ),
+                ],
 
                 _sectionGap(dark),
 

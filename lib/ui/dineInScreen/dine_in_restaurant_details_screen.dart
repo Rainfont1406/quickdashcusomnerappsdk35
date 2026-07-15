@@ -11,6 +11,7 @@ import 'package:emartconsumer/model/topupTranHistory.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/helper.dart';
+import 'package:emartconsumer/services/rozorpayConroller.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/auth_screen/login_screen.dart';
 import 'package:emartconsumer/ui/dineInScreen/booking_confirmation_screen.dart';
@@ -1078,37 +1079,38 @@ class _DineInRestaurantDetailsScreenState
         }
       }
 
+      // Pre-generated so the payment intent and the booking document
+      // correlate (same pattern as generateOrderId() for regular orders).
+      final bookingId = FireStoreUtils.firestore.collection(ORDERS_TABLE).doc().id;
+
       // ── Wallet check + deduction (when charge applies) ───────
+      // Server-verified and atomic: the charge is re-derived from the
+      // vendor's own bookingPricingModel/bookingCharge config, and the
+      // balance check + deduction + ledger write all happen inside one
+      // Firestore transaction server-side (see
+      // createVerifiedTableBookingPayment) — no client-side wallet write.
       if (_totalCharge > 0) {
-        final userRef = FireStoreUtils.firestore.collection(USERS).doc(user.userID);
-        bool insufficientBalance = false;
-        double newBalance = 0;
+        final result = await RazorPayController().createVerifiedTableBookingPayment(
+          vendorID: vendor.id,
+          guestCount: _guestCount,
+          bookingId: bookingId,
+        );
 
-        await FireStoreUtils.firestore.runTransaction((txn) async {
-          final snap = await txn.get(userRef);
-          if (!snap.exists || snap.data() == null) throw Exception('user-not-found');
-
-          final currentBalance = double.tryParse(snap.data()!['wallet_amount'].toString()) ?? 0.0;
-          final charge = _totalCharge.toDouble();
-
-          if (currentBalance < charge) {
-            insufficientBalance = true;
-            return; // abort writes — transaction commits with no changes
-          }
-
-          newBalance = currentBalance - charge;
-          txn.update(userRef, {'wallet_amount': newBalance});
-        });
-
-        if (insufficientBalance) {
+        if (!result.success) {
           Navigator.pop(context);
-          // Refresh displayed balance from Firestore
-          _fetchWalletBalance();
+          if (result.deviceSuperseded) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text(result.errorMessage!), backgroundColor: Colors.red),
+            );
+            push(context, const LoginScreen());
+            return;
+          }
+          if (result.insufficientBalance) {
+            _fetchWalletBalance();
+          }
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text(
-                'Booking not completed. Wallet balance is insufficient. Please add funds and try again.'.tr(),
-              ),
+              content: Text(result.errorMessage ?? 'Booking not completed. Please try again.'.tr()),
               backgroundColor: Colors.red,
               duration: const Duration(seconds: 4),
             ),
@@ -1116,26 +1118,10 @@ class _DineInRestaurantDetailsScreenState
           return;
         }
 
-        // Keep local cache in sync
+        // Keep local cache in sync with the server-verified deduction.
+        final newBalance = _walletBalance - result.amount;
         MyAppState.currentUser!.wallet_amount = newBalance;
         if (mounted) setState(() => _walletBalance = newBalance);
-
-        // ── Write wallet transaction history record ───────────
-        final txnRef = FireStoreUtils.firestore.collection(Wallet).doc();
-        final txnRecord = TopupTranHistoryModel(
-          id: txnRef.id,
-          user_id: user.userID,
-          amount: _totalCharge,
-          isTopup: false,
-          payment_method: 'Wallet',
-          payment_status: 'success',
-          date: Timestamp.now(),
-          order_id: '',
-          serviceType: 'Table Booking',
-          transactionUser: '${user.firstName} ${user.lastName}',
-          note: 'Table Booking – ${widget.vendorModel.title}',
-        );
-        await txnRef.set(txnRecord.toJson());
       }
 
       // ── Create booking ───────────────────────────────────────
@@ -1146,6 +1132,7 @@ class _DineInRestaurantDetailsScreenState
       );
 
       final booking = BookTableModel(
+        id: bookingId,
         author: user,
         authorID: user.userID,
         createdAt: Timestamp.now(),

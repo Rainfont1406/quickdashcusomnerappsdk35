@@ -28,15 +28,19 @@ import 'package:emartconsumer/payment/orangePayScreen.dart';
 import 'package:emartconsumer/payment/xenditModel.dart';
 import 'package:emartconsumer/payment/xenditScreen.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/device_session_service.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
+import 'package:emartconsumer/services/notification_service.dart';
 import 'package:emartconsumer/services/paystack_url_genrater.dart';
 import 'package:emartconsumer/services/rozorpayConroller.dart';
 import 'package:emartconsumer/services/app_dialog.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/theme/round_button_fill.dart';
+import 'package:emartconsumer/ui/auth_screen/login_screen.dart';
 import 'package:emartconsumer/ui/checkoutScreen/CheckoutScreen.dart';
+import 'package:emartconsumer/ui/payment/quickdash_payment_sheet.dart';
 import 'package:emartconsumer/ui/wallet/MercadoPagoScreen.dart';
 import 'package:emartconsumer/ui/wallet/PayFastScreen.dart';
 import 'package:emartconsumer/ui/wallet/payStackScreen.dart';
@@ -90,6 +94,13 @@ class PaymentScreen extends StatefulWidget {
   final AddressModel? addressModel;
   final String? orderType; // New field for Dineaway order type
 
+  // Vendor-initiated Bill Pay accept flow: the customer paid through a
+  // brand-new, completely normal order (see CartScreen's Bill Pay mode) —
+  // this just links it back to the original request doc so a Cloud Function
+  // can reconcile that document afterward. No special order-creation
+  // behavior on this screen depends on it.
+  final String? billPayRequestId;
+
   const PaymentScreen(
       {Key? key,
       required this.total,
@@ -106,7 +117,8 @@ class PaymentScreen extends StatefulWidget {
       this.specialDiscountMap,
       this.scheduleTime,
       this.addressModel,
-      this.orderType})
+      this.orderType,
+      this.billPayRequestId})
       : super(key: key);
 
   @override
@@ -491,6 +503,8 @@ class PaymentScreenState extends State<PaymentScreen> {
 
   // â”€â”€â”€ UI helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+  // Full-page loading screen shown after online payment is captured but before
+  // the order is written to Firestore. Replaces the payment screen entirely so
   PreferredSizeWidget _buildAppBar(bool dark) {
     return AppBar(
       backgroundColor: dark ? AppThemeData.darkBgSecondary : Colors.white,
@@ -705,6 +719,7 @@ class PaymentScreenState extends State<PaymentScreen> {
                 final User userData = User.fromJson(asyncSnapshot.data!.data()!);
                 final bool sufficient = userData.wallet_amount >= widget.total;
                 walletBalanceError = sufficient;
+                _cachedWalletAmount = userData.wallet_amount;
                 return Container(
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                   decoration: BoxDecoration(
@@ -846,21 +861,28 @@ class PaymentScreenState extends State<PaymentScreen> {
     if (razorPay) {
       paymentType = 'razorpay';
       showLoadingAlert();
-      RazorPayController().createOrderRazorPay(amount: widget.total).then((result) {
-        // Manually dismiss the loading dialog and clear the flag before
-        // opening the Razorpay sheet, so that when _handlePaymentSuccess /
-        // _handlePaymentError fires later, the guard in
-        // dismissLoadingAndClearProcessing() knows no dialog is open.
-        setState(() => _isLoadingDialogShowing = false);
-        Navigator.pop(context);
-        if (result.isSuccess) {
-          openCheckout(amount: widget.total, orderId: result.order!.id);
-        } else {
-          showAlert(_scaffoldKey.currentContext!,
-              response: result.errorMessage?.tr() ?? 'Something went wrong, please contact admin.'.tr(),
-              colors: AppThemeData.primary500);
-        }
-      });
+      // Pre-generate our order ID before opening checkout so we can embed it
+      // in Razorpay notes — the webhook uses it to recover if the app dies.
+      final appOrderId = await generateOrderId();
+      _pendingOrderId = appOrderId;
+      final result = await RazorPayController().createVerifiedOrderPayment(
+        vendorID: widget.products.first.vendorID,
+        products: widget.products,
+        couponId: widget.couponId,
+        sectionId: sectionConstantModel?.id,
+        takeAway: widget.take_away ?? false,
+        deliveryCharge: widget.deliveryCharge,
+        tipValue: widget.tipValue,
+        taxSetting: widget.taxModel,
+      );
+      setState(() => _isLoadingDialogShowing = false);
+      if (!context.mounted) return;
+      Navigator.pop(context);
+      if (result.success) {
+        openCheckout(amount: result.amount, orderId: result.razorpayOrderId!, appOrderId: appOrderId);
+      } else {
+        _handleVerifiedPaymentFailure(result);
+      }
     } else if (payFast) {
       paymentType = 'payfast';
       showLoadingAlert();
@@ -894,24 +916,39 @@ class PaymentScreenState extends State<PaymentScreen> {
       );
       if (confirmOrder) {
         showLoadingAlert();
-        setState(() { isOrderPlaced = true; });
         final orderId = await generateOrderId();
-        TopupTranHistoryModel walletTx = TopupTranHistoryModel(
-            amount: widget.total, order_id: orderId, serviceType: 'delivery-service',
-            id: orderId, user_id: MyAppState.currentUser!.userID, date: Timestamp.now(),
-            isTopup: false, payment_method: 'wallet', payment_status: 'success',
-            transactionUser: 'customer', note: 'Order Amount Payment');
-        await FireStoreUtils.firestore.collection('wallet').doc(walletTx.id).set(walletTx.toJson()).then((value) async {
-          await FireStoreUtils.updateWalletAmount(amount: -widget.total).then((value) {
-            Navigator.pop(_scaffoldKey.currentContext!);
-            showAlert(_scaffoldKey.currentContext!, response: 'Payment Successful Via'.tr() + ' Wallet', colors: Colors.green);
-            if (widget.take_away!) {
-              placeOrder(_scaffoldKey.currentContext!, oid: orderId);
-            } else {
-              toCheckOutScreen(true, context, oid: orderId);
-            }
-          });
-        });
+
+        // Server verifies price/coupon/special-discount/vendor-status,
+        // claims device ownership, and atomically deducts the verified
+        // total from the wallet (checking the real current balance in the
+        // same transaction) — all in one trusted call. No client-side
+        // wallet write of any kind happens on this path anymore.
+        final result = await RazorPayController().createVerifiedWalletOrder(
+          vendorID: widget.products.first.vendorID,
+          products: widget.products,
+          orderId: orderId,
+          couponId: widget.couponId,
+          sectionId: sectionConstantModel?.id,
+          takeAway: widget.take_away ?? false,
+          deliveryCharge: widget.deliveryCharge,
+          tipValue: widget.tipValue,
+          taxSetting: widget.taxModel,
+        );
+        if (!context.mounted) return;
+        Navigator.pop(_scaffoldKey.currentContext!);
+
+        if (!result.success) {
+          _handleVerifiedPaymentFailure(result);
+          return;
+        }
+
+        setState(() { isOrderPlaced = true; });
+        showAlert(_scaffoldKey.currentContext!, response: 'Payment Successful Via'.tr() + ' Wallet', colors: Colors.green);
+        if (widget.take_away!) {
+          placeOrder(_scaffoldKey.currentContext!, oid: orderId);
+        } else {
+          toCheckOutScreen(true, context, oid: orderId);
+        }
       }
     } else if (codPay) {
       paymentType = 'cod';
@@ -1020,57 +1057,305 @@ class PaymentScreenState extends State<PaymentScreen> {
   bool isOrderPlaced = false;
   bool _isPlacingOrder = false; // debounce for placeOrder()
   bool _paymentCollected = false; // true once Razorpay (or any online gateway) has debited the user
+  double _cachedWalletAmount = 0.0;
+  // Order ID generated before opening Razorpay checkout — passed in notes so
+  // the webhook can recover the order if the app dies after payment.
+  String? _pendingOrderId;
 
-  ///RazorPay payment function
-  void openCheckout({required amount, required orderId}) async {
-    var options = {
+  // ─────────────────────────────────────────────────────────────
+  // QuickDash payment sheet (Zomato-style bottom sheet)
+  // ─────────────────────────────────────────────────────────────
+
+  String _formatPhone(String? phone) {
+    if (phone == null || phone.isEmpty) return '';
+    if (phone.startsWith('+')) return phone;
+    if (phone.length == 10) return '+91$phone';
+    return phone;
+  }
+
+  Future<void> _showPaymentSheet(BuildContext context) async {
+    final codModel = await futurecod;
+    final isCodEnabled = codModel?.cod == true;
+    if (!context.mounted) return;
+
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useRootNavigator: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => QuickDashPaymentSheet(
+        amount: widget.total,
+        isWalletEnabled: UserPreference.getWalletData() ?? false,
+        walletBalance: _cachedWalletAmount,
+        walletHasSufficientBalance: walletBalanceError,
+        isCodEnabled: isCodEnabled,
+        isRazorpayEnabled: razorPayData?.isEnabled == true,
+        onUpiSelected: _handleUpiSelected,
+        onCardSelected: _handleCardSelected,
+        onWalletSelected: _handleWalletSelected,
+        onCodSelected: _handleCodSelected,
+        onMoreOptions: () => _onProceed(context),
+      ),
+    );
+  }
+
+  // All UPI tiles route through Razorpay's own checkout with UPI pre-selected.
+  // Direct UPI Intent (upi:// scheme) is not supported for Razorpay's
+  // rzp@rxaxis virtual VPAs — those VPAs are Razorpay-internal and can only
+  // be resolved through Razorpay's own collect flow, not NPCI's public registry.
+  void _handleUpiSelected(String appHint) async {
+    paymentType = 'razorpay';
+    showLoadingAlert();
+    final appOrderId = await generateOrderId();
+    _pendingOrderId = appOrderId;
+    final result = await RazorPayController().createVerifiedOrderPayment(
+      vendorID: widget.products.first.vendorID,
+      products: widget.products,
+      couponId: widget.couponId,
+      sectionId: sectionConstantModel?.id,
+      takeAway: widget.take_away ?? false,
+      deliveryCharge: widget.deliveryCharge,
+      tipValue: widget.tipValue,
+      taxSetting: widget.taxModel,
+    );
+    setState(() => _isLoadingDialogShowing = false);
+    if (!mounted) return;
+    Navigator.pop(_scaffoldKey.currentContext!);
+    if (result.success) {
+      openCheckoutUpi(amount: result.amount, orderId: result.razorpayOrderId!, appOrderId: appOrderId);
+    } else {
+      _handleVerifiedPaymentFailure(result);
+    }
+  }
+
+  void _handleCardSelected() async {
+    paymentType = 'razorpay';
+    showLoadingAlert();
+    final appOrderId = await generateOrderId();
+    _pendingOrderId = appOrderId;
+    final result = await RazorPayController().createVerifiedOrderPayment(
+      vendorID: widget.products.first.vendorID,
+      products: widget.products,
+      couponId: widget.couponId,
+      sectionId: sectionConstantModel?.id,
+      takeAway: widget.take_away ?? false,
+      deliveryCharge: widget.deliveryCharge,
+      tipValue: widget.tipValue,
+      taxSetting: widget.taxModel,
+    );
+    setState(() => _isLoadingDialogShowing = false);
+    if (!mounted) return;
+    Navigator.pop(_scaffoldKey.currentContext!);
+    if (result.success) {
+      openCheckoutCard(amount: result.amount, orderId: result.razorpayOrderId!, appOrderId: appOrderId);
+    } else {
+      _handleVerifiedPaymentFailure(result);
+    }
+  }
+
+  // Shared by all three createVerifiedOrderPayment call sites (button,
+  // UPI tile, Card tile). A device_superseded denial means the server has
+  // just told this device it's no longer the account's active one — that
+  // must be treated the same as any other "not active" signal (sign out,
+  // redirect to login), not left as an inline error toast on a screen the
+  // user is no longer actually authorized to be transacting from.
+  void _handleVerifiedPaymentFailure(VerifiedPaymentOrderResult result) {
+    if (result.deviceSuperseded) {
+      DeviceSessionService.handleSessionInvalidated(
+        _scaffoldKey.currentContext,
+        message: result.errorMessage,
+      );
+      return;
+    }
+    showAlert(_scaffoldKey.currentContext!,
+        response: result.errorMessage?.tr() ?? 'Something went wrong, please contact admin.'.tr(),
+        colors: AppThemeData.primary500);
+  }
+
+  void _handleWalletSelected() async {
+    paymentType = 'wallet';
+    final confirmOrder = await AppDialog.showConfirm(
+      _scaffoldKey.currentContext!,
+      title: 'Confirm Order',
+      message: 'Do you want to confirm and place this order via Wallet?',
+      confirmLabel: 'Yes, Place Order',
+      cancelLabel: 'Cancel',
+    );
+    if (!confirmOrder) return;
+    showLoadingAlert();
+    final orderId = await generateOrderId();
+
+    // Same server-verified, atomic path as the other wallet handler (see
+    // _onProceed) — no client-side wallet write on this path either.
+    final result = await RazorPayController().createVerifiedWalletOrder(
+      vendorID: widget.products.first.vendorID,
+      products: widget.products,
+      orderId: orderId,
+      couponId: widget.couponId,
+      sectionId: sectionConstantModel?.id,
+      takeAway: widget.take_away ?? false,
+      deliveryCharge: widget.deliveryCharge,
+      tipValue: widget.tipValue,
+      taxSetting: widget.taxModel,
+    );
+    if (!mounted) return;
+    Navigator.pop(_scaffoldKey.currentContext!);
+
+    if (!result.success) {
+      _handleVerifiedPaymentFailure(result);
+      return;
+    }
+
+    setState(() { isOrderPlaced = true; });
+    showAlert(_scaffoldKey.currentContext!, response: 'Payment Successful Via'.tr() + ' Wallet', colors: Colors.green);
+    if (widget.take_away!) {
+      placeOrder(_scaffoldKey.currentContext!, oid: orderId);
+    } else {
+      toCheckOutScreen(true, _scaffoldKey.currentContext!, oid: orderId);
+    }
+  }
+
+  void _handleCodSelected() async {
+    paymentType = 'cod';
+    paymentOption = 'Pay Via Cash On delivery'.tr();
+    setState(() { isOrderPlaced = true; });
+    final orderId = await generateOrderId();
+    if (widget.take_away!) {
+      placeOrder(_scaffoldKey.currentContext!, oid: orderId);
+    } else {
+      toCheckOutScreen(false, _scaffoldKey.currentContext!, oid: orderId);
+    }
+  }
+
+  // Opens Razorpay pre-selecting UPI — skips method-selection step
+  void openCheckoutUpi({required double amount, required String orderId, required String appOrderId}) {
+    final options = {
       'key': razorPayData!.razorpayKey,
       'amount': (amount * 100).toInt(),
       'name': 'Quickdash',
       'order_id': orderId,
-      "currency": currencyData?.code,
+      'currency': currencyData?.code ?? 'INR',
+      'description': 'Order Payment',
+      'retry': {'enabled': false},
+      'send_sms_hash': true,
+      'prefill': {
+        'contact': _formatPhone(MyAppState.currentUser!.phoneNumber),
+        'email': MyAppState.currentUser!.email ?? '',
+        'method': 'upi',
+      },
+      'notes': {
+        'orderId': appOrderId,
+        'vendorId': widget.products.first.vendorID,
+        'userId': MyAppState.currentUser!.userID,
+      },
+      'theme': {'color': '#7C3AED'},
+    };
+    paymentInProgressNotifier.value = true;
+    try {
+      _razorPay.open(options);
+    } catch (e) {
+      paymentInProgressNotifier.value = false;
+      debugPrint('[RazorPay UPI] $e');
+    }
+  }
+
+  // Opens Razorpay pre-selecting card — skips method-selection step
+  void openCheckoutCard({required double amount, required String orderId, required String appOrderId}) {
+    final options = {
+      'key': razorPayData!.razorpayKey,
+      'amount': (amount * 100).toInt(),
+      'name': 'Quickdash',
+      'order_id': orderId,
+      'currency': currencyData?.code ?? 'INR',
+      'description': 'Order Payment',
+      'retry': {'enabled': false},
+      'send_sms_hash': true,
+      'prefill': {
+        'contact': _formatPhone(MyAppState.currentUser!.phoneNumber),
+        'email': MyAppState.currentUser!.email ?? '',
+        'method': 'card',
+      },
+      'notes': {
+        'orderId': appOrderId,
+        'vendorId': widget.products.first.vendorID,
+        'userId': MyAppState.currentUser!.userID,
+      },
+      'theme': {'color': '#7C3AED'},
+    };
+    paymentInProgressNotifier.value = true;
+    try {
+      _razorPay.open(options);
+    } catch (e) {
+      paymentInProgressNotifier.value = false;
+      debugPrint('[RazorPay Card] $e');
+    }
+  }
+
+  void openCheckout({required amount, required orderId, required String appOrderId}) {
+    final options = {
+      'key': razorPayData!.razorpayKey,
+      'amount': (amount * 100).toInt(),
+      'name': 'Quickdash',
+      'order_id': orderId,
+      'currency': currencyData?.code,
       'description': 'Order Payment',
       'retry': {'enabled': true, 'max_count': 1},
       'send_sms_hash': true,
       'prefill': {
-        'contact': MyAppState.currentUser!.phoneNumber,
-        'email': MyAppState.currentUser!.email,
+        'contact': _formatPhone(MyAppState.currentUser!.phoneNumber),
+        'email': MyAppState.currentUser!.email ?? '',
       },
-      // Removed external wallets restriction to enable UPI and all payment methods
+      'notes': {
+        'orderId': appOrderId,
+        'vendorId': widget.products.first.vendorID,
+        'userId': MyAppState.currentUser!.userID,
+      },
     };
-
+    paymentInProgressNotifier.value = true;
     try {
       _razorPay.open(options);
     } catch (e) {
-      debugPrint('Error: $e');
+      paymentInProgressNotifier.value = false;
+      debugPrint('[RazorPay] $e');
     }
   }
 
   void _handlePaymentSuccess(PaymentSuccessResponse response) {
-    // Dismiss the loading dialog if it's still open (it was already dismissed in
-    // _onProceed before the Razorpay sheet opened, so this is usually a no-op).
-    // Crucially we do NOT call dismissLoadingAndClearProcessing() here because
-    // that would set isProcessingOrder = false, creating a window where the user
-    // could press Back between payment and the order being written to Firestore.
+    paymentInProgressNotifier.value = false;
     if (_isLoadingDialogShowing) {
       setState(() => _isLoadingDialogShowing = false);
       Navigator.pop(_scaffoldKey.currentContext!);
     }
 
-    // Money is now debited. Lock back navigation for the entire order-placement
-    // phase and remember that payment was collected (used in _showBackDialog).
+    // Money is now debited — lock back navigation.
     setState(() {
       isOrderPlaced = true;
       isProcessingOrder = true;
       _paymentCollected = true;
     });
 
-    generateOrderId().then((orderId) {
-      placeOrder(_scaffoldKey.currentContext!, oid: orderId);
-    });
+    // Use the order ID that was pre-generated before checkout opened.
+    // This same ID is in the Razorpay notes so the webhook can recover
+    // the order if the app dies before _buildAndPlaceOrder completes.
+    final orderId = _pendingOrderId;
+    _pendingOrderId = null;
+    if (orderId == null || !mounted) return;
+
+    // Carried into _buildAndPlaceOrder so it can verify the Razorpay
+    // signature server-side (and stamp razorpayOrderId onto the order)
+    // before the order doc is written.
+    _pendingRazorpayResponse = response;
+
+    push(_scaffoldKey.currentContext!, PlaceOrderScreen(
+      orderFactory: () => _buildAndPlaceOrder(orderId),
+      isPaymentVerified: true,
+    ));
   }
 
+  PaymentSuccessResponse? _pendingRazorpayResponse;
+
   void _handleExternalWaller(ExternalWalletResponse response) {
+    paymentInProgressNotifier.value = false;
     Navigator.pop(_scaffoldKey.currentContext!);
     ScaffoldMessenger.of(_scaffoldKey.currentContext!).showSnackBar(SnackBar(
       content: Text(
@@ -1082,6 +1367,7 @@ class PaymentScreenState extends State<PaymentScreen> {
   }
 
   void _handlePaymentError(PaymentFailureResponse response) {
+    paymentInProgressNotifier.value = false;
     dismissLoadingAndClearProcessing();
     String description = 'Payment failed. Please try again.'.tr();
     try {
@@ -2122,20 +2408,30 @@ class PaymentScreenState extends State<PaymentScreen> {
     };
   }
 
-  placeOrder(BuildContext buildContext, {required String oid}) async {
-    // Debounce: prevent duplicate order placements
-    if (_isPlacingOrder) return;
-    if (paymentType.isEmpty) {
-      AppDialog.showWarning(buildContext, title: 'Missing Payment Method', message: 'Please select a payment method to continue.');
-      return;
+  /// Core Firestore write — builds and saves the order, updates stock counts.
+  /// Used by both [placeOrder] (COD/wallet) and [_handlePaymentSuccess] (Razorpay).
+  Future<OrderModel> _buildAndPlaceOrder(String oid) async {
+    // For Razorpay orders, confirm the payment signature server-side before
+    // ever writing the order doc — a spoofed/absent signature must not
+    // result in an order (verifyOrderOnCreate would later flag it as fraud,
+    // but blocking it here is a much better UX for the vast majority of
+    // cases where this only fails due to a genuine payment problem).
+    String? razorpayOrderId;
+    final pendingResponse = _pendingRazorpayResponse;
+    _pendingRazorpayResponse = null;
+    if (pendingResponse != null) {
+      final verifyResult = await RazorPayController().verifyPayment(
+        razorpayOrderId: pendingResponse.orderId ?? '',
+        razorpayPaymentId: pendingResponse.paymentId ?? '',
+        razorpaySignature: pendingResponse.signature ?? '',
+        purpose: 'order',
+      );
+      if (!verifyResult.success) {
+        throw Exception(verifyResult.errorMessage ?? 'Payment verification failed. Please contact support.');
+      }
+      razorpayOrderId = pendingResponse.orderId;
     }
 
-    setState(() {
-      _isPlacingOrder = true;
-      isProcessingOrder = true;
-    });
-
-    // Build cleaned products list
     final List<CartProduct> tempProduc = [];
     for (CartProduct cartProduct in widget.products) {
       CartProduct tempCart = cartProduct;
@@ -2154,82 +2450,92 @@ class PaymentScreenState extends State<PaymentScreen> {
       tempProduc.add(tempCart);
     }
 
+    VendorModel vendorModel = await FireStoreUtils()
+        .getVendorByVendorID(widget.products.first.vendorID)
+        .whenComplete(() => setPrefData());
+
+    final OrderModel orderModel = OrderModel(
+      id: oid.toString(),
+      address: widget.addressModel,
+      author: MyAppState.currentUser,
+      authorID: MyAppState.currentUser?.userID ?? '',
+      createdAt: Timestamp.now(),
+      products: tempProduc,
+      status: widget.orderType == "Bill Pay" ? ORDER_STATUS_COMPLETED : ORDER_STATUS_PLACED,
+      vendor: vendorModel,
+      payment_method: paymentType,
+      notes: widget.notes,
+      taxModel: widget.taxModel,
+      vendorID: widget.products.first.vendorID,
+      discount: widget.discount,
+      couponCode: widget.couponCode,
+      couponId: widget.couponId,
+      sectionId: sectionConstantModel?.id ?? '',
+      adminCommission: (widget.take_away ?? false)
+          ? (sectionConstantModel?.adminCommision?.takeawayCommission ?? 0).toString()
+          : (sectionConstantModel?.adminCommision?.commission ?? 0).toString(),
+      adminCommissionType: sectionConstantModel?.adminCommision?.type,
+      specialDiscount: widget.specialDiscountMap,
+      takeAway: widget.take_away ?? false,
+      scheduleTime: widget.scheduleTime,
+      orderType: widget.orderType,
+      billPayRequestId: widget.billPayRequestId,
+      razorpayOrderId: razorpayOrderId,
+    );
+
+    final placedOrder = await FireStoreUtils().placeOrderWithTakeAWay(orderModel);
+
+    await Future.wait(
+      tempProduc.map((item) async {
+        try {
+          final productModel = await FireStoreUtils().getProductByID(item.id.split('~').first);
+          if (item.variant_info != null && productModel.itemAttributes?.variants != null) {
+            for (final v in productModel.itemAttributes!.variants!) {
+              if (v.variant_id == item.id.split('~').last && v.variant_quantity != '-1') {
+                v.variant_quantity =
+                    (int.parse(v.variant_quantity.toString()) - item.quantity).toString();
+              }
+            }
+          } else if (productModel.quantity != -1) {
+            productModel.quantity -= item.quantity;
+          }
+          await FireStoreUtils.updateProduct(productModel);
+        } catch (stockErr) {
+          debugPrint('Stock update error for item ${item.id}: $stockErr');
+        }
+      }),
+    );
+
+    return placedOrder;
+  }
+
+  placeOrder(BuildContext buildContext, {required String oid}) async {
+    if (_isPlacingOrder) return;
+    if (paymentType.isEmpty) {
+      AppDialog.showWarning(buildContext, title: 'Missing Payment Method', message: 'Please select a payment method to continue.');
+      return;
+    }
+
+    setState(() {
+      _isPlacingOrder = true;
+      isProcessingOrder = true;
+    });
+
     OrderModel? placedOrder;
 
     try {
       showProgress('Placing Order...'.tr(), false);
-
-      // Fetch vendor
-      VendorModel vendorModel = await FireStoreUtils()
-          .getVendorByVendorID(widget.products.first.vendorID)
-          .whenComplete(() => setPrefData());
-
-      // Build order model
-      final OrderModel orderModel = OrderModel(
-        id: oid.toString(),
-        address: widget.addressModel,
-        author: MyAppState.currentUser,
-        authorID: MyAppState.currentUser?.userID ?? '',
-        createdAt: Timestamp.now(),
-        products: tempProduc,
-        status: widget.orderType == "Bill Pay" ? ORDER_STATUS_COMPLETED : ORDER_STATUS_PLACED,
-        vendor: vendorModel,
-        payment_method: paymentType,
-        notes: widget.notes,
-        taxModel: widget.taxModel,
-        vendorID: widget.products.first.vendorID,
-        discount: widget.discount,
-        couponCode: widget.couponCode,
-        couponId: widget.couponId,
-        sectionId: sectionConstantModel?.id ?? '',
-        adminCommission: (widget.take_away ?? false)
-            ? (sectionConstantModel?.adminCommision?.takeawayCommission ?? 0).toString()
-            : (sectionConstantModel?.adminCommision?.commission ?? 0).toString(),
-        adminCommissionType: sectionConstantModel?.adminCommision?.type,
-        specialDiscount: widget.specialDiscountMap,
-        takeAway: widget.take_away ?? false,
-        scheduleTime: widget.scheduleTime,
-        orderType: widget.orderType,
-      );
-
-      // Save to Firestore
-      placedOrder =
-          await FireStoreUtils().placeOrderWithTakeAWay(orderModel);
-
-      // Update stock counts in parallel — best-effort, never fails the order.
-      await Future.wait(
-        tempProduc.map((item) async {
-          try {
-            final productModel = await FireStoreUtils().getProductByID(item.id.split('~').first);
-            if (item.variant_info != null && productModel.itemAttributes?.variants != null) {
-              for (final v in productModel.itemAttributes!.variants!) {
-                if (v.variant_id == item.id.split('~').last && v.variant_quantity != '-1') {
-                  v.variant_quantity =
-                      (int.parse(v.variant_quantity.toString()) - item.quantity).toString();
-                }
-              }
-            } else if (productModel.quantity != -1) {
-              productModel.quantity -= item.quantity;
-            }
-            await FireStoreUtils.updateProduct(productModel);
-          } catch (stockErr) {
-            debugPrint('Stock update error for item ${item.id}: $stockErr');
-          }
-        }),
-      );
-
+      placedOrder = await _buildAndPlaceOrder(oid);
       hideProgress();
       setState(() {
         isProcessingOrder = false;
         isOrderPlaced = true;
         _isPlacingOrder = false;
       });
-
       push(buildContext, PlaceOrderScreen(
         orderModel: placedOrder,
         isPaymentVerified: paymentType != 'cod',
       ));
-
     } catch (e) {
       hideProgress();
       setState(() {
@@ -2246,8 +2552,6 @@ class PaymentScreenState extends State<PaymentScreen> {
       }
 
       if (buildContext.mounted) {
-        // When payment was already debited (online gateway), show a different
-        // message that doesn't falsely reassure the user their card wasn't charged.
         if (_paymentCollected) {
           _showPaymentCollectedOrderFailDialog(buildContext, oid, e.toString());
         } else {
@@ -2346,13 +2650,14 @@ class PaymentScreenState extends State<PaymentScreen> {
         scheduleTime: widget.scheduleTime,
         address: widget.addressModel,
         orderType: widget.orderType,
+        billPayRequestId: widget.billPayRequestId,
       ),
     );
   }
 
   @override
   void dispose() {
-    _razorPay.clear(); // Remove all Razorpay event listeners
+    _razorPay.clear();
     super.dispose();
   }
 }
