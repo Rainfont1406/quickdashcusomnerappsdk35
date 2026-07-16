@@ -2234,7 +2234,12 @@ class FireStoreUtils {
   Future<OrderModel> placeOrder(OrderModel orderModel) async {
     DocumentReference documentReference = firestore.collection(ORDERS).doc(orderModel.id);
     orderModel.id = documentReference.id;
-    await documentReference.set(orderModel.toJson());
+    // merge: true — if this order id was already written once (e.g. a retry
+    // after an error that happened after the first write succeeded), a
+    // plain overwrite would wipe server-added fields like walletCredited/
+    // priceVerified, making Cloud Functions treat the order as freshly
+    // completed again and pay the vendor a second time.
+    await documentReference.set(orderModel.toJson(), SetOptions(merge: true));
     return orderModel;
   }
 
@@ -2246,7 +2251,11 @@ class FireStoreUtils {
     } else {
       documentReference = firestore.collection(ORDERS).doc(orderModel.id);
     }
-    await documentReference.set(orderModel.toJson());
+    // merge: true — see placeOrder() above; PlaceOrderScreen's "Try Again"
+    // re-runs this exact write with the same order id if anything throws
+    // after the first write already succeeded (e.g. the stock-update step
+    // below), so this must not clobber server-added fields on retry.
+    await documentReference.set(orderModel.toJson(), SetOptions(merge: true));
     return orderModel;
   }
 
