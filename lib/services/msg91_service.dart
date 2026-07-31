@@ -1,126 +1,83 @@
+import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
-
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:http/http.dart' as http;
 
+/// MSG91 OTP service — calls the QuickDash Laravel server proxy.
+/// The MSG91 authkey never leaves the server; apps only send the phone number.
 class Msg91Response {
   final bool success;
   final String message;
   const Msg91Response({required this.success, required this.message});
 }
 
-class _Msg91Settings {
-  final String authKey;
-  final String templateId;
-  final String senderId;
-  final int otpLength;
-  final int otpExpiryMinutes;
-
-  const _Msg91Settings({
-    required this.authKey,
-    required this.templateId,
-    required this.senderId,
-    required this.otpLength,
-    required this.otpExpiryMinutes,
-  });
-}
-
-/// Calls MSG91 OTP API directly.
-/// Credentials live in Firestore: settings/msg91
-/// Fields: authkey, templateid, senderid, otpLength, otpExpiryMinutes, enabled
 class Msg91Service {
-  static _Msg91Settings? _cache;
-  static const _base = 'https://api.msg91.com/api/v5/otp';
-  static const _timeout = Duration(seconds: 30);
+  static const _base = 'https://admin.quickdash.co.in/api/msg91';
+  static const _timeout = Duration(seconds: 25);
 
-  /// OTP digit length — read from Firestore; exposed so UI can configure PinField.
-  static int get otpLength => _cache?.otpLength ?? 4;
+  // Cached from /api/msg91/config
+  static int _otpLength = 4;
+  static int get otpLength => _otpLength;
 
-  // ── Credential loader ─────────────────────────────────────────────────
-  static Future<_Msg91Settings?> _settings() async {
-    if (_cache != null) return _cache;
+  /// Call once at app start (or before the OTP screen) to get non-secret config.
+  static Future<void> loadConfig() async {
     try {
-      final doc = await FirebaseFirestore.instance
-          .collection('settings')
-          .doc('msg91')
-          .get();
-      if (!doc.exists || doc.data() == null) return null;
-      final d = doc.data()!;
-
-      final enabled = d['enabled'] as bool? ?? true;
-      if (!enabled) return null;
-
-      _cache = _Msg91Settings(
-        authKey: d['authkey']?.toString() ?? '',
-        templateId: d['templateid']?.toString() ?? '',
-        senderId: d['senderid']?.toString() ?? 'msg91',
-        otpLength: (d['otpLength'] as num?)?.toInt() ?? 4,
-        otpExpiryMinutes: (d['otpExpiryMinutes'] as num?)?.toInt() ?? 10,
-      );
-      return _cache;
-    } catch (_) {
-      return null;
-    }
+      final resp = await http
+          .get(Uri.parse('$_base/config'))
+          .timeout(_timeout);
+      final body = jsonDecode(resp.body) as Map<String, dynamic>;
+      if (body['success'] == true && body['data'] != null) {
+        _otpLength = (body['data']['otpLength'] as num?)?.toInt() ?? 4;
+      }
+    } catch (_) {}
   }
-
-  /// Clears cached settings (call after Firestore settings are updated).
-  static void clearCache() => _cache = null;
 
   static String _mobile(String countryCode, String phone) =>
       countryCode.replaceFirst('+', '') + phone.replaceAll(RegExp(r'\D'), '');
 
   // ── Send OTP ──────────────────────────────────────────────────────────
+
   static Future<Msg91Response> sendOtp(
       String countryCode, String phoneNumber) async {
-    final s = await _settings();
-    if (s == null || s.authKey.isEmpty) {
-      return const Msg91Response(
-          success: false,
-          message: 'OTP service is not configured. Please contact support.');
-    }
     try {
-      final uri = Uri.parse(_base).replace(queryParameters: {
-        'template_id': s.templateId,
-        'mobile': _mobile(countryCode, phoneNumber),
-        'authkey': s.authKey,
-        'otp_length': s.otpLength.toString(),
-        'otp_expiry': s.otpExpiryMinutes.toString(),
-        'sender': s.senderId,
-      });
-      final resp = await http.get(uri).timeout(_timeout);
+      final resp = await http
+          .post(
+            Uri.parse('$_base/send'),
+            headers: const {'Content-Type': 'application/json'},
+            body: jsonEncode({'mobile': _mobile(countryCode, phoneNumber)}),
+          )
+          .timeout(_timeout);
       return _parse(resp, ok: 'Verification code sent successfully.');
-    } on SocketException {
+    } on TimeoutException {
       return const Msg91Response(
           success: false,
-          message: 'No internet connection. Please try again.');
+          message: 'Request timed out. Please try again.');
     } catch (_) {
       return const Msg91Response(
           success: false,
-          message: 'Failed to send OTP. Please try again.');
+          message: 'No internet connection. Please try again.');
     }
   }
 
   // ── Verify OTP ────────────────────────────────────────────────────────
+
   static Future<Msg91Response> verifyOtp(
       String countryCode, String phoneNumber, String otp) async {
-    final s = await _settings();
-    if (s == null || s.authKey.isEmpty) {
-      return const Msg91Response(
-          success: false, message: 'OTP service is not configured.');
-    }
     try {
-      final uri = Uri.parse('$_base/verify').replace(queryParameters: {
-        'otp': otp,
-        'mobile': _mobile(countryCode, phoneNumber),
-        'authkey': s.authKey,
-      });
-      final resp = await http.get(uri).timeout(_timeout);
+      final resp = await http
+          .post(
+            Uri.parse('$_base/verify'),
+            headers: const {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'mobile': _mobile(countryCode, phoneNumber),
+              'otp': otp,
+            }),
+          )
+          .timeout(_timeout);
       return _parse(resp, ok: 'OTP verified successfully.');
-    } on SocketException {
+    } on TimeoutException {
       return const Msg91Response(
           success: false,
-          message: 'No internet connection. Please try again.');
+          message: 'Request timed out. Please try again.');
     } catch (_) {
       return const Msg91Response(
           success: false,
@@ -129,25 +86,22 @@ class Msg91Service {
   }
 
   // ── Resend OTP ────────────────────────────────────────────────────────
+
   static Future<Msg91Response> resendOtp(
       String countryCode, String phoneNumber) async {
-    final s = await _settings();
-    if (s == null || s.authKey.isEmpty) {
-      return const Msg91Response(
-          success: false, message: 'OTP service is not configured.');
-    }
     try {
-      final uri = Uri.parse('$_base/retry').replace(queryParameters: {
-        'retrytype': 'text',
-        'mobile': _mobile(countryCode, phoneNumber),
-        'authkey': s.authKey,
-      });
-      final resp = await http.get(uri).timeout(_timeout);
+      final resp = await http
+          .post(
+            Uri.parse('$_base/resend'),
+            headers: const {'Content-Type': 'application/json'},
+            body: jsonEncode({'mobile': _mobile(countryCode, phoneNumber)}),
+          )
+          .timeout(_timeout);
       return _parse(resp, ok: 'Verification code resent successfully.');
-    } on SocketException {
+    } on TimeoutException {
       return const Msg91Response(
           success: false,
-          message: 'No internet connection. Please try again.');
+          message: 'Request timed out. Please try again.');
     } catch (_) {
       return const Msg91Response(
           success: false,
@@ -155,41 +109,78 @@ class Msg91Service {
     }
   }
 
-  // ── Response parser ───────────────────────────────────────────────────
+  // ── Parser ────────────────────────────────────────────────────────────
+
   static Msg91Response _parse(http.Response resp, {required String ok}) {
     try {
       final data = jsonDecode(resp.body) as Map<String, dynamic>;
-      final success = data['type']?.toString() == 'success';
-      final raw = data['message']?.toString() ?? '';
+      final success = data['success'] == true;
       return Msg91Response(
-          success: success, message: success ? ok : _friendly(raw));
+          success: success,
+          message: success ? ok : (data['message']?.toString() ?? ok));
     } catch (_) {
       final success = resp.statusCode == 200;
       return Msg91Response(
           success: success,
-          message:
-              success ? ok : 'Something went wrong. Please try again.');
+          message: success ? ok : 'Something went wrong. Please try again.');
     }
   }
+}
 
-  static String _friendly(String raw) {
-    if (raw.isEmpty) return 'Something went wrong. Please try again.';
-    final lower = raw.toLowerCase();
-    if (lower.contains('invalid otp') ||
-        lower.contains('otp not found') ||
-        lower.contains('otp not match') ||
-        lower.contains('incorrect otp')) {
-      return 'Incorrect OTP. Please try again.';
-    }
-    if (lower.contains('expir')) {
-      return 'OTP has expired. Please request a new one.';
-    }
-    if (lower.contains('too many') || lower.contains('limit')) {
-      return 'Too many attempts. Please try again in a few minutes.';
-    }
-    if (lower.contains('invalid mobile') || lower.contains('invalid number')) {
-      return 'Invalid phone number. Please check and try again.';
-    }
-    return raw;
+// ── Compatibility shims for callers that import the old OTPResponse types ──
+
+class OTPResponse {
+  final bool success;
+  final String message;
+  final String? type;
+  final String? error;
+  final int? httpStatus;
+
+  OTPResponse({
+    required this.success,
+    required this.message,
+    this.type,
+    this.error,
+    this.httpStatus,
+  });
+}
+
+class OTPVerificationResponse {
+  final bool success;
+  final String message;
+  final String? verificationId;
+  final String? error;
+  final int? httpStatus;
+
+  OTPVerificationResponse({
+    required this.success,
+    required this.message,
+    this.verificationId,
+    this.error,
+    this.httpStatus,
+  });
+}
+
+/// Legacy-compatible class used by PhoneNumberController in the Customer App.
+class MSG91Service {
+  static int get otpDigits => Msg91Service.otpLength;
+
+  static Future<void> init() => Msg91Service.loadConfig();
+
+  static Future<OTPResponse> sendOTP(String phoneNumber) async {
+    final r = await Msg91Service.sendOtp('', phoneNumber);
+    return OTPResponse(success: r.success, message: r.message);
+  }
+
+  static Future<OTPVerificationResponse> verifyOTP(
+      String phoneNumber, String otp) async {
+    final r = await Msg91Service.verifyOtp('', phoneNumber, otp);
+    return OTPVerificationResponse(
+        success: r.success, message: r.message, verificationId: phoneNumber);
+  }
+
+  static Future<OTPResponse> resendOTP(String phoneNumber) async {
+    final r = await Msg91Service.resendOtp('', phoneNumber);
+    return OTPResponse(success: r.success, message: r.message);
   }
 }

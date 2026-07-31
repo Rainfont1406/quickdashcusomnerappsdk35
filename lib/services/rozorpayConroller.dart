@@ -61,6 +61,13 @@ class VerifiedPaymentOrderResult {
   // deduction) was insufficient for the verified total — distinct from a
   // generic error since the UI should point the user at topping up.
   final bool insufficientBalance;
+  // True when this was a Bill Pay Accept & Pay and the server rejected it
+  // because the vendor edited the bill after this device last saw it
+  // (billPayExpiresAt no longer matches what was passed as
+  // expectedBillVersion). The server never charged anything — updatedTotal
+  // is the CURRENT, real total the caller must show before retrying.
+  final bool billUpdated;
+  final double? updatedTotal;
 
   VerifiedPaymentOrderResult({
     this.success = false,
@@ -72,6 +79,8 @@ class VerifiedPaymentOrderResult {
     this.verifiedSpecialDiscount = 0,
     this.deviceSuperseded = false,
     this.insufficientBalance = false,
+    this.billUpdated = false,
+    this.updatedTotal,
   });
 }
 
@@ -100,6 +109,12 @@ class RazorPayController {
     String? tipValue,
     List<TaxModel>? taxSetting,
     String currency = 'INR',
+    // Bill Pay Accept & Pay only: links this payment to the vendor's live
+    // request doc so the server recomputes the charge from it directly
+    // (ignoring `products` above entirely) and rejects a stale bill instead
+    // of ever charging it. See resolveBillPayAmount in paymentIntents.js.
+    String? billPayRequestId,
+    int? expectedBillVersion,
   }) async {
     final idToken = await _idToken();
     if (idToken == null) {
@@ -125,6 +140,8 @@ class RazorPayController {
               'currency': currency,
               'deviceId': deviceId,
               'fcmToken': fcmToken,
+              'billPayRequestId': billPayRequestId,
+              'expectedBillVersion': expectedBillVersion,
             }),
           )
           .timeout(const Duration(seconds: 30));
@@ -138,6 +155,13 @@ class RazorPayController {
           amount: (data['verifiedTotal'] as num?)?.toDouble() ?? 0,
           verifiedDiscount: (data['verifiedDiscount'] as num?)?.toDouble() ?? 0,
           verifiedSpecialDiscount: (data['verifiedSpecialDiscount'] as num?)?.toDouble() ?? 0,
+        );
+      }
+      if (data['error'] == 'bill_updated') {
+        return VerifiedPaymentOrderResult(
+          billUpdated: true,
+          updatedTotal: (data['updatedTotal'] as num?)?.toDouble(),
+          errorMessage: 'The restaurant updated this bill. Please review it before paying.',
         );
       }
       if (data['error'] == 'vendor_closed') {
@@ -184,6 +208,9 @@ class RazorPayController {
     String? deliveryCharge,
     String? tipValue,
     List<TaxModel>? taxSetting,
+    // Bill Pay Accept & Pay only — see createVerifiedOrderPayment above.
+    String? billPayRequestId,
+    int? expectedBillVersion,
   }) async {
     final idToken = await _idToken();
     if (idToken == null) {
@@ -209,6 +236,8 @@ class RazorPayController {
               'taxSetting': taxSetting?.map((t) => t.toJson()).toList(),
               'deviceId': deviceId,
               'fcmToken': fcmToken,
+              'billPayRequestId': billPayRequestId,
+              'expectedBillVersion': expectedBillVersion,
             }),
           )
           .timeout(const Duration(seconds: 30));
@@ -220,6 +249,13 @@ class RazorPayController {
           amount: (data['verifiedTotal'] as num?)?.toDouble() ?? 0,
           verifiedDiscount: (data['verifiedDiscount'] as num?)?.toDouble() ?? 0,
           verifiedSpecialDiscount: (data['verifiedSpecialDiscount'] as num?)?.toDouble() ?? 0,
+        );
+      }
+      if (data['error'] == 'bill_updated') {
+        return VerifiedPaymentOrderResult(
+          billUpdated: true,
+          updatedTotal: (data['updatedTotal'] as num?)?.toDouble(),
+          errorMessage: 'The restaurant updated this bill. Please review it before paying.',
         );
       }
       if (data['error'] == 'vendor_closed') {
@@ -349,6 +385,45 @@ class RazorPayController {
           errorMessage: data['error']?.toString() ?? 'Unable to initialize payment. Please try again later.');
     } catch (e) {
       debugPrint('[createWalletTopupOrder] $e');
+      return VerifiedPaymentOrderResult(errorMessage: 'Unable to initialize payment. Please try again later.');
+    }
+  }
+
+  // A gift card has no fixed catalog price - same bounded-amount pattern as
+  // createWalletTopupOrder. The gift_purchases record itself (code/pin/
+  // expiry) is created server-side too, inside verifyPayment's own
+  // transaction, once the payment is verified - not by this app afterward.
+  Future<VerifiedPaymentOrderResult> createGiftCardPaymentOrder({
+    required double amount,
+    required String giftId,
+    String? message,
+  }) async {
+    final idToken = await _idToken();
+    if (idToken == null) {
+      return VerifiedPaymentOrderResult(errorMessage: 'Not signed in.');
+    }
+    try {
+      final resp = await http
+          .post(
+            Uri.parse('$CloudFunctionsBaseURL/createGiftCardPaymentOrder'),
+            headers: {'Authorization': 'Bearer $idToken', 'Content-Type': 'application/json'},
+            body: jsonEncode({'amount': amount, 'giftId': giftId, 'message': message}),
+          )
+          .timeout(const Duration(seconds: 30));
+
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      if (resp.statusCode == 200) {
+        return VerifiedPaymentOrderResult(
+          success: true,
+          razorpayOrderId: data['razorpayOrderId']?.toString(),
+          razorpayKey: data['razorpayKey']?.toString(),
+          amount: (data['amount'] as num?)?.toDouble() ?? amount,
+        );
+      }
+      return VerifiedPaymentOrderResult(
+          errorMessage: data['error']?.toString() ?? 'Unable to initialize payment. Please try again later.');
+    } catch (e) {
+      debugPrint('[createGiftCardPaymentOrder] $e');
       return VerifiedPaymentOrderResult(errorMessage: 'Unable to initialize payment. Please try again later.');
     }
   }

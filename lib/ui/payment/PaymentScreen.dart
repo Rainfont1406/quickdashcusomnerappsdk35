@@ -28,6 +28,8 @@ import 'package:emartconsumer/payment/orangePayScreen.dart';
 import 'package:emartconsumer/payment/xenditModel.dart';
 import 'package:emartconsumer/payment/xenditScreen.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/behavior/behavior_event_types.dart';
+import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/device_session_service.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
@@ -97,9 +99,16 @@ class PaymentScreen extends StatefulWidget {
   // Vendor-initiated Bill Pay accept flow: the customer paid through a
   // brand-new, completely normal order (see CartScreen's Bill Pay mode) —
   // this just links it back to the original request doc so a Cloud Function
-  // can reconcile that document afterward. No special order-creation
-  // behavior on this screen depends on it.
+  // can reconcile that document afterward. Also passed to the
+  // createVerifiedOrderPayment/createVerifiedWalletOrder calls below so the
+  // server recomputes the charge from the LIVE request doc instead of
+  // whatever `products` this screen was built with.
   final String? billPayRequestId;
+  // billPayExpiresAt.millisecondsSinceEpoch captured when CartScreen loaded
+  // the bill — lets the server detect the vendor edited it since then (see
+  // resolveBillPayAmount in paymentIntents.js) and reject with the fresh
+  // total instead of charging a stale one.
+  final int? expectedBillVersion;
 
   const PaymentScreen(
       {Key? key,
@@ -118,7 +127,8 @@ class PaymentScreen extends StatefulWidget {
       this.scheduleTime,
       this.addressModel,
       this.orderType,
-      this.billPayRequestId})
+      this.billPayRequestId,
+      this.expectedBillVersion})
       : super(key: key);
 
   @override
@@ -858,13 +868,20 @@ class PaymentScreenState extends State<PaymentScreen> {
   }
 
   Future<void> _onProceed(BuildContext context) async {
+    // TEMPORARY [ORDER-PERF] - timing instrumentation for the loading-speed
+    // investigation. Remove once done.
+    final proceedSw = Stopwatch()..start();
+    debugPrint('[ORDER-PERF] _onProceed START — razorPay=$razorPay payFast=$payFast wallet=$wallet');
     if (razorPay) {
       paymentType = 'razorpay';
       showLoadingAlert();
       // Pre-generate our order ID before opening checkout so we can embed it
       // in Razorpay notes — the webhook uses it to recover if the app dies.
+      final genIdSw = Stopwatch()..start();
       final appOrderId = await generateOrderId();
+      debugPrint('[ORDER-PERF] generateOrderId — ${genIdSw.elapsedMilliseconds}ms');
       _pendingOrderId = appOrderId;
+      final verifySw = Stopwatch()..start();
       final result = await RazorPayController().createVerifiedOrderPayment(
         vendorID: widget.products.first.vendorID,
         products: widget.products,
@@ -874,7 +891,11 @@ class PaymentScreenState extends State<PaymentScreen> {
         deliveryCharge: widget.deliveryCharge,
         tipValue: widget.tipValue,
         taxSetting: widget.taxModel,
+        billPayRequestId: widget.billPayRequestId,
+        expectedBillVersion: widget.expectedBillVersion,
       );
+      debugPrint('[ORDER-PERF] createVerifiedOrderPayment — ${verifySw.elapsedMilliseconds}ms '
+          '(TOTAL so far ${proceedSw.elapsedMilliseconds}ms)');
       setState(() => _isLoadingDialogShowing = false);
       if (!context.mounted) return;
       Navigator.pop(context);
@@ -916,13 +937,16 @@ class PaymentScreenState extends State<PaymentScreen> {
       );
       if (confirmOrder) {
         showLoadingAlert();
+        final genIdSw = Stopwatch()..start();
         final orderId = await generateOrderId();
+        debugPrint('[ORDER-PERF] generateOrderId — ${genIdSw.elapsedMilliseconds}ms');
 
         // Server verifies price/coupon/special-discount/vendor-status,
         // claims device ownership, and atomically deducts the verified
         // total from the wallet (checking the real current balance in the
         // same transaction) — all in one trusted call. No client-side
         // wallet write of any kind happens on this path anymore.
+        final verifySw = Stopwatch()..start();
         final result = await RazorPayController().createVerifiedWalletOrder(
           vendorID: widget.products.first.vendorID,
           products: widget.products,
@@ -933,7 +957,11 @@ class PaymentScreenState extends State<PaymentScreen> {
           deliveryCharge: widget.deliveryCharge,
           tipValue: widget.tipValue,
           taxSetting: widget.taxModel,
+          billPayRequestId: widget.billPayRequestId,
+          expectedBillVersion: widget.expectedBillVersion,
         );
+        debugPrint('[ORDER-PERF] createVerifiedWalletOrder — ${verifySw.elapsedMilliseconds}ms '
+            '(TOTAL so far ${proceedSw.elapsedMilliseconds}ms)');
         if (!context.mounted) return;
         Navigator.pop(_scaffoldKey.currentContext!);
 
@@ -954,7 +982,10 @@ class PaymentScreenState extends State<PaymentScreen> {
       paymentType = 'cod';
       paymentOption = 'Pay Via Cash On delivery'.tr();
       setState(() { isOrderPlaced = true; });
+      final genIdSw = Stopwatch()..start();
       final orderId = await generateOrderId();
+      debugPrint('[ORDER-PERF] generateOrderId (COD) — ${genIdSw.elapsedMilliseconds}ms '
+          '(TOTAL so far ${proceedSw.elapsedMilliseconds}ms)');
       if (widget.take_away!) {
         placeOrder(_scaffoldKey.currentContext!, oid: orderId);
       } else {
@@ -1117,6 +1148,8 @@ class PaymentScreenState extends State<PaymentScreen> {
       deliveryCharge: widget.deliveryCharge,
       tipValue: widget.tipValue,
       taxSetting: widget.taxModel,
+      billPayRequestId: widget.billPayRequestId,
+      expectedBillVersion: widget.expectedBillVersion,
     );
     setState(() => _isLoadingDialogShowing = false);
     if (!mounted) return;
@@ -1142,6 +1175,8 @@ class PaymentScreenState extends State<PaymentScreen> {
       deliveryCharge: widget.deliveryCharge,
       tipValue: widget.tipValue,
       taxSetting: widget.taxModel,
+      billPayRequestId: widget.billPayRequestId,
+      expectedBillVersion: widget.expectedBillVersion,
     );
     setState(() => _isLoadingDialogShowing = false);
     if (!mounted) return;
@@ -1167,9 +1202,47 @@ class PaymentScreenState extends State<PaymentScreen> {
       );
       return;
     }
+    if (result.billUpdated) {
+      _showBillUpdatedDialog(result.updatedTotal);
+      return;
+    }
     showAlert(_scaffoldKey.currentContext!,
         response: result.errorMessage?.tr() ?? 'Something went wrong, please contact admin.'.tr(),
         colors: AppThemeData.primary500);
+  }
+
+  // The vendor edited this Bill Pay bill after the customer opened it here —
+  // the server already refused to charge anything (see resolveBillPayAmount
+  // in paymentIntents.js). Send the customer back to BillPayRequestScreen,
+  // which live-listens to the request doc and will already be showing the
+  // current total by the time they land on it.
+  void _showBillUpdatedDialog(double? updatedTotal) {
+    final ctx = _scaffoldKey.currentContext;
+    if (ctx == null) return;
+    showDialog(
+      context: ctx,
+      barrierDismissible: false,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Bill Updated'.tr()),
+        content: Text(
+          '${'The restaurant has updated your bill.'.tr()}\n\n'
+          '${'Previous Total'.tr()}: ${amountShow(amount: widget.total.toString())}\n'
+          '${'Updated Total'.tr()}: ${amountShow(amount: (updatedTotal ?? 0).toString())}\n\n'
+          '${'Please review the updated bill before making payment.'.tr()}',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.of(dialogContext).pop();
+              // PaymentScreen -> CartScreen -> back to BillPayRequestScreen.
+              Navigator.of(ctx).pop();
+              Navigator.of(ctx).pop();
+            },
+            child: Text('Review Updated Bill'.tr()),
+          ),
+        ],
+      ),
+    );
   }
 
   void _handleWalletSelected() async {
@@ -1197,6 +1270,8 @@ class PaymentScreenState extends State<PaymentScreen> {
       deliveryCharge: widget.deliveryCharge,
       tipValue: widget.tipValue,
       taxSetting: widget.taxModel,
+      billPayRequestId: widget.billPayRequestId,
+      expectedBillVersion: widget.expectedBillVersion,
     );
     if (!mounted) return;
     Navigator.pop(_scaffoldKey.currentContext!);
@@ -2454,6 +2529,67 @@ class PaymentScreenState extends State<PaymentScreen> {
         .getVendorByVendorID(widget.products.first.vendorID)
         .whenComplete(() => setPrefData());
 
+    // Combo Purchase Learning (2026-07-24) - see CheckoutScreen.dart's
+    // identical block for the full rationale (zero-extra-read cache
+    // lookup, empty list for the common no-combo-items case).
+    final comboLineItems = tempProduc
+        .map((item) {
+          final combo =
+              BehaviorTracker.comboMetadataFor(item.id.split('~').first);
+          if (combo == null) return null;
+          return <String, dynamic>{
+            'productId': item.id.split('~').first,
+            'quantity': item.quantity,
+            'price': combo.price,
+            'comboProductIds': combo.comboProductIds,
+            'comboCategoryIds': combo.comboCategoryIds,
+          };
+        })
+        .whereType<Map<String, dynamic>>()
+        .toList();
+
+    // Purchase-analytics snapshot (2026-07-22) - written ONCE, here, at
+    // order creation, and never touched again - the order document stays
+    // fully immutable after creation. Purchase-derived preference (as
+    // opposed to browsing/interest signals, which stay exactly as they
+    // were) no longer fires from checkout at all - PurchaseCompletionListener
+    // reads this snapshot once the order actually reaches
+    // ORDER_STATUS_COMPLETED, so a failed/cancelled/rejected order never
+    // contributes. Exactly-once processing is guaranteed by a deterministic
+    // marker doc that listener creates elsewhere, not by anything stored
+    // here - see that class' own doc comment for the full rationale.
+    final analyticsSnapshot = <String, dynamic>{
+      'categoryIds': tempProduc.map((item) => item.category_id ?? '').where((c) => c.isNotEmpty).toSet().toList(),
+      'cuisineIds': vendorModel.cuisineIds,
+      'restaurantId': widget.products.first.vendorID,
+      'businessTypeId': vendorModel.businessTypeId,
+      'productIds': tempProduc.map((item) => item.id.split('~').first).toSet().toList(),
+      'totalAmount': widget.total,
+      'orderMode': widget.orderType ?? (widget.take_away == true ? 'Takeaway' : 'Delivery'),
+      'paymentMethod': paymentType,
+      'couponCode': widget.couponCode ?? '',
+      'hasSpecialDiscount': widget.specialDiscountMap != null,
+      // Captured NOW, while still fresh - see
+      // BehaviorTracker.recentSearchQueryFor's own doc comment for why
+      // this can't be re-derived later, at completion time.
+      'reachedViaSearchQuery': BehaviorTracker.recentSearchQueryFor(widget.products.first.vendorID) ?? '',
+      // Restaurant Engagement / Banner Analytics linkage (Phase 2,
+      // 2026-07-24, collection-only) - see CheckoutScreen.dart's identical
+      // fields for the full rationale.
+      'restaurantSessionId': BehaviorTracker
+              .recentRestaurantSessionFor(widget.products.first.vendorID)
+              ?.sessionId ??
+          '',
+      // Search-conversion funnel (collection-only, additive field) - see
+      // CheckoutScreen.dart's identical field for the full rationale.
+      'entrySource': BehaviorTracker
+              .recentRestaurantSessionFor(widget.products.first.vendorID)
+              ?.entrySource ??
+          '',
+      'reachedViaBannerId': BehaviorTracker.recentBannerClickId() ?? '',
+      'comboLineItems': comboLineItems,
+    };
+
     final OrderModel orderModel = OrderModel(
       id: oid.toString(),
       address: widget.addressModel,
@@ -2481,14 +2617,31 @@ class PaymentScreenState extends State<PaymentScreen> {
       orderType: widget.orderType,
       billPayRequestId: widget.billPayRequestId,
       razorpayOrderId: razorpayOrderId,
+      analyticsSnapshot: analyticsSnapshot,
     );
 
     final placedOrder = await FireStoreUtils().placeOrderWithTakeAWay(orderModel);
+
+    // NOTE (2026-07-22): purchase-preference tracking (kEvtOrderCompleted/
+    // kEvtProductOrdered) deliberately does NOT fire here anymore - a
+    // placed order is not yet a successful purchase (payment could still
+    // fail to settle, the vendor could reject it, etc.). See
+    // PurchaseCompletionListener, which fires these once this order's
+    // status actually reaches ORDER_STATUS_COMPLETED, reading
+    // analyticsSnapshot above with zero additional Firestore reads.
+    // Browsing/interest events (restaurant opened, product viewed,
+    // searched, cart add/remove) are untouched and still fire immediately,
+    // same as always.
 
     await Future.wait(
       tempProduc.map((item) async {
         try {
           final productModel = await FireStoreUtils().getProductByID(item.id.split('~').first);
+          // Combo Purchase Learning is temporarily deferred (2026-07-22) -
+          // see PurchaseCompletionListener's doc comment for what's
+          // deferred and the planned follow-up. This per-item fetch stays
+          // (still needed for stock decrement below), just no longer
+          // fires kEvtComboOrdered from here.
           if (item.variant_info != null && productModel.itemAttributes?.variants != null) {
             for (final v in productModel.itemAttributes!.variants!) {
               if (v.variant_id == item.id.split('~').last && v.variant_quantity != '-1') {
@@ -2525,7 +2678,11 @@ class PaymentScreenState extends State<PaymentScreen> {
 
     try {
       showProgress('Placing Order...'.tr(), false);
+      // TEMPORARY [ORDER-PERF] - timing instrumentation for the
+      // loading-speed investigation. Remove once done.
+      final buildPlaceSw = Stopwatch()..start();
       placedOrder = await _buildAndPlaceOrder(oid);
+      debugPrint('[ORDER-PERF] _buildAndPlaceOrder — ${buildPlaceSw.elapsedMilliseconds}ms');
       hideProgress();
       setState(() {
         isProcessingOrder = false;

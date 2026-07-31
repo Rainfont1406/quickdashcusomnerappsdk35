@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:emartconsumer/model/ComboProductItem.dart';
 import 'package:emartconsumer/model/ItemAttributes.dart';
 import 'package:emartconsumer/model/NutritionInfo.dart';
 import 'package:emartconsumer/model/ProductAttributeConfig.dart';
@@ -46,6 +48,41 @@ class ProductModel {
   bool nutritionEnabled;
   NutritionInfo? nutritionInfo;
   String productStatus; // 'pending' | 'approved' | 'rejected'
+  List<String> recommendedProductIds; // vendor-selected cross-sell picks, max 5, order preserved
+
+  // Combo products - isCombo is the ONLY structural signal a combo should
+  // ever be identified by anywhere in this app (never categoryID/category
+  // name - category stays a normal, real, admin-managed category exactly
+  // like any other product's). comboProducts references existing menu
+  // products by id + quantity only; every other field (name, price, images,
+  // variants, nutrition, ...) continues to belong solely to the combo
+  // product itself, never duplicated from its children. Mirrors vendorWeb's
+  // ProductModel - both apps read/write the same Firestore shape.
+  bool isCombo;
+  List<ComboProductItem> comboProducts;
+
+  // Combo Category Intelligence (2026-07-25) - vendor-selected category IDs
+  // a combo REPRESENTS for customer preference-matching purposes only (e.g.
+  // a "Family Combo" containing Biryani+Nuggets+Burger+Cold Drink might be
+  // tagged Biryani/Fast Food/Beverage). Deliberately separate from
+  // categoryID (which stays isCombo's real, normal, admin-managed category
+  // per that field's own doc comment above, never read for preference
+  // matching) - this is the ONLY field RecommendationEngine reads to learn
+  // "what categories does this combo represent". No vendor-facing UI writes
+  // this yet (empty on every real combo today); RecommendationEngine falls
+  // back to deriving it from comboProducts' own child categories when empty
+  // - see RecommendationEngine._effectiveCategoryIds. Additive-only: absent
+  // on every product created before this field existed, and that's a valid,
+  // handled state, not an error.
+  List<String> comboCategoryIds;
+
+  // Nullable, never defaulted/backfilled - absent on every product created
+  // before this field existed, and stays absent forever unless the vendor
+  // app re-saves it (which it never does on plain edits, only on create -
+  // see vendorApp/lib/services/FirebaseHelper.dart's addOrUpdateProduct).
+  // RecommendationEngine's "new product" signal treats null as "no signal",
+  // never fakes a value.
+  Timestamp? createdAt;
 
   ProductModel({
     this.categoryID = '',
@@ -88,6 +125,11 @@ class ProductModel {
     this.nutritionEnabled = false,
     this.nutritionInfo,
     this.productStatus = 'approved',
+    this.recommendedProductIds = const [],
+    this.isCombo = false,
+    this.comboProducts = const [],
+    this.comboCategoryIds = const [],
+    this.createdAt,
   });
 
   factory ProductModel.fromJson(Map<String, dynamic> parsedJson) {
@@ -204,6 +246,32 @@ class ProductModel {
         return null;
       })(),
       productStatus: parsedJson['product_status'] ?? 'approved',
+      recommendedProductIds: (() {
+        final raw = parsedJson['recommendedProductIds'];
+        if (raw is List) return raw.map((e) => e.toString()).toList();
+        return <String>[];
+      })(),
+      isCombo: parsedJson['isCombo'] ?? false,
+      comboProducts: (() {
+        final raw = parsedJson['comboProducts'];
+        if (raw is List) {
+          return raw
+              .whereType<Map>()
+              .map((e) => ComboProductItem.fromJson(Map<String, dynamic>.from(e)))
+              .toList();
+        }
+        return <ComboProductItem>[];
+      })(),
+      comboCategoryIds: (() {
+        final raw = parsedJson['comboCategoryIds'];
+        if (raw is List) return raw.map((e) => e.toString()).toList();
+        return <String>[];
+      })(),
+      // No fallback on purpose - absent means null, never a fake/inferred
+      // timestamp (see field doc comment above).
+      createdAt: parsedJson['createdAt'] is Timestamp
+          ? parsedJson['createdAt'] as Timestamp
+          : null,
     );
   }
 
@@ -251,6 +319,11 @@ class ProductModel {
       'nutrition_enabled': nutritionEnabled,
       'nutrition_info': nutritionInfo?.toJson(),
       'product_status': productStatus,
+      'recommendedProductIds': recommendedProductIds,
+      'isCombo': isCombo,
+      'comboProducts': comboProducts.map((e) => e.toJson()).toList(),
+      'comboCategoryIds': comboCategoryIds,
+      'createdAt': createdAt,
     };
   }
 }

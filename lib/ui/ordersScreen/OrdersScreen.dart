@@ -9,10 +9,12 @@ import 'package:emartconsumer/model/OrderModel.dart';
 import 'package:emartconsumer/model/variant_info.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/app_dialog.dart';
+import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/orderDetailsScreen/OrderDetailsScreen.dart';
+import 'package:emartconsumer/ui/billPayRequest/BillPayRequestScreen.dart';
 import 'package:emartconsumer/ui/orderRatingScreen/OrderRatingScreen.dart';
 import 'package:emartconsumer/ui/cartScreen/CartScreen.dart';
 import 'package:emartconsumer/ui/vendorProductsScreen/newVendorProductsScreen.dart';
@@ -22,9 +24,7 @@ import '../../constants/typography.dart';
 import '../../constants/spacing.dart';
 
 class OrdersScreen extends StatefulWidget {
-  bool? isAnimation = true;
-
-  OrdersScreen({super.key, this.isAnimation});
+  const OrdersScreen({super.key});
 
   @override
   _OrdersScreenState createState() => _OrdersScreenState();
@@ -40,13 +40,6 @@ class _OrdersScreenState extends State<OrdersScreen> {
   void initState() {
     super.initState();
     ordersFuture = _fireStoreUtils.getOrders(MyAppState.currentUser!.userID);
-    print(MyAppState.currentUser!.userID);
-
-    Future.delayed(const Duration(seconds: 7), () {
-      setState(() {
-        widget.isAnimation = false;
-      });
-    });
   }
 
   @override
@@ -90,53 +83,47 @@ class _OrdersScreenState extends State<OrdersScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppThemeData.neutral50,
-      body: widget.isAnimation == true
-          ? Center(
-              child: Image.asset(
-                'assets/order_place_gif.gif',
-              ),
-            )
-          : ValueListenableBuilder<bool>(
-              valueListenable: isDeliveryActiveNotifier,
-              builder: (context, deliveryActive, _) {
-                return StreamBuilder<List<OrderModel>>(
-                  stream: ordersFuture,
-                  builder: (context, snapshot) {
-                    if (snapshot.connectionState == ConnectionState.waiting) {
-                      return Center(
-                        child: CircularProgressIndicator.adaptive(
-                          valueColor: AlwaysStoppedAnimation(AppThemeData.primary500),
-                        ),
-                      );
-                    }
-                    // Delivery is off: hide only Delivery-type orders from
-                    // history (Dineaway/Takeaway order history stays visible),
-                    // same per-order isTakeaway check CartScreen uses for tax.
-                    final visibleOrders = (snapshot.data ?? []).where((order) {
-                      final bool isDeliveryOrder =
-                          order.takeAway == false || order.takeAway == null;
-                      return !(isDeliveryOrder && !deliveryActive);
-                    }).toList();
-
-                    if (visibleOrders.isEmpty) {
-                      return Center(
-                        child: showEmptyState('No Previous Orders'.tr(), context),
-                      );
-                    } else {
-                      return ListView.builder(
-                        itemCount: visibleOrders.length,
-                        padding: EdgeInsets.symmetric(
-                          horizontal: AppSpacing.spacing4,
-                          vertical: AppSpacing.spacing4,
-                        ),
-                        itemBuilder: (context, index) =>
-                            buildOrderItem(visibleOrders[index]),
-                      );
-                    }
-                  },
+      body: ValueListenableBuilder<bool>(
+        valueListenable: isDeliveryActiveNotifier,
+        builder: (context, deliveryActive, _) {
+          return StreamBuilder<List<OrderModel>>(
+            stream: ordersFuture,
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return Center(
+                  child: CircularProgressIndicator.adaptive(
+                    valueColor: AlwaysStoppedAnimation(AppThemeData.primary500),
+                  ),
                 );
-              },
-            ),
+              }
+              // Delivery is off: hide only Delivery-type orders from
+              // history (Dineaway/Takeaway order history stays visible),
+              // same per-order isTakeaway check CartScreen uses for tax.
+              final visibleOrders = (snapshot.data ?? []).where((order) {
+                final bool isDeliveryOrder =
+                    order.takeAway == false || order.takeAway == null;
+                return !(isDeliveryOrder && !deliveryActive);
+              }).toList();
+
+              if (visibleOrders.isEmpty) {
+                return Center(
+                  child: showEmptyState('No Previous Orders'.tr(), context),
+                );
+              } else {
+                return ListView.builder(
+                  itemCount: visibleOrders.length,
+                  padding: EdgeInsets.symmetric(
+                    horizontal: AppSpacing.spacing4,
+                    vertical: AppSpacing.spacing4,
+                  ),
+                  itemBuilder: (context, index) =>
+                      buildOrderItem(visibleOrders[index]),
+                );
+              }
+            },
+          );
+        },
+      ),
     );
   }
 
@@ -202,6 +189,10 @@ class _OrdersScreenState extends State<OrdersScreen> {
     if (status == ORDER_STATUS_COMPLETED) return AppThemeData.success500;
     if (status == ORDER_STATUS_CANCELLED ||
         status == ORDER_STATUS_REJECTED) return AppThemeData.error500;
+    if (status == BILLPAY_STATUS_DECLINED ||
+        status == BILLPAY_STATUS_EXPIRED ||
+        status == BILLPAY_STATUS_CANCELLED) return AppThemeData.error500;
+    if (status == BILLPAY_STATUS_PENDING_APPROVAL) return AppThemeData.warning500;
     if (status == ORDER_STATUS_PLACED ||
         status == ORDER_STATUS_ACCEPTED ||
         status == ORDER_STATUS_DRIVER_PENDING ||
@@ -218,6 +209,12 @@ class _OrdersScreenState extends State<OrdersScreen> {
       return AppThemeData.success500.withValues(alpha: 0.10);
     if (status == ORDER_STATUS_CANCELLED || status == ORDER_STATUS_REJECTED)
       return AppThemeData.error500.withValues(alpha: 0.10);
+    if (status == BILLPAY_STATUS_DECLINED ||
+        status == BILLPAY_STATUS_EXPIRED ||
+        status == BILLPAY_STATUS_CANCELLED)
+      return AppThemeData.error500.withValues(alpha: 0.10);
+    if (status == BILLPAY_STATUS_PENDING_APPROVAL)
+      return AppThemeData.warning500.withValues(alpha: 0.10);
     if (status == ORDER_STATUS_PLACED ||
         status == ORDER_STATUS_ACCEPTED ||
         status == ORDER_STATUS_DRIVER_PENDING ||
@@ -297,7 +294,10 @@ class _OrdersScreenState extends State<OrdersScreen> {
           // ── Tappable zone → Order Details ──────────────────────────────
           GestureDetector(
             behavior: HitTestBehavior.opaque,
-            onTap: () => push(context, OrderDetailsScreen(orderModel: orderModel)),
+            onTap: () => (orderModel.initiatedBy == 'vendor' &&
+                    orderModel.status == BILLPAY_STATUS_PENDING_APPROVAL)
+                ? push(context, BillPayRequestScreen(orderId: orderModel.id))
+                : push(context, OrderDetailsScreen(orderModel: orderModel)),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -630,10 +630,13 @@ class _OrdersScreenState extends State<OrdersScreen> {
                 // View Menu
                 GestureDetector(
                   behavior: HitTestBehavior.opaque,
-                  onTap: () => push(
-                    context,
-                    NewVendorProductsScreen(vendorModel: orderModel.vendor),
-                  ),
+                  onTap: () {
+                    BehaviorTracker.setNextEntrySource('Reorder');
+                    push(
+                      context,
+                      NewVendorProductsScreen(vendorModel: orderModel.vendor),
+                    );
+                  },
                   child: Row(
                     children: [
                       Text(

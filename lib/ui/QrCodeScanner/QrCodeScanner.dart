@@ -5,6 +5,7 @@ import 'package:emartconsumer/model/SectionModel.dart';
 import 'package:emartconsumer/model/User.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
@@ -210,6 +211,7 @@ class _QrCodeScannerState extends State<QrCodeScanner>
       final VendorModel vendor = VendorModel.fromJson(data);
       if (mounted) {
         Navigator.pop(context);
+        BehaviorTracker.setNextEntrySource('QRCode');
         push(context, NewVendorProductsScreen(vendorModel: vendor));
       }
     } catch (_) {

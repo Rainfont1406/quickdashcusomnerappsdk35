@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
+import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/device_session_service.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
@@ -89,6 +90,7 @@ class _ConnectivityGateState extends State<ConnectivityGate> with WidgetsBinding
     if (_checking) return; // coalesce overlapping triggers
     if (paymentInProgressNotifier.value) return; // never interrupt an in-flight gateway checkout sheet
     _checking = true;
+    final wasOffline = _offline;
     try {
       final result = await DeviceSessionService.verifyOnReconnect(context);
       if (!mounted) return;
@@ -101,6 +103,10 @@ class _ConnectivityGateState extends State<ConnectivityGate> with WidgetsBinding
         case ReconnectCheckResult.invalidated:
         case ReconnectCheckResult.unknown:
           setState(() => _offline = false);
+          // Only a genuine offline->online transition, not every reachability
+          // check (this method also runs on first bootstrap when never
+          // offline) — one of BehaviorTracker's three flush triggers.
+          if (wasOffline) BehaviorTracker.onReconnected();
           break;
       }
     } finally {

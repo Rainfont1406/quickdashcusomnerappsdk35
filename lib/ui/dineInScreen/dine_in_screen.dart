@@ -204,7 +204,7 @@ class _DineInScreenState extends State<DineInScreen> {
                           ? all
                           : all.where((v) =>
                               v.title.toLowerCase().contains(_searchQuery) ||
-                              v.cuisineType.toLowerCase().contains(_searchQuery) ||
+                              v.cuisineNames.join(' ').toLowerCase().contains(_searchQuery) ||
                               v.location.toLowerCase().contains(_searchQuery)).toList();
                       if (filtered.isEmpty) return _buildEmptyState(dark);
                       return ListView.builder(
@@ -366,14 +366,18 @@ class _DineInScreenState extends State<DineInScreen> {
                   // ── Cuisine + Distance ────────────────────────
                   Row(
                     children: [
-                      if (vendor.cuisineType.isNotEmpty) ...[
+                      if (vendor.cuisineNames.isNotEmpty) ...[
                         Icon(Icons.restaurant_menu, size: 13, color: Colors.grey.shade500),
                         const SizedBox(width: 3),
-                        Text(
-                          vendor.cuisineType,
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: dark ? Colors.white54 : Colors.grey.shade600,
+                        Flexible(
+                          child: Text(
+                            vendor.cuisineNames.join(' · '),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: dark ? Colors.white54 : Colors.grey.shade600,
+                            ),
                           ),
                         ),
                         const SizedBox(width: 12),

@@ -1177,12 +1177,21 @@ class _GiftCardPurchaseScreenState extends State<GiftCardPurchaseScreen> {
                             });
                           } else if (selectedRadioTile == "RazorPay") {
                             showLoadingAlert();
-                            RazorPayController().createOrderRazorPay(isTopup: true, amount: double.parse(gradTotal)).then((result) {
+                            // Server-verified: the Cloud Function looks up the real gift
+                            // card template and creates a Razorpay order for the amount
+                            // this screen shows - the gift_purchases record itself is
+                            // also created server-side, only once the payment signature
+                            // verifies (see verifyPayment / _handlePaymentSuccess below).
+                            RazorPayController().createGiftCardPaymentOrder(
+                              amount: double.parse(gradTotal),
+                              giftId: giftCardModel.id.toString(),
+                              message: widget.msg,
+                            ).then((result) {
                               Navigator.pop(context);
-                              if (result.isSuccess) {
+                              if (result.success) {
                                 openCheckout(
-                                  amount: double.parse(gradTotal),
-                                  orderId: result.order!.id,
+                                  amount: result.amount,
+                                  orderId: result.razorpayOrderId!,
                                 );
                               } else {
                                 showAlert(_scaffoldKey.currentContext!, response: result.errorMessage?.tr() ?? "Something went wrong, please contact admin.".tr(), colors: AppThemeData.primary500);
@@ -1296,8 +1305,27 @@ class _GiftCardPurchaseScreenState extends State<GiftCardPurchaseScreen> {
     }
   }
 
-  void _handlePaymentSuccess(PaymentSuccessResponse response) {
-    paymentCompleted(paymentMethod: "RazorPay");
+  void _handlePaymentSuccess(PaymentSuccessResponse response) async {
+    // The gift card is created server-side, inside verifyPayment, only once
+    // the Razorpay signature checks out - unlike paymentCompleted() (used by
+    // the other gateways above), this never trusts a client-chosen price or
+    // generates the code/pin locally.
+    showLoadingAlert();
+    final result = await RazorPayController().verifyPayment(
+      razorpayOrderId: response.orderId ?? '',
+      razorpayPaymentId: response.paymentId ?? '',
+      razorpaySignature: response.signature ?? '',
+      purpose: 'gift_card',
+    );
+    if (!mounted) return;
+    Navigator.pop(context); // dismiss loading alert
+    if (result.success) {
+      Navigator.pop(context); // dismiss the purchase screen, matching paymentCompleted()'s behavior
+    } else {
+      showAlert(_scaffoldKey.currentContext!,
+          response: result.errorMessage?.tr() ?? 'Payment verification failed. Please contact support.'.tr(),
+          colors: AppThemeData.primary500);
+    }
   }
 
   void _handleExternalWaller(ExternalWalletResponse response) {

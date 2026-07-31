@@ -46,6 +46,13 @@ post_install do |installer|
   end
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
+    target.build_configurations.each do |config|
+      # Downgrades Swift 6 strict-concurrency checks for POD code only (not the
+      # Runner target) from 'complete' to 'minimal' — several pods used here
+      # (flutter_osm_plugin's native deps, etc.) aren't Swift 6-migrated yet
+      # and fail to compile under a modern Xcode/Swift toolchain without this.
+      config.build_settings['SWIFT_STRICT_CONCURRENCY'] = 'minimal'
+    end
     if target.name == 'BoringSSL-GRPC'
       target.source_build_phase.files.each do |file|
         if file.settings && file.settings['COMPILER_FLAGS']

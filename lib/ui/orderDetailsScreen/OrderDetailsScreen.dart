@@ -68,6 +68,16 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
   String currentEvent = '';
   int estimatedTime = 0;
   Timer? timerCountDown;
+
+  // UI-only 7-minute countdown shown after a Bill Pay order when the
+  // vendor has enableBillPaymentTimer on — a visual cue for store staff
+  // that the screen is live, not a screenshot. No label, no backend call,
+  // no effect on the order/payment. Starts once per screen open (see
+  // loadData/_maybeStartBillPayCountdown); reopening the screen restarts it.
+  static const _billPayCountdownStartSeconds = 7 * 60;
+  Timer? _billPayCountdownTimer;
+  int _billPayCountdownSeconds = _billPayCountdownStartSeconds;
+  bool _showBillPayCountdown = false;
   double total = 0.0;
   var discount;
   GoogleMapController? _mapController;
@@ -99,10 +109,14 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
       if (widget.orderModel != null) {
         orderModel = widget.orderModel;
         await calculate();
+        _maybeStartBillPayCountdown();
       } else {
         await FireStoreUtils().getOrderById(widget.orderId).then((value) {
           orderModel = value;
-          if (orderModel != null) calculate();
+          if (orderModel != null) {
+            calculate();
+            _maybeStartBillPayCountdown();
+          }
         });
         if (orderModel == null) return;
         await FireStoreUtils()
@@ -145,6 +159,37 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
     });
   }
 
+  void _maybeStartBillPayCountdown() {
+    if (_billPayCountdownTimer != null) return; // already running
+    final order = orderModel;
+    if (order == null) return;
+    if (order.billPayRequestId == null) return; // not a Bill Pay order
+    if (!order.vendor.enableBillPaymentTimer) return; // store setting off
+
+    setState(() {
+      _billPayCountdownSeconds = _billPayCountdownStartSeconds;
+      _showBillPayCountdown = true;
+    });
+    _billPayCountdownTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!mounted) {
+        t.cancel();
+        return;
+      }
+      if (_billPayCountdownSeconds <= 0) {
+        t.cancel();
+        setState(() => _showBillPayCountdown = false);
+        return;
+      }
+      setState(() => _billPayCountdownSeconds--);
+    });
+  }
+
+  String _formatBillPayCountdown(int totalSeconds) {
+    final minutes = (totalSeconds ~/ 60).toString().padLeft(2, '0');
+    final seconds = (totalSeconds % 60).toString().padLeft(2, '0');
+    return '$minutes:$seconds';
+  }
+
   checkPerm() async {
     var status = await Permission.bluetooth.status;
     var bluetoothConnect = await Permission.bluetoothConnect.status;
@@ -168,6 +213,7 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
   @override
   void dispose() {
     timerCountDown?.cancel();
+    _billPayCountdownTimer?.cancel();
     arrivalTimeStreamController.close();
     _orderSub?.cancel();
     _driverSub?.cancel();
@@ -284,7 +330,7 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                           const SizedBox(height: 12),
                           buildDriverCard(orderModel),
                         ],
-                        if (sectionConstantModel!.serviceTypeFlag != "ecommerce-service" &&
+                        if (sectionConstantModel?.serviceTypeFlag != "ecommerce-service" &&
                             (orderStatus == ORDER_STATUS_SHIPPED || orderStatus == ORDER_STATUS_IN_TRANSIT)) ...[
                           const SizedBox(height: 12),
                           _buildTrackCard(orderModel),
@@ -549,7 +595,8 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                     _smallActionBtn(
                       icon: CupertinoIcons.chat_bubble_text_fill,
                       color: AppThemeData.primary500,
-                      onTap: (order.status == ORDER_STATUS_COMPLETED || order.status == ORDER_STATUS_REJECTED)
+                      onTap: ((order.status == ORDER_STATUS_COMPLETED || order.status == ORDER_STATUS_REJECTED) &&
+                              !isWithinTerminalChatWindow(order.status, order.statusUpdatedAt))
                           ? null
                           : () async {
                               await showProgress("Please wait...".tr(), false);
@@ -894,6 +941,24 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
         }
         statusColor = AppThemeData.success400;
         break;
+      case BILLPAY_STATUS_EXPIRED:
+        statusTitle = 'Request Expired'.tr();
+        statusSubtitle = 'Payment was not initiated — this bill request timed out.'.tr();
+        statusColor = AppThemeData.danger300;
+        statusIcon = Icons.timer_off_rounded;
+        break;
+      case BILLPAY_STATUS_DECLINED:
+        statusTitle = 'Request Declined'.tr();
+        statusSubtitle = 'You declined this bill — no payment was made.'.tr();
+        statusColor = AppThemeData.danger300;
+        statusIcon = Icons.cancel_rounded;
+        break;
+      case BILLPAY_STATUS_CANCELLED:
+        statusTitle = 'Request Cancelled'.tr();
+        statusSubtitle = 'The vendor cancelled this bill request.'.tr();
+        statusColor = AppThemeData.danger300;
+        statusIcon = Icons.block_rounded;
+        break;
       default:
         statusTitle = order.status.tr();
         statusSubtitle = currentEvent;
@@ -901,14 +966,23 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
         statusIcon = Icons.info_outline_rounded;
     }
     } // end else (non-scheduled normal status)
+    // A Bill Pay request that expired/was declined/was cancelled never had a
+    // payment go through — showing "Payment Confirmed" as a reached step for
+    // those would flatly contradict the status banner above. Use a distinct
+    // unpaid label and leave the step unreached (currentStep = -1) so it
+    // renders grey/unchecked instead of a misleading green checkmark.
+    final bool isBillPayUnpaid = isBillPay &&
+        (order.status == BILLPAY_STATUS_EXPIRED ||
+            order.status == BILLPAY_STATUS_DECLINED ||
+            order.status == BILLPAY_STATUS_CANCELLED);
     final List<String> steps = isBillPay
-        ? ['Payment Confirmed']
+        ? (isBillPayUnpaid ? ['Payment Not Initiated'] : ['Payment Confirmed'])
         : isDineAway
             ? ['Placed', 'Preparing', 'Ready']
             : ['Placed', 'Preparing', 'Driver', 'Delivered'];
     int currentStep;
     if (isBillPay) {
-      currentStep = 0;
+      currentStep = isBillPayUnpaid ? -1 : 0;
     } else {
       switch (order.status) {
         case ORDER_STATUS_PLACED:      currentStep = 0; break;
@@ -985,13 +1059,14 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                order.status == ORDER_STATUS_DRIVER_REJECTED) &&
               order.estimatedTimeToPrepare != null &&
               order.estimatedTimeToPrepare!.isNotEmpty &&
-              sectionConstantModel!.serviceTypeFlag != "ecommerce-service") ...[
+              sectionConstantModel?.serviceTypeFlag != "ecommerce-service") ...[
             Divider(height: 1, color: isDarkMode(context) ? AppThemeData.darkBgTertiary : const Color(0xFFF0F0F5)),
             _PrepCountdownTile(
               key: ValueKey('prep_${order.id}'),
               orderId: order.id,
               estimatedTimeToPrepare: order.estimatedTimeToPrepare,
               acceptedAt: order.acceptedAt,
+              createdAt: order.createdAt,
               alreadyPrepared: order.status == ORDER_STATUS_DRIVER_PENDING ||
                   order.status == ORDER_STATUS_DRIVER_REJECTED,
             ),
@@ -1047,6 +1122,34 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                           ),
                         ),
                       ),
+                  ],
+                  if (_showBillPayCountdown) ...[
+                    const Spacer(),
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 20),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: AppThemeData.primary500.withOpacity(0.10),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.timer_outlined, size: 14, color: AppThemeData.primary500),
+                            const SizedBox(width: 4),
+                            Text(
+                              _formatBillPayCountdown(_billPayCountdownSeconds),
+                              style: TextStyle(
+                                fontFamily: AppThemeData.semiBold,
+                                fontSize: 13,
+                                color: AppThemeData.primary500,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
                   ],
                 ],
               ),
@@ -1867,102 +1970,108 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
     _orderSub = ordersFuture.listen((event) {
       if (!mounted) return;
       if (event == null) return;
-      setState(() {
-        currentOrder = event;
-        if (event.driverID != null) {
-          getDriver();
-        }
-      });
+      currentOrder = event;
+      setState(() {});
+      if (event.driverID != null) {
+        getDriver();
+      }
     });
   }
 
   getDirections() async {
-    if (currentOrder != null) {
-      if (currentOrder!.status == ORDER_STATUS_SHIPPED) {
-        List<LatLng> polylineCoordinates = [];
+    if (currentOrder == null) return;
+    if (currentOrder!.status == ORDER_STATUS_SHIPPED) {
+      final driver = _driverModel;
+      if (driver?.location == null) return;
 
-        PolylineResult result = await polylinePoints.getRouteBetweenCoordinates(
-          googleApiKey: GOOGLE_API_KEY,
-          request: PolylineRequest(
-              origin: PointLatLng(_driverModel!.location.latitude,
-                  _driverModel!.location.longitude),
-              destination: PointLatLng(currentOrder!.vendor.latitude,
-                  currentOrder!.vendor.longitude),
-              mode: TravelMode.driving),
-        );
+      List<LatLng> polylineCoordinates = [];
+      PolylineResult result = await polylinePoints.getRouteBetweenCoordinates(
+        googleApiKey: GOOGLE_API_KEY,
+        request: PolylineRequest(
+            origin: PointLatLng(driver!.location.latitude, driver.location.longitude),
+            destination: PointLatLng(currentOrder!.vendor.latitude, currentOrder!.vendor.longitude),
+            mode: TravelMode.driving),
+      );
 
-        print("----?${result.points}");
-        if (result.points.isNotEmpty) {
-          for (var point in result.points) {
-            polylineCoordinates.add(LatLng(point.latitude, point.longitude));
-          }
+      if (!mounted) return;
+      if (result.points.isNotEmpty) {
+        for (var point in result.points) {
+          polylineCoordinates.add(LatLng(point.latitude, point.longitude));
         }
-        setState(() {
-          _markers.remove("Driver");
-          _markers['Driver'] = Marker(
-              markerId: const MarkerId('Driver'),
-              infoWindow: const InfoWindow(title: "Driver"),
-              position: LatLng(_driverModel!.location.latitude,
-                  _driverModel!.location.longitude),
-              icon: taxiIcon!,
-              rotation: double.parse(_driverModel!.rotation.toString()));
-        });
-
-        _markers.remove("Destination");
-        _markers['Destination'] = Marker(
-          markerId: const MarkerId('Destination'),
-          infoWindow: const InfoWindow(title: "Destination"),
-          position: LatLng(
-              currentOrder!.vendor.latitude, currentOrder!.vendor.longitude),
-          icon: destinationIcon!,
-        );
-        addPolyLine(polylineCoordinates);
-      } else if (currentOrder!.status == ORDER_STATUS_IN_TRANSIT) {
-        List<LatLng> polylineCoordinates = [];
-
-        PolylineResult result = await polylinePoints.getRouteBetweenCoordinates(
-          googleApiKey: GOOGLE_API_KEY,
-          request: PolylineRequest(
-              origin: PointLatLng(_driverModel!.location.latitude,
-                  _driverModel!.location.longitude),
-              destination: PointLatLng(
-                  currentOrder!.address!.location!.latitude,
-                  currentOrder!.address!.location!.longitude),
-              mode: TravelMode.driving),
-        );
-
-        print("----?${result.points}");
-        if (result.points.isNotEmpty) {
-          for (var point in result.points) {
-            polylineCoordinates.add(LatLng(point.latitude, point.longitude));
-          }
-        }
-        setState(() {
-          _markers.remove("Driver");
+      }
+      setState(() {
+        _markers.remove("Driver");
+        if (taxiIcon != null) {
           _markers['Driver'] = Marker(
             markerId: const MarkerId('Driver'),
             infoWindow: const InfoWindow(title: "Driver"),
-            position: LatLng(_driverModel!.location.latitude,
-                _driverModel!.location.longitude),
-            rotation: double.parse(_driverModel!.rotation.toString()),
+            position: LatLng(driver.location.latitude, driver.location.longitude),
+            icon: taxiIcon!,
+            rotation: double.tryParse(driver.rotation.toString()) ?? 0,
+          );
+        }
+        _markers.remove("Destination");
+        if (destinationIcon != null) {
+          _markers['Destination'] = Marker(
+            markerId: const MarkerId('Destination'),
+            infoWindow: const InfoWindow(title: "Destination"),
+            position: LatLng(currentOrder!.vendor.latitude, currentOrder!.vendor.longitude),
+            icon: destinationIcon!,
+          );
+        }
+      });
+      addPolyLine(polylineCoordinates);
+
+    } else if (currentOrder!.status == ORDER_STATUS_IN_TRANSIT) {
+      final driver = _driverModel;
+      if (driver?.location == null) return;
+      if (currentOrder!.address?.location == null) return;
+
+      List<LatLng> polylineCoordinates = [];
+      PolylineResult result = await polylinePoints.getRouteBetweenCoordinates(
+        googleApiKey: GOOGLE_API_KEY,
+        request: PolylineRequest(
+            origin: PointLatLng(driver!.location.latitude, driver.location.longitude),
+            destination: PointLatLng(
+                currentOrder!.address!.location!.latitude,
+                currentOrder!.address!.location!.longitude),
+            mode: TravelMode.driving),
+      );
+
+      if (!mounted) return;
+      if (result.points.isNotEmpty) {
+        for (var point in result.points) {
+          polylineCoordinates.add(LatLng(point.latitude, point.longitude));
+        }
+      }
+      setState(() {
+        _markers.remove("Driver");
+        if (taxiIcon != null) {
+          _markers['Driver'] = Marker(
+            markerId: const MarkerId('Driver'),
+            infoWindow: const InfoWindow(title: "Driver"),
+            position: LatLng(driver.location.latitude, driver.location.longitude),
+            rotation: double.tryParse(driver.rotation.toString()) ?? 0,
             icon: taxiIcon!,
           );
-        });
-
+        }
         _markers.remove("Destination");
-        _markers['Destination'] = Marker(
-          markerId: const MarkerId('Destination'),
-          infoWindow: const InfoWindow(title: "Destination"),
-          position: LatLng(currentOrder!.address!.location!.latitude,
-              currentOrder!.address!.location!.longitude),
-          icon: destinationIcon!,
-        );
-        addPolyLine(polylineCoordinates);
-      }
+        if (destinationIcon != null) {
+          _markers['Destination'] = Marker(
+            markerId: const MarkerId('Destination'),
+            infoWindow: const InfoWindow(title: "Destination"),
+            position: LatLng(currentOrder!.address!.location!.latitude,
+                currentOrder!.address!.location!.longitude),
+            icon: destinationIcon!,
+          );
+        }
+      });
+      addPolyLine(polylineCoordinates);
     }
   }
 
   addPolyLine(List<LatLng> polylineCoordinates) {
+    if (!mounted || polylineCoordinates.isEmpty) return;
     PolylineId id = const PolylineId("poly");
     Polyline polyline = Polyline(
       polylineId: id,
@@ -2068,7 +2177,7 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
   }
 
   Widget buildDriverCard(OrderModel order) {
-    if (sectionConstantModel!.serviceTypeFlag == "ecommerce-service") {
+    if (sectionConstantModel?.serviceTypeFlag == "ecommerce-service") {
       return Container(
         margin: const EdgeInsets.symmetric(horizontal: 16),
         decoration: BoxDecoration(
@@ -2364,6 +2473,7 @@ class _PrepCountdownTile extends StatefulWidget {
   final String orderId;
   final String? estimatedTimeToPrepare;
   final Timestamp? acceptedAt;
+  final Timestamp? createdAt;
   final bool alreadyPrepared;
 
   const _PrepCountdownTile({
@@ -2371,6 +2481,7 @@ class _PrepCountdownTile extends StatefulWidget {
     required this.orderId,
     required this.estimatedTimeToPrepare,
     this.acceptedAt,
+    this.createdAt,
     this.alreadyPrepared = false,
   });
 
@@ -2436,7 +2547,9 @@ class _PrepCountdownTileState extends State<_PrepCountdownTile> {
       if (saved != null) {
         acceptanceTime = DateTime.fromMillisecondsSinceEpoch(saved);
       } else {
-        acceptanceTime = DateTime.now();
+        // Use order creation time as a conservative fallback so that old orders
+        // don't show a fresh countdown when SharedPreferences is missing.
+        acceptanceTime = widget.createdAt?.toDate() ?? DateTime.now();
         await prefs.setInt(key, acceptanceTime.millisecondsSinceEpoch);
       }
     }

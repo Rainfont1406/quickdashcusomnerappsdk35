@@ -68,7 +68,7 @@ class _DeliveryAddressScreenState extends State<DeliveryAddressScreen> {
           onPressed: () => Navigator.pop(context),
         ),
         title: Text(
-          'Delivery Address'.tr(),
+          'Select Address'.tr(),
           style: TextStyle(
             fontSize: 18,
             fontFamily: AppThemeData.semiBold,

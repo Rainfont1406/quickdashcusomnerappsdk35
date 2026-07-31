@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:developer';
 import 'package:flutter/foundation.dart';
 
@@ -11,6 +12,8 @@ import 'package:emartconsumer/model/AddressModel.dart';
 import 'package:emartconsumer/model/CurrencyModel.dart';
 import 'package:emartconsumer/model/mail_setting.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
+import 'package:emartconsumer/services/behavior/purchase_completion_listener.dart';
 import 'package:emartconsumer/services/connectivity_gate.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
@@ -248,6 +251,15 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
 
   late StreamSubscription eventBusStream;
 
+  // Purchase-preference completion listener lifecycle (2026-07-22) - tied
+  // to Firebase Auth's own canonical session-state stream rather than any
+  // particular login call site, so every login path (fresh interactive
+  // login, auto-restored session, MSG91 phone auth now minting a real
+  // Firebase Auth session) is covered uniformly, and logout reliably tears
+  // it down. See PurchaseCompletionListener's own doc comment for why this
+  // exists and why it's global rather than screen-owned.
+  late StreamSubscription<auth.User?> _authStateStream;
+
   @override
   void initState() {
     notificationInit();
@@ -255,6 +267,29 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     getCurrentAppTheme();
     _configureEasyLoading();
+    // Hydrates the pending-behavior-event queue from local storage (crash/
+    // kill recovery) — not a flush trigger itself, just a load.
+    BehaviorTracker.init();
+    // Recommendation Configuration (2026-07-22, moved 2026-07-23) — no
+    // longer triggered here. This initState runs before the onboarding/
+    // splash screen has even painted its first frame, and even though this
+    // call was already fire-and-forget (unawaited), it still competed for
+    // the same Firestore network channel/connection setup as onboarding's
+    // own AWAITED calls (globalSettings, getOnBoardingList) during that
+    // exact critical window, adding real latency to what the customer
+    // perceives as "the app taking longer to start." RecommendationConfig
+    // is only ever needed once a customer opens a restaurant page, which is
+    // always well after Home has loaded - so the load is now triggered from
+    // HomeScreen.initState instead (see HomeScreen.dart), not app startup.
+    // RecommendationConfig.current still holds production-identical
+    // defaults synchronously in the meantime.
+    _authStateStream = auth.FirebaseAuth.instance.authStateChanges().listen((user) {
+      if (user != null) {
+        PurchaseCompletionListener.start(user.uid);
+      } else {
+        PurchaseCompletionListener.stop();
+      }
+    });
     super.initState();
   }
 
@@ -281,6 +316,8 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _authStateStream.cancel();
+    PurchaseCompletionListener.stop();
     super.dispose();
   }
 
@@ -291,6 +328,23 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
       // so they reflect any admin changes made while the app was backgrounded.
       initializeFlutterFire();
       FireStoreUtils.getWalletSettingData();
+      // Belt-and-suspenders restart for PurchaseCompletionListener: its own
+      // doc comment claimed a resumed cycle would restart it, but nothing
+      // here actually did until now. start() calls stop() first, so this
+      // is safe/idempotent to call on every resume, logged in or not.
+      final uid = FireStoreUtils.getCurrentUid();
+      if (uid.isNotEmpty) PurchaseCompletionListener.start(uid);
+    } else if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.detached) {
+      // Flush any pending behavior events before the app is backgrounded/
+      // killed — this is one of BehaviorTracker's three flush triggers
+      // (queue threshold, background, reconnect), never a periodic timer.
+      // MyAppState is the only single, non-recreated observer for the whole
+      // process lifetime (unlike ContainerScreen's own observer, which is
+      // torn down and recreated on every re-navigation), so this is the
+      // correct home for this hook.
+      BehaviorTracker.onAppBackgrounded();
     }
   }
 }
@@ -314,6 +368,63 @@ Future<T> _timedStep<T>(String label, Future<T> Function() op) async {
   }
 }
 
+// ── Cached user profile (instant login on reopen) ───────────────────────────
+// User.toJson()/fromJson() are shaped for Firestore, which accepts Timestamp
+// and GeoPoint objects natively — neither is JSON-string-encodable as-is.
+// These two helpers swap them for plain markers on the way into
+// SharedPreferences and reconstruct the real objects (which fromJson expects)
+// on the way out, at the encode/decode level rather than per-model, so it
+// works regardless of which nested model (AddressModel, GeoFireData, etc.)
+// happens to hold one.
+Object? _cacheEncodeFallback(Object? obj) {
+  if (obj is Timestamp) return {'__ts': obj.millisecondsSinceEpoch};
+  if (obj is GeoPoint) return {'__geo_lat': obj.latitude, '__geo_lng': obj.longitude};
+  throw UnsupportedError('Cannot cache field of type ${obj.runtimeType}');
+}
+
+Object? _cacheDecodeReviver(Object? key, Object? value) {
+  if (value is Map && value.containsKey('__ts')) {
+    return Timestamp.fromMillisecondsSinceEpoch(value['__ts'] as int);
+  }
+  if (value is Map && value.containsKey('__geo_lat')) {
+    return GeoPoint(
+        (value['__geo_lat'] as num).toDouble(), (value['__geo_lng'] as num).toDouble());
+  }
+  return value;
+}
+
+const String _cachedUserProfilePrefix = 'cached_user_profile_';
+
+Future<User?> _loadCachedUserProfile(String uid) async {
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString('$_cachedUserProfilePrefix$uid');
+    if (raw == null) return null;
+    final decoded = json.decode(raw, reviver: _cacheDecodeReviver);
+    return User.fromJson(decoded as Map<String, dynamic>);
+  } catch (e) {
+    debugPrint('[STARTUP-PERF] _loadCachedUserProfile failed, ignoring cache: $e');
+    return null;
+  }
+}
+
+Future<void> _cacheUserProfile(User user) async {
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    final encoded = json.encode(user.toJson(), toEncodable: _cacheEncodeFallback);
+    await prefs.setString('$_cachedUserProfilePrefix${user.userID}', encoded);
+  } catch (e) {
+    debugPrint('[STARTUP-PERF] _cacheUserProfile failed, skipping: $e');
+  }
+}
+
+Future<void> _clearCachedUserProfile(String uid) async {
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('$_cachedUserProfilePrefix$uid');
+  } catch (_) {}
+}
+
 class OnBoarding extends StatefulWidget {
   const OnBoarding({Key? key}) : super(key: key);
 
@@ -331,6 +442,90 @@ class OnBoardingState extends State<OnBoarding> {
     if (_navigated || !mounted) return;
     _navigated = true;
     navigate();
+  }
+
+  // Shared by both the cache-hit fast path and the real network path below —
+  // decides Home vs LocationPermissionScreen from whatever User object it's
+  // given (cached snapshot or freshly-fetched) and navigates. Was previously
+  // duplicated almost verbatim between the auth and msg91 branches.
+  Future<void> _navigateWithUser(User user) async {
+    MyAppState.currentUser = user;
+    if (user.shippingAddress != null && user.shippingAddress!.isNotEmpty) {
+      if (user.shippingAddress!.where((element) => element.isDefault == true).isNotEmpty) {
+        MyAppState.selectedPosotion =
+            user.shippingAddress!.where((element) => element.isDefault == true).single;
+      } else {
+        MyAppState.selectedPosotion = user.shippingAddress!.first;
+      }
+      // --- Begin: Set section info as ServiceListScreen does ---
+      final sections = await _timedStep('getSections', () => FireStoreUtils.getSections());
+      if (sections.isNotEmpty) {
+        sectionConstantModel = sections.first;
+
+        if (sectionConstantModel?.color != null) {
+          AppThemeData.primary300 = Color(
+            int.parse(sectionConstantModel!.color!.replaceFirst("#", "0xff")),
+          );
+        }
+
+        // Payment gateway methods use .then() internally and return
+        // immediately — kick them off now so their Firestore requests
+        // run in the background while we navigate to Home
+        FireStoreUtils.getRazorPayDemo();
+        FireStoreUtils.getPaypalSettingData();
+        FireStoreUtils.getStripeSettingData();
+        FireStoreUtils.getPayStackSettingData();
+        FireStoreUtils.getFlutterWaveSettingData();
+        FireStoreUtils.getPaytmSettingData();
+        FireStoreUtils.getPayFastSettingData();
+        FireStoreUtils.getWalletSettingData();
+        FireStoreUtils.getMercadoPagoSettingData();
+        FireStoreUtils.getOrangeMoneySettingData();
+        FireStoreUtils.getXenditSettingData();
+        FireStoreUtils.getMidTransSettingData();
+        FireStoreUtils.getPhonePaySettingData();
+      }
+
+      // Push to HomeScreen with drawer support
+      _safeNavigate(() => pushReplacement(
+          context,
+          ContainerScreen(
+            user: MyAppState.currentUser!,
+            currentWidget: HomeScreen(user: MyAppState.currentUser!),
+            appBarTitle: 'Home',
+            drawerSelection: DrawerSelection.Home,
+          )));
+      // --- End ---
+    } else {
+      _safeNavigate(() => pushAndRemoveUntil(context, LocationPermissionScreen()));
+    }
+  }
+
+  // Runs after a cache-hit fast path has already navigated — re-fetches the
+  // real profile from Firestore, refreshes the cache and fcmToken, and (only
+  // if the account turns out to no longer be a valid active customer) clears
+  // the cache so a future open doesn't keep fast-pathing into a stale state.
+  // Deliberately does not re-navigate — the user is already on Home.
+  Future<void> _refreshUserProfileInBackground(String uid) async {
+    try {
+      final results = await Future.wait([
+        FireStoreUtils.getCurrentUser(uid),
+        FireStoreUtils.firebaseMessaging.getToken(),
+      ]);
+      final user = results[0] as User?;
+      final fcmToken = results[1] as String?;
+      if (user == null || user.role != USER_ROLE_CUSTOMER || !user.active) {
+        unawaited(_clearCachedUserProfile(uid));
+        return;
+      }
+      user.fcmToken = fcmToken ?? '';
+      user.lastOnlineTimestamp = Timestamp.now();
+      MyAppState.currentUser = user;
+      unawaited(_cacheUserProfile(user));
+      unawaited(FireStoreUtils.updateCurrentUser(user));
+    } catch (e) {
+      debugPrint('[STARTUP-PERF] _refreshUserProfileInBackground failed: $e');
+    }
   }
 
   // ── Firebase routing ───────────────────────────────────────────────────
@@ -353,6 +548,24 @@ class OnBoardingState extends State<OnBoarding> {
             '[STARTUP-PERF] FirebaseAuth.currentUser (sync) — uid=${firebaseUser?.uid ?? "null"} '
             'at ${DateTime.now().toIso8601String()}');
         if (firebaseUser != null) {
+          // Cache-first fast path: if we have a valid cached profile for
+          // this uid, navigate immediately without waiting on any network
+          // call at all, then silently refresh in the background. Falls
+          // through to the full network path below, untouched, if there's
+          // no cache yet (first login on this device) or the cached
+          // profile isn't in a navigable state.
+          final cachedUser = await _timedStep(
+              'loadCachedUserProfile (auth branch)',
+              () => _loadCachedUserProfile(firebaseUser.uid));
+          if (cachedUser != null &&
+              cachedUser.role == USER_ROLE_CUSTOMER &&
+              cachedUser.active) {
+            completionPath = 'cache-hit (auth branch)';
+            await _navigateWithUser(cachedUser);
+            unawaited(_refreshUserProfileInBackground(firebaseUser.uid));
+            return;
+          }
+
           // TEMPORARY: isolate ID-token acquisition from the Firestore query
           // itself. getIdToken() returns the cached token instantly if it
           // hasn't expired, or makes a network round trip to Google's
@@ -368,17 +581,28 @@ class OnBoardingState extends State<OnBoarding> {
           debugPrint(
               '[STARTUP-PERF] ID token acquired — length=${idToken?.length ?? 0}, '
               'at ${DateTime.now().toIso8601String()}');
-          User? user = await _timedStep(
-              'getCurrentUser (auth branch) [Firestore .get() only, token already warm]',
-              () => FireStoreUtils.getCurrentUser(firebaseUser.uid));
+          // getCurrentUser and the FCM token fetch are independent of each
+          // other (the token fetch needs no data from the user doc) — run
+          // them concurrently instead of paying for the token fetch strictly
+          // after the Firestore query resolves.
+          final authBranchResults = await Future.wait([
+            _timedStep(
+                'getCurrentUser (auth branch) [Firestore .get() only, token already warm]',
+                () => FireStoreUtils.getCurrentUser(firebaseUser.uid)),
+            _timedStep('FirebaseMessaging.getToken (auth branch)',
+                () => FireStoreUtils.firebaseMessaging.getToken()),
+          ]);
+          User? user = authBranchResults[0] as User?;
+          final authBranchFcmToken = authBranchResults[1] as String?;
           if (user != null && user.role == USER_ROLE_CUSTOMER) {
             if (user.active) {
               user.active = true;
               user.role = USER_ROLE_CUSTOMER;
-              user.fcmToken = await _timedStep(
-                      'FirebaseMessaging.getToken (auth branch)',
-                      () => FireStoreUtils.firebaseMessaging.getToken()) ??
-                  '';
+              user.fcmToken = authBranchFcmToken ?? '';
+              // Every prior write site for lastOnlineTimestamp only fired on
+              // sign-out, so it never reflected actual usage — bump it here,
+              // on every app open, alongside the fcmToken refresh below.
+              user.lastOnlineTimestamp = Timestamp.now();
               // Fire-and-forget: this only persists the refreshed
               // fcmToken/active flag to Firestore. MyAppState.currentUser is
               // set from this in-memory `user` object immediately below, so
@@ -386,68 +610,8 @@ class OnBoardingState extends State<OnBoarding> {
               // (measured at ~1.5s, the single biggest chunk of this path).
               unawaited(_timedStep('updateCurrentUser (auth branch, active)',
                   () => FireStoreUtils.updateCurrentUser(user)));
-              MyAppState.currentUser = user;
-
-              if (MyAppState.currentUser!.shippingAddress != null &&
-                  MyAppState.currentUser!.shippingAddress!.isNotEmpty) {
-                if (MyAppState.currentUser!.shippingAddress!
-                    .where((element) => element.isDefault == true)
-                    .isNotEmpty) {
-                  MyAppState.selectedPosotion = MyAppState
-                      .currentUser!.shippingAddress!
-                      .where((element) => element.isDefault == true)
-                      .single;
-                } else {
-                  MyAppState.selectedPosotion =
-                      MyAppState.currentUser!.shippingAddress!.first;
-                }
-                // --- Begin: Set section info as ServiceListScreen does ---
-                final sections = await _timedStep('getSections (auth branch)',
-                    () => FireStoreUtils.getSections());
-                if (sections.isNotEmpty) {
-                  sectionConstantModel = sections.first;
-
-                  if (sectionConstantModel?.color != null) {
-                    AppThemeData.primary300 = Color(
-                      int.parse(sectionConstantModel!.color!
-                          .replaceFirst("#", "0xff")),
-                    );
-                  }
-
-                  // Payment gateway methods use .then() internally and return
-                  // immediately — kick them off now so their Firestore requests
-                  // run in the background while we navigate to Home
-                  FireStoreUtils.getRazorPayDemo();
-                  FireStoreUtils.getPaypalSettingData();
-                  FireStoreUtils.getStripeSettingData();
-                  FireStoreUtils.getPayStackSettingData();
-                  FireStoreUtils.getFlutterWaveSettingData();
-                  FireStoreUtils.getPaytmSettingData();
-                  FireStoreUtils.getPayFastSettingData();
-                  FireStoreUtils.getWalletSettingData();
-                  FireStoreUtils.getMercadoPagoSettingData();
-                  FireStoreUtils.getOrangeMoneySettingData();
-                  FireStoreUtils.getXenditSettingData();
-                  FireStoreUtils.getMidTransSettingData();
-                  FireStoreUtils.getPhonePaySettingData();
-                  // fcmToken was already fetched and written above —
-                  // no need to re-fetch and re-write it here.
-                }
-
-                // Push to HomeScreen with drawer support
-                _safeNavigate(() => pushReplacement(
-                    context,
-                    ContainerScreen(
-                      user: MyAppState.currentUser!,
-                      currentWidget: HomeScreen(user: MyAppState.currentUser!),
-                      appBarTitle: 'Home',
-                      drawerSelection: DrawerSelection.Home,
-                    )));
-                // --- End ---
-              } else {
-                _safeNavigate(() =>
-                    pushAndRemoveUntil(context, LocationPermissionScreen()));
-              }
+              unawaited(_cacheUserProfile(user));
+              await _navigateWithUser(user);
             } else {
               user.lastOnlineTimestamp = Timestamp.now();
               user.fcmToken = "";
@@ -455,6 +619,7 @@ class OnBoardingState extends State<OnBoarding> {
                   'updateCurrentUser (auth branch, inactive/signout)',
                   () => FireStoreUtils.updateCurrentUser(user));
               await auth.FirebaseAuth.instance.signOut();
+              unawaited(_clearCachedUserProfile(user.userID));
               MyAppState.currentUser = null;
               _safeNavigate(
                   () => pushReplacement(context, const LoginScreen()));
@@ -469,71 +634,42 @@ class OnBoardingState extends State<OnBoarding> {
           // No Firebase Auth session — try to restore a MSG91 phone user's session
           final savedPhoneUid = prefs.getString(PHONE_AUTH_USER_ID);
           if (savedPhoneUid != null && savedPhoneUid.isNotEmpty) {
-            User? user = await _timedStep('getCurrentUser (msg91 branch)',
-                () => FireStoreUtils.getCurrentUser(savedPhoneUid));
+            // Same cache-first fast path as the auth branch above.
+            final cachedUser = await _timedStep(
+                'loadCachedUserProfile (msg91 branch)',
+                () => _loadCachedUserProfile(savedPhoneUid));
+            if (cachedUser != null &&
+                cachedUser.role == USER_ROLE_CUSTOMER &&
+                cachedUser.active) {
+              completionPath = 'cache-hit (msg91 branch)';
+              await _navigateWithUser(cachedUser);
+              unawaited(_refreshUserProfileInBackground(savedPhoneUid));
+              return;
+            }
+
+            // Same concurrency fix as the auth branch above — getCurrentUser
+            // and the FCM token fetch don't depend on each other.
+            final msg91BranchResults = await Future.wait([
+              _timedStep('getCurrentUser (msg91 branch)',
+                  () => FireStoreUtils.getCurrentUser(savedPhoneUid)),
+              _timedStep('FirebaseMessaging.getToken (msg91 branch)',
+                  () => FireStoreUtils.firebaseMessaging.getToken()),
+            ]);
+            User? user = msg91BranchResults[0] as User?;
+            final msg91BranchFcmToken = msg91BranchResults[1] as String?;
             if (user != null && user.role == USER_ROLE_CUSTOMER && user.active) {
-              user.fcmToken = await _timedStep(
-                      'FirebaseMessaging.getToken (msg91 branch)',
-                      () => FireStoreUtils.firebaseMessaging.getToken()) ??
-                  '';
+              user.fcmToken = msg91BranchFcmToken ?? '';
+              user.lastOnlineTimestamp = Timestamp.now();
               // Fire-and-forget — see the identical comment in the auth
               // branch above.
               unawaited(_timedStep('updateCurrentUser (msg91 branch)',
                   () => FireStoreUtils.updateCurrentUser(user)));
-              MyAppState.currentUser = user;
-
-              if (MyAppState.currentUser!.shippingAddress != null &&
-                  MyAppState.currentUser!.shippingAddress!.isNotEmpty) {
-                if (MyAppState.currentUser!.shippingAddress!
-                    .where((element) => element.isDefault == true)
-                    .isNotEmpty) {
-                  MyAppState.selectedPosotion = MyAppState
-                      .currentUser!.shippingAddress!
-                      .where((element) => element.isDefault == true)
-                      .single;
-                } else {
-                  MyAppState.selectedPosotion =
-                      MyAppState.currentUser!.shippingAddress!.first;
-                }
-                final sections = await _timedStep('getSections (msg91 branch)',
-                    () => FireStoreUtils.getSections());
-                if (sections.isNotEmpty) {
-                  sectionConstantModel = sections.first;
-                  if (sectionConstantModel?.color != null) {
-                    AppThemeData.primary300 = Color(
-                      int.parse(sectionConstantModel!.color!
-                          .replaceFirst("#", "0xff")),
-                    );
-                  }
-                  FireStoreUtils.getRazorPayDemo();
-                  FireStoreUtils.getPaypalSettingData();
-                  FireStoreUtils.getStripeSettingData();
-                  FireStoreUtils.getPayStackSettingData();
-                  FireStoreUtils.getFlutterWaveSettingData();
-                  FireStoreUtils.getPaytmSettingData();
-                  FireStoreUtils.getPayFastSettingData();
-                  FireStoreUtils.getWalletSettingData();
-                  FireStoreUtils.getMercadoPagoSettingData();
-                  FireStoreUtils.getOrangeMoneySettingData();
-                  FireStoreUtils.getXenditSettingData();
-                  FireStoreUtils.getMidTransSettingData();
-                  FireStoreUtils.getPhonePaySettingData();
-                }
-                _safeNavigate(() => pushReplacement(
-                    context,
-                    ContainerScreen(
-                      user: MyAppState.currentUser!,
-                      currentWidget: HomeScreen(user: MyAppState.currentUser!),
-                      appBarTitle: 'Home',
-                      drawerSelection: DrawerSelection.Home,
-                    )));
-              } else {
-                _safeNavigate(() =>
-                    pushAndRemoveUntil(context, LocationPermissionScreen()));
-              }
+              unawaited(_cacheUserProfile(user));
+              await _navigateWithUser(user);
             } else {
               // Stored session is invalid or user deactivated — clear it
               await prefs.remove(PHONE_AUTH_USER_ID);
+              unawaited(_clearCachedUserProfile(savedPhoneUid));
               _safeNavigate(
                   () => pushReplacement(context, const LoginScreen()));
             }

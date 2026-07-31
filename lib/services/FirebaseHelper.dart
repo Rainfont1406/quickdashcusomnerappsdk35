@@ -54,7 +54,12 @@ import 'package:emartconsumer/model/story_model.dart';
 import 'package:emartconsumer/model/stripeKey.dart';
 import 'package:emartconsumer/model/stripeSettingData.dart';
 import 'package:emartconsumer/model/topupTranHistory.dart';
+import 'package:emartconsumer/services/behavior/behavior_event_types.dart';
+import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/helper.dart';
+import 'package:emartconsumer/services/recommendation/behavior_summary_snapshot.dart';
+import 'package:emartconsumer/services/recommendation/recommendation_config.dart';
+import 'package:emartconsumer/services/recommendation/recommendation_engine.dart';
 import 'package:emartconsumer/ui/reauthScreen/reauth_user_screen.dart';
 import 'package:emartconsumer/userPrefrence.dart';
 import 'package:emartconsumer/widget/geoflutterfire/src/geoflutterfire.dart';
@@ -77,6 +82,46 @@ import 'bunny_storage.dart';
 
 // Base URL of the QuickDash admin/API server.
 const _kApiBase = 'https://admin.quickdash.co.in';
+
+// Both windows come from ONE Firestore read of dailyProductSales (see
+// _fetchRollingSalesWindow) - last7Days is a subset bucketed by date, not a
+// second query. Stays local to this file (never imported by
+// recommendation_engine.dart, which is deliberately Firebase-free).
+class RollingSalesWindow {
+  final Map<String, int> last90Days;
+  final Map<String, int> last7Days;
+  // Distinct-order counters (2026-07-23, Trending/Popular Choice confidence
+  // rework) - DIFFERENT from last90Days/last7Days above, which are
+  // quantity-sold sums. productOrders* counts how many distinct orders
+  // included each product; totalOrders* is the restaurant-wide distinct
+  // order count for the same window. Both come from the same 'dailyProductSales'
+  // read as everything else here - no second query. Day-buckets written
+  // before this field existed simply contribute 0 (see _fetchRollingSalesWindow).
+  final Map<String, int> productOrders90;
+  final Map<String, int> productOrders7;
+  final int totalOrders90;
+  final int totalOrders7;
+  const RollingSalesWindow({
+    required this.last90Days,
+    required this.last7Days,
+    this.productOrders90 = const {},
+    this.productOrders7 = const {},
+    this.totalOrders90 = 0,
+    this.totalOrders7 = 0,
+  });
+}
+
+// Transport struct for FireStoreUtils._fetchBusinessContext's live-listener
+// cache - RecommendationEngine never sees this type, only the two plain
+// maps it carries (passed individually onto
+// RestaurantRecommendationContext). Stays local to this file, same as
+// RollingSalesWindow above.
+class BusinessContextData {
+  final Map<String, RestaurantTypeCategoryProfile> typeProfiles;
+  final Map<String, Set<String>> cuisineAffinity;
+  const BusinessContextData(
+      {required this.typeProfiles, required this.cuisineAffinity});
+}
 
 class FireStoreUtils {
   static FirebaseMessaging firebaseMessaging = FirebaseMessaging.instance;
@@ -469,52 +514,385 @@ class FireStoreUtils {
 
 
   // vendorId -> (in-flight/resolved fetch, when it was started). Sales data
-  // is a slow-changing 30-day rolling aggregate, so a short cache avoids
+  // is a slow-changing rolling aggregate, so a short cache avoids
   // re-querying the dailyProductSales subcollection for the same vendor on
   // every live vendor-list update (cards rebuild often; sales data doesn't
   // change minute to minute). Cleared naturally on app restart.
-  static final Map<String, (Future<Map<String, int>>, DateTime)>
+  static final Map<String, (Future<RollingSalesWindow>, DateTime)>
       _rollingSalesCache = {};
   static const Duration _rollingSalesCacheTtl = Duration(minutes: 10);
 
-  /// Sums a vendor's per-product delivery sales over the last 30 daily
-  /// buckets (written by the vendor app at order-completion time — see
-  /// FireStoreUtils.updateOrder there). Returns {productId: unitsSold},
-  /// empty if the vendor has no sales data yet.
-  static Future<Map<String, int>> getRolling30DaySales(String vendorId) {
+  /// Used by manual pull-to-refresh (restaurant page) alongside
+  /// clearVendorProductsCache/clearBehaviorSummaryCache, so a refresh can't
+  /// still show sales data up to 10 minutes stale (2026-07-17 fix - this
+  /// cache was the one of the three restaurant-page caches manual refresh
+  /// didn't already clear).
+  static void clearRollingSalesCache(String vendorId) {
+    _rollingSalesCache.remove(vendorId);
+  }
+
+  static Future<RollingSalesWindow> _getRollingSalesWindow(String vendorId) {
     final cached = _rollingSalesCache[vendorId];
     if (cached != null &&
         DateTime.now().difference(cached.$2) < _rollingSalesCacheTtl) {
       return cached.$1;
     }
-    final future = _fetchRolling30DaySales(vendorId);
+    final future = _fetchRollingSalesWindow(vendorId);
     _rollingSalesCache[vendorId] = (future, DateTime.now());
     return future;
   }
 
-  static Future<Map<String, int>> _fetchRolling30DaySales(
+  /// Sums a vendor's per-product delivery sales over the last 90 daily
+  /// buckets (3 months, widened 2026-07-20 from 30 days - written by the
+  /// vendor app at order-completion time — see FireStoreUtils.updateOrder
+  /// there). Returns {productId: unitsSold}, empty if the vendor has no
+  /// sales data yet. Thin wrapper kept for any caller that only needs the
+  /// 90-day total (e.g. getCarouselProducts) - RecommendationEngine callers
+  /// should use loadRecommendationContext, which populates both windows
+  /// from the one shared fetch.
+  static Future<Map<String, int>> getRolling90DaySales(String vendorId) async {
+    return (await _getRollingSalesWindow(vendorId)).last90Days;
+  }
+
+  static DateTime? _parseBucketDate(String docId) {
+    // docId format 'yyyy-MM-dd', see vendorApp's _dateBucketKey.
+    final parts = docId.split('-');
+    if (parts.length != 3) return null;
+    final y = int.tryParse(parts[0]);
+    final m = int.tryParse(parts[1]);
+    final d = int.tryParse(parts[2]);
+    if (y == null || m == null || d == null) return null;
+    return DateTime(y, m, d);
+  }
+
+  /// Both the 90-day total (3 months, widened 2026-07-20 from 30 days) and
+  /// the 7-day total come from this ONE Firestore read - the subcollection
+  /// is small (~90 daily docs, pruned vendor-side), so bucketing by date
+  /// client-side is far cheaper than a second query.
+  static Future<RollingSalesWindow> _fetchRollingSalesWindow(
       String vendorId) async {
-    final Map<String, int> totals = {};
+    final Map<String, int> totals90 = {};
+    final Map<String, int> totals7 = {};
+    final Map<String, int> orderTotals90 = {};
+    final Map<String, int> orderTotals7 = {};
+    var totalOrders90 = 0;
+    var totalOrders7 = 0;
     try {
       final snapshot = await firestore
           .collection(VENDORS)
           .doc(vendorId)
           .collection('dailyProductSales')
           .get();
+      final cutoff7 = DateTime.now().subtract(const Duration(days: 7));
+      final cutoff7Date = DateTime(cutoff7.year, cutoff7.month, cutoff7.day);
       for (final doc in snapshot.docs) {
-        final products = doc.data()['products'] as Map<String, dynamic>?;
+        final data = doc.data();
+        final products = data['products'] as Map<String, dynamic>?;
         if (products == null) continue;
+        final bucketDate = _parseBucketDate(doc.id);
+        final within7 = bucketDate != null && !bucketDate.isBefore(cutoff7Date);
         products.forEach((productId, count) {
           final n = (count as num?)?.toInt() ?? 0;
-          totals[productId] = (totals[productId] ?? 0) + n;
+          totals90[productId] = (totals90[productId] ?? 0) + n;
+          if (within7) totals7[productId] = (totals7[productId] ?? 0) + n;
         });
+
+        // Distinct-order counters - absent on buckets written before
+        // 2026-07-23, treated as 0 (no products/no orders that day for
+        // this field), never an error.
+        final productOrders = data['productOrders'] as Map<String, dynamic>?;
+        if (productOrders != null) {
+          productOrders.forEach((productId, count) {
+            final n = (count as num?)?.toInt() ?? 0;
+            orderTotals90[productId] = (orderTotals90[productId] ?? 0) + n;
+            if (within7) orderTotals7[productId] = (orderTotals7[productId] ?? 0) + n;
+          });
+        }
+        final dayTotalOrders = (data['totalOrders'] as num?)?.toInt() ?? 0;
+        totalOrders90 += dayTotalOrders;
+        if (within7) totalOrders7 += dayTotalOrders;
       }
     } catch (_) {}
-    return totals;
+    return RollingSalesWindow(
+      last90Days: totals90,
+      last7Days: totals7,
+      productOrders90: orderTotals90,
+      productOrders7: orderTotals7,
+      totalOrders90: totalOrders90,
+      totalOrders7: totalOrders7,
+    );
+  }
+
+  // ── Phase 2 recommendation data orchestration (2026-07-17) ────────────
+  // uid -> (in-flight/resolved fetch, when it was started). Same TTL-cache
+  // shape as _rollingSalesCache above, but keyed per-USER rather than
+  // per-vendor: the merged 3-month behavior_summary is identical no matter
+  // which restaurant page requests it, so one fetch per app session covers
+  // every restaurant the user visits, not one per vendor visited.
+  static final Map<String, (Future<BehaviorSummarySnapshot>, DateTime)>
+      _behaviorSummaryCache = {};
+  static const Duration _behaviorSummaryCacheTtl = Duration(minutes: 10);
+
+  /// Used by manual pull-to-refresh (restaurant page) alongside the
+  /// existing clearVendorProductsCache, so a fresh session's behavior can't
+  /// be masked by a still-live 10-minute-old personalization snapshot.
+  static void clearBehaviorSummaryCache(String uid) {
+    _behaviorSummaryCache.remove(uid);
+  }
+
+  /// Reads the signed-in user's current + previous 2 months' behavior_summary
+  /// docs (matching BehaviorTracker's own 3-month retention) and merges them
+  /// into one snapshot. Never throws - any read failure yields an empty
+  /// snapshot, same cold-start behavior as a genuinely new user.
+  static Future<BehaviorSummarySnapshot> _fetchBehaviorSummary(String uid) {
+    final cached = _behaviorSummaryCache[uid];
+    if (cached != null &&
+        DateTime.now().difference(cached.$2) < _behaviorSummaryCacheTtl) {
+      return cached.$1;
+    }
+    final future = _loadBehaviorSummary(uid);
+    _behaviorSummaryCache[uid] = (future, DateTime.now());
+    return future;
+  }
+
+  static Future<BehaviorSummarySnapshot> _loadBehaviorSummary(String uid) async {
+    try {
+      final now = DateTime.now();
+      // Retention extended 3 -> 12 months (2026-07-18, kBehaviorSummaryRetentionMonths)
+      // for Cross-Session Search Interest - a deliberate, confirmed 4x
+      // increase in reads for this fetch (12 individual .get() calls
+      // instead of 3), cached 10 minutes per user session via
+      // _behaviorSummaryCache below. Must stay in sync with
+      // BehaviorTracker._pruneOldSummariesIfNeeded's own retention window.
+      final yearMonths = List.generate(kBehaviorSummaryRetentionMonths, (i) {
+        final d = DateTime(now.year, now.month - i, 1);
+        return '${d.year}-${d.month.toString().padLeft(2, '0')}';
+      });
+      final docs = await Future.wait(yearMonths.map((ym) => firestore
+          .collection(USERS)
+          .doc(uid)
+          .collection('behavior_summary')
+          .doc(ym)
+          .get()));
+      final data = docs
+          .where((d) => d.exists && d.data() != null)
+          .map((d) => d.data()!)
+          .toList();
+      return BehaviorSummarySnapshot.merge(data);
+    } catch (_) {
+      return BehaviorSummarySnapshot.empty();
+    }
+  }
+
+  // ── Business Context (2026-07-19, admin-managed - revision 5) ──────────
+  // Restaurant Type/Cuisine -> preferred Product Category IDs, stored in
+  // Firestore (`business_context_type_profiles`/
+  // `business_context_cuisine_affinity`, both admin-managed - see the
+  // Admin Panel's Business Types/Cuisines edit pages) instead of hardcoded
+  // in the app. GLOBAL, non-sensitive master data - contains no user-
+  // specific or sensitive fields (just category IDs), so it's public-read
+  // in firestore.rules exactly like every other reference list there
+  // (sections/cuisines/business_types/vendor_categories), and every app
+  // user (signed in or not) gets the same Business Context signal.
+  //
+  // Revision 5: replaced the fixed 30-minute TTL with a live Firestore
+  // listener, the same "keep a cached config value fresh, pushed
+  // automatically the instant it changes" pattern this file already uses
+  // elsewhere (e.g. the Stripe settings .snapshots().listen() a few
+  // hundred lines up) - there's no existing generic "master config
+  // version" doc anywhere in this app to integrate with instead, so this
+  // reuses the codebase's own established idiom for the same class of
+  // problem rather than inventing a bespoke version-counter scheme. Two
+  // long-lived subscriptions (started lazily on first
+  // loadRecommendationContext call, held for the rest of the app session -
+  // no per-screen disposal needed, same as this app's other global-config
+  // subscriptions) keep _businessTypeProfiles/_cuisineCategoryAffinity
+  // live in memory. The very first call pays for one real read per
+  // collection (unavoidable); every call after that - for the rest of the
+  // session - is a synchronous in-memory read. An admin's save in the
+  // Admin Panel updates these in-memory maps in every open app instance
+  // via the same push round-trip (not "eventually, within a TTL window"),
+  // so the very next loadRecommendationContext call - this restaurant
+  // reopened, a pull-to-refresh, or the next restaurant visited - always
+  // sees fresh data. An already-rendered restaurant page does NOT
+  // automatically re-render on its own when this happens (see
+  // _ensureBusinessContextListeners' own doc comment) - deliberately kept
+  // simple, since Business Context changes are rare.
+  static Map<String, RestaurantTypeCategoryProfile> _businessTypeProfiles = {};
+  static Map<String, Set<String>> _cuisineCategoryAffinity = {};
+  static Completer<void>? _businessContextReady;
+
+  static Future<BusinessContextData> _fetchBusinessContext() {
+    _ensureBusinessContextListeners();
+    return _businessContextReady!.future.then((_) => BusinessContextData(
+        typeProfiles: _businessTypeProfiles,
+        cuisineAffinity: _cuisineCategoryAffinity));
+  }
+
+  /// Starts both listeners exactly once per app session. [_businessContextReady]
+  /// completes once BOTH collections have delivered their first snapshot (or
+  /// failed - never throws, a failed listener just leaves that half of the
+  /// data empty, the same "no evidence yet" no-op as any other gap in this
+  /// engine) - every call to _fetchBusinessContext before that point awaits
+  /// the same Completer rather than firing duplicate reads.
+  ///
+  /// Deliberately does NOT notify already-open restaurant pages when a
+  /// later snapshot changes this data (an earlier revision added a
+  /// broadcast stream + a subscription in newVendorProductsScreen for
+  /// exactly that, since removed) - Business Context changes are rare
+  /// admin actions, and the in-memory maps below are always current for
+  /// the NEXT loadRecommendationContext call regardless (this restaurant's
+  /// re-open, a pull-to-refresh, or the next restaurant visited all pick up
+  /// the new data immediately, since the listener itself never stops
+  /// updating). Simpler: no extra stream, no per-screen subscription
+  /// lifecycle, no extra rebuild path to maintain for a signal that changes
+  /// on the order of "admin edits a business type," not per-session.
+  static void _ensureBusinessContextListeners() {
+    if (_businessContextReady != null) return;
+    _businessContextReady = Completer<void>();
+    var typeReady = false, cuisineReady = false;
+    void maybeComplete() {
+      if (typeReady && cuisineReady && !_businessContextReady!.isCompleted) {
+        _businessContextReady!.complete();
+      }
+    }
+
+    // Fire-and-forget - both listeners are meant to live for the entire app
+    // session with no disposal, same as this app's other global-config
+    // subscriptions, so there's no caller that ever needs the
+    // StreamSubscription object back.
+    firestore
+        .collection(BUSINESS_CONTEXT_TYPE_PROFILES)
+        .snapshots()
+        .listen((snap) {
+      final map = <String, RestaurantTypeCategoryProfile>{};
+      for (final doc in snap.docs) {
+        final data = doc.data();
+        map[doc.id] = RestaurantTypeCategoryProfile(
+          primaryCategoryIds:
+              Set<String>.from(data['primaryCategoryIds'] ?? const []),
+          secondaryCategoryIds:
+              Set<String>.from(data['secondaryCategoryIds'] ?? const []),
+          lowPriorityCategoryIds:
+              Set<String>.from(data['lowPriorityCategoryIds'] ?? const []),
+        );
+      }
+      _businessTypeProfiles = map;
+      typeReady = true;
+      maybeComplete();
+    }, onError: (_) {
+      typeReady = true;
+      maybeComplete();
+    });
+
+    firestore
+        .collection(BUSINESS_CONTEXT_CUISINE_AFFINITY)
+        .snapshots()
+        .listen((snap) {
+      final map = <String, Set<String>>{};
+      for (final doc in snap.docs) {
+        map[doc.id] = Set<String>.from(doc.data()['categoryIds'] ?? const []);
+      }
+      _cuisineCategoryAffinity = map;
+      cuisineReady = true;
+      maybeComplete();
+    }, onError: (_) {
+      cuisineReady = true;
+      maybeComplete();
+    });
+  }
+
+  // Recommendation Configuration (2026-07-22) - unlike Business Context
+  // above, this is a plain ONE-TIME read, not a live listener: the brief
+  // explicitly wants "load once at startup, cache in memory, refresh only
+  // on app restart" - a live snapshot listener would silently apply an
+  // admin's mid-session edit to everyone's already-open app, which is
+  // exactly what was asked NOT to happen. A Completer still guards against
+  // duplicate concurrent calls, same technique as _ensureBusinessContextListeners,
+  // just for a single get() instead of two subscriptions.
+  static Completer<void>? _recommendationConfigLoadStarted;
+
+  /// Fetches recommendation_configuration/default once and caches it on
+  /// RecommendationConfig.current. Safe to call multiple times - every call
+  /// after the first awaits the same in-flight fetch. Never throws: a
+  /// missing document, offline device, or permission error simply leaves
+  /// RecommendationConfig.current at its already-production-identical
+  /// default values (see RecommendationConfig.defaults()).
+  static Future<void> loadRecommendationConfig() {
+    if (_recommendationConfigLoadStarted != null) {
+      return _recommendationConfigLoadStarted!.future;
+    }
+    final completer = Completer<void>();
+    _recommendationConfigLoadStarted = completer;
+    firestore
+        .collection('recommendation_configuration')
+        .doc('default')
+        .get()
+        .then((snap) {
+      if (snap.exists) {
+        RecommendationConfig.current =
+            RecommendationConfig.fromJson(snap.data() ?? const {});
+      }
+    }).catchError((_) {
+      // Degrades to defaults - already identical to pre-feature behavior.
+    }).whenComplete(() {
+      if (!completer.isCompleted) completer.complete();
+    });
+    return completer.future;
+  }
+
+  /// Assembles everything RecommendationEngine needs for one restaurant
+  /// page: the user's merged behavior summary (empty for signed-out users -
+  /// no read attempted), the vendor's rolling 90-day (3-month) sales
+  /// (existing, already TTL-cached), the in-memory cross-sell frequency tally (pure,
+  /// computed from [allProductList], zero extra reads), and the admin-
+  /// managed Business Context profiles (globally live-cached via a
+  /// Firestore listener, see above).
+  /// Callers should compute this ONCE per restaurant-page visit and reuse
+  /// the result across every section/reorder/pairs-well-with call -
+  /// nothing in RecommendationEngine re-fetches per section.
+  static Future<RestaurantRecommendationContext> loadRecommendationContext(
+      VendorModel vendor, List<ProductModel> allProductList) async {
+    final uid = getCurrentUid();
+    final summaryFuture = uid.isEmpty
+        ? Future.value(BehaviorSummarySnapshot.empty())
+        : _fetchBehaviorSummary(uid);
+    final salesWindowFuture = _getRollingSalesWindow(vendor.id);
+    final businessContextFuture = _fetchBusinessContext();
+    final results = await Future.wait(
+        [summaryFuture, salesWindowFuture, businessContextFuture]);
+    final salesWindow = results[1] as RollingSalesWindow;
+    final businessContext = results[2] as BusinessContextData;
+    return RestaurantRecommendationContext(
+      vendor: vendor,
+      allProducts: allProductList,
+      behaviorSummary: results[0] as BehaviorSummarySnapshot,
+      rolling90DaySales: salesWindow.last90Days,
+      rolling7DaySales: salesWindow.last7Days,
+      productOrders90: salesWindow.productOrders90,
+      productOrders7: salesWindow.productOrders7,
+      totalOrders90: salesWindow.totalOrders90,
+      totalOrders7: salesWindow.totalOrders7,
+      crossSellFrequency: RecommendationEngine.computeCrossSellFrequency(allProductList),
+      businessTypeProfiles: businessContext.typeProfiles,
+      cuisineCategoryAffinity: businessContext.cuisineAffinity,
+    );
+  }
+
+  /// Same merged/cached behavior summary as [loadRecommendationContext]
+  /// uses internally, exposed directly for callers that only need the
+  /// summary itself - e.g. SearchScreen's restaurant-ranking personalization
+  /// term, which has no single vendor/product-list context to build a full
+  /// RestaurantRecommendationContext around. Empty for signed-out users, no
+  /// read attempted.
+  static Future<BehaviorSummarySnapshot> getBehaviorSummary() {
+    final uid = getCurrentUid();
+    if (uid.isEmpty) return Future.value(BehaviorSummarySnapshot.empty());
+    return _fetchBehaviorSummary(uid);
   }
 
   /// Up to [max] products to show in a vendor's delivery-card carousel.
-  /// Priority: rolling-30-day sales ranking → best-discounted products →
+  /// Priority: rolling-90-day (3-month) sales ranking → best-discounted products →
   /// lowest-priced products. [vendorProducts] should already be filtered to
   /// this vendor's published, delivery-enabled products.
   static Future<List<ProductModel>> getCarouselProducts(
@@ -522,7 +900,7 @@ class FireStoreUtils {
       {int max = 5}) async {
     if (vendorProducts.isEmpty) return [];
 
-    final salesCounts = await getRolling30DaySales(vendorId);
+    final salesCounts = await getRolling90DaySales(vendorId);
     if (salesCounts.isNotEmpty) {
       final ranked = vendorProducts
           .where((p) => (salesCounts[p.id] ?? 0) > 0)
@@ -801,6 +1179,31 @@ class FireStoreUtils {
     });
   }
 
+  // Narrow, merge-only write for review submission (ReviewScreen.dart) -
+  // deliberately NOT a full vendor.toJson() .set() like updateVendor above.
+  // firestore.rules only lets a customer touch reviewsCount/reviewsSum on a
+  // vendor doc they don't own, checked via diff().affectedKeys() - a full
+  // re-serialized VendorModel can disagree with what's actually stored on
+  // some unrelated field (Timestamp/GeoPoint/nested map round-tripping
+  // differently) and make that diff check see more than just these two
+  // keys, silently denying the write. Same class of bug already fixed once
+  // in vendorApp's order-accept flow (see updateOrderFields there).
+  static Future<void> updateVendorReviewStats(String vendorId, num reviewsCount, num reviewsSum) async {
+    await firestore.collection(VENDORS).doc(vendorId).set({
+      'reviewsCount': reviewsCount,
+      'reviewsSum': reviewsSum,
+    }, SetOptions(merge: true));
+  }
+
+  // Same reasoning as updateVendorReviewStats above, for the product doc.
+  static Future<void> updateProductReviewStats(String productId, num reviewsCount, num reviewsSum, Map<String, dynamic> reviewAttributes) async {
+    await firestore.collection(PRODUCTS).doc(productId).set({
+      'reviewsCount': reviewsCount,
+      'reviewsSum': reviewsSum,
+      'reviewAttributes': reviewAttributes,
+    }, SetOptions(merge: true));
+  }
+
   static Future<String> uploadUserImageToFireStorage(File image, String userID) async {
     return uploadImageToBunny(image, 'profiles');
   }
@@ -894,8 +1297,13 @@ class FireStoreUtils {
   }
 
   static getRazorPay() async {
+    // Reads the safe-fields-only mirror (public key + enabled flags), not
+    // the real settings/razorpaySettings doc, which is admin-only now that
+    // its secret is no longer publicly readable (2026-07-16). Nothing
+    // client-side legitimately needs razorpaySecret anymore - the model's
+    // razorpaySecret field simply stays empty, matching its own default.
     // ignore: close_sinks
-    firestore.collection(Setting).doc("razorpaySettings").get().then((user) {
+    firestore.collection(SettingPublic).doc("razorpaySettings").get().then((user) {
       try {
         RazorPayModel userModel = RazorPayModel.fromJson(user.data() ?? {});
         UserPreference.setRazorPayData(userModel);
@@ -1039,8 +1447,10 @@ class FireStoreUtils {
   }
 
   static getRazorPayDemo() async {
+    // Reads the safe-fields-only mirror, not the real (now admin-only)
+    // settings doc - see getRazorPay()'s comment above.
     RazorPayModel userModel;
-    firestore.collection(Setting).doc("razorpaySettings").get().then((user) {
+    firestore.collection(SettingPublic).doc("razorpaySettings").get().then((user) {
       try {
         userModel = RazorPayModel.fromJson(user.data() ?? {});
         UserPreference.setRazorPayData(userModel);
@@ -2240,6 +2650,7 @@ class FireStoreUtils {
     // priceVerified, making Cloud Functions treat the order as freshly
     // completed again and pay the vendor a second time.
     await documentReference.set(orderModel.toJson(), SetOptions(merge: true));
+    _trackOrderPlacedForEngagement(orderModel);
     return orderModel;
   }
 
@@ -2256,7 +2667,32 @@ class FireStoreUtils {
     // after the first write already succeeded (e.g. the stock-update step
     // below), so this must not clobber server-added fields on retry.
     await documentReference.set(orderModel.toJson(), SetOptions(merge: true));
+    _trackOrderPlacedForEngagement(orderModel);
     return orderModel;
+  }
+
+  // Restaurant Engagement / Search Conversion / Banner Analytics
+  // "order placed" signal (Phase 2, 2026-07-24, collection-only) - the
+  // single choke point both placeOrder() and placeOrderWithTakeAWay() above
+  // funnel through, so CheckoutScreen/PaymentScreen/PlaceOrderScreen never
+  // need to duplicate this call themselves. Gated on analyticsSnapshot
+  // being present (not every order-creation path builds one, e.g. Bill Pay)
+  // and fires only when restaurantSessionId/reachedViaBannerId actually
+  // resolved to something - see BehaviorTracker._addRestaurantEngagementWrites/
+  // _addBannerAnalyticsWrites for where this lands. Deliberately a
+  // DIFFERENT event from kEvtOrderCompleted - see
+  // kEvtOrderPlacedForEngagement's own doc comment for why a placed order
+  // is not yet a completed one.
+  void _trackOrderPlacedForEngagement(OrderModel orderModel) {
+    final snapshot = orderModel.analyticsSnapshot;
+    if (snapshot == null) return;
+    BehaviorTracker.track(kEvtOrderPlacedForEngagement, {
+      'orderId': orderModel.id,
+      'vendorId': orderModel.vendorID,
+      'amount': (snapshot['totalAmount'] as num?) ?? 0,
+      'restaurantSessionId': (snapshot['restaurantSessionId'] ?? '').toString(),
+      'reachedViaBannerId': (snapshot['reachedViaBannerId'] ?? '').toString(),
+    });
   }
 
   static Future<List<TopupTranHistoryModel>> getTopUpTransaction() async {

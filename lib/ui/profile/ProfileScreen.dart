@@ -12,7 +12,6 @@ import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/accountDetails/AccountDetailsScreen.dart';
 import 'package:emartconsumer/ui/auth_screen/login_screen.dart';
 
-import 'package:emartconsumer/ui/contactUs/ContactUsScreen.dart';
 import 'package:emartconsumer/ui/settings/SettingsScreen.dart';
 import 'package:firebase_auth/firebase_auth.dart' as auth;
 import 'package:flutter/cupertino.dart';
@@ -53,11 +52,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 icon: CupertinoIcons.settings_solid,
                 label: 'Settings'.tr(),
                 onTap: () => push(context, SettingsScreen(user: MyAppState.currentUser!)),
-              ),
-              _MenuItem(
-                icon: CupertinoIcons.phone_solid,
-                label: 'contactUs'.tr(),
-                onTap: () => push(context, const ContactUsScreen()),
               ),
             ],
           ),

@@ -24,12 +24,12 @@ import 'package:emartconsumer/payment/orangePayScreen.dart';
 import 'package:emartconsumer/payment/xenditModel.dart';
 import 'package:emartconsumer/payment/xenditScreen.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/device_session_service.dart';
 import 'package:emartconsumer/services/paystack_url_genrater.dart';
 import 'package:emartconsumer/services/rozorpayConroller.dart';
 import 'package:emartconsumer/services/app_dialog.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
-import 'package:emartconsumer/ui/gift_card/gift_card_redeem_screen.dart';
 import 'package:emartconsumer/ui/wallet/MercadoPagoScreen.dart';
 import 'package:emartconsumer/ui/wallet/PayFastScreen.dart';
 import 'package:emartconsumer/ui/wallet/payStackScreen.dart';
@@ -111,11 +111,11 @@ class WalletScreenState extends State<WalletScreen> {
   final userId = MyAppState.currentUser!.userID;
 
   getPaymentSettingData() async {
-    // No orderBy here — compound (where + orderBy on different fields) requires
-    // a Firestore composite index that may not exist. Sort client-side instead.
     topupHistoryQuery = FireStoreUtils.firestore
         .collection(Wallet)
         .where('user_id', isEqualTo: userId)
+        .orderBy('date', descending: true)
+        .limit(20)
         .snapshots();
     userQuery = FireStoreUtils.firestore
         .collection(USERS)
@@ -253,7 +253,6 @@ class WalletScreenState extends State<WalletScreen> {
           _WalletCard(
             userQuery: userQuery,
             onAddMoney: topUpBalance,
-            onGiftCard: () => push(context, const GiftCardRedeemScreen()),
             dark: dark,
           ),
 
@@ -555,17 +554,25 @@ class WalletScreenState extends State<WalletScreen> {
               }
               return 0;
             });
+          final cards = <Widget>[];
+          for (final document in sortedDocs) {
+            try {
+              final topUpData = TopupTranHistoryModel.fromJson(
+                  document.data() as Map<String, dynamic>);
+              cards.add(buildTransactionCard(
+                topupTranHistory: topUpData,
+                date: topUpData.date.toDate(),
+              ));
+            } catch (e) {
+              // One malformed row must never take down the whole list.
+              debugPrint('Skipping malformed wallet transaction ${document.id}: $e');
+            }
+          }
+          if (cards.isEmpty) return _buildHistoryEmptyState(dark);
           return ListView(
             physics: const BouncingScrollPhysics(),
             padding: EdgeInsets.symmetric(horizontal: AppSpacing.spacing4, vertical: AppSpacing.spacing2),
-            children: sortedDocs.map((DocumentSnapshot document) {
-              final topUpData = TopupTranHistoryModel.fromJson(
-                  document.data() as Map<String, dynamic>);
-              return buildTransactionCard(
-                topupTranHistory: topUpData,
-                date: topUpData.date.toDate(),
-              );
-            }).toList(),
+            children: cards,
           );
         }
       },
@@ -1044,7 +1051,8 @@ class WalletScreenState extends State<WalletScreen> {
     );
   }
 
-  topUpBalance() {
+  Future<void> topUpBalance() async {
+    if (!await DeviceSessionService.enforceActive(context)) return;
     final size = MediaQuery.of(context).size;
     bool isProcessingTopup = false;
     return showModalBottomSheet(
@@ -1347,15 +1355,14 @@ class WalletScreenState extends State<WalletScreen> {
                               } else if (selectedRadioTile == "RazorPay" && (razorPayData?.isEnabled ?? false)) {
                                 Navigator.pop(context);
                                 showLoadingAlert();
-                                RazorPayController().createOrderRazorPay(
-                                  isTopup: true,
+                                RazorPayController().createWalletTopupOrder(
                                   amount: double.parse(_amountController.text),
                                 ).then((result) {
                                   // Use this.context (wallet state) — the bottom-sheet context captured
                                   // in the closure is deactivated by this point.
                                   if (mounted) Navigator.of(this.context, rootNavigator: true).pop();
-                                  if (result.isSuccess) {
-                                    openCheckout(amount: int.parse(_amountController.text), orderId: result.order!.id);
+                                  if (result.success) {
+                                    openCheckout(amount: result.amount.toInt(), orderId: result.razorpayOrderId!);
                                   } else {
                                     if (mounted) showAlert(this.context,
                                       response: result.errorMessage?.tr() ?? "Something went wrong, please contact admin.".tr(),
@@ -1460,8 +1467,30 @@ class WalletScreenState extends State<WalletScreen> {
     }
   }
 
-  void _handlePaymentSuccess(PaymentSuccessResponse response) {
-    paymentCompleted(paymentMethod: "RazorPay");
+  void _handlePaymentSuccess(PaymentSuccessResponse response) async {
+    // The wallet is credited server-side, inside verifyPayment, only once
+    // the Razorpay signature checks out — unlike paymentCompleted() (used by
+    // the other gateways above), this never trusts _amountController.text.
+    final result = await RazorPayController().verifyPayment(
+      razorpayOrderId: response.orderId ?? '',
+      razorpayPaymentId: response.paymentId ?? '',
+      razorpaySignature: response.signature ?? '',
+      purpose: 'wallet_topup',
+    );
+    if (!mounted) return;
+    if (result.success) {
+      ScaffoldMessenger.of(_scaffoldKey.currentContext!).showSnackBar(SnackBar(
+        content: Text('Wallet topped up via RazorPay'.tr()),
+        backgroundColor: Colors.green.shade600,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        duration: const Duration(seconds: 4),
+      ));
+    } else {
+      showAlert(context,
+          response: result.errorMessage?.tr() ?? 'Payment verification failed. Please contact support.'.tr(),
+          colors: AppColors.error500);
+    }
   }
 
   void _handleExternalWaller(ExternalWalletResponse response) {
@@ -2225,13 +2254,11 @@ enum PaymentOptionString {
 class _WalletCard extends StatelessWidget {
   final Stream<DocumentSnapshot<Map<String, dynamic>>>? userQuery;
   final VoidCallback onAddMoney;
-  final VoidCallback onGiftCard;
   final bool dark;
 
   const _WalletCard({
     required this.userQuery,
     required this.onAddMoney,
-    required this.onGiftCard,
     required this.dark,
   });
 
@@ -2334,27 +2361,6 @@ class _WalletCard extends StatelessWidget {
                       color: Colors.white70, fontSize: 14,
                       fontFamily: AppThemeData.medium,
                     )),
-                    const Spacer(),
-                    GestureDetector(
-                      onTap: onGiftCard,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: 0.15),
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const Icon(Icons.card_giftcard_rounded, color: Colors.white, size: 14),
-                            const SizedBox(width: 5),
-                            Text('Gift Card'.tr(), style: const TextStyle(
-                              color: Colors.white, fontSize: 12, fontFamily: AppThemeData.medium,
-                            )),
-                          ],
-                        ),
-                      ),
-                    ),
                   ],
                 ),
                 const SizedBox(height: 16),

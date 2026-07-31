@@ -194,6 +194,7 @@ class AuthTextField extends StatelessWidget {
   final TextInputAction? textInputAction;
   final ValueChanged<String>? onChanged;
   final TextCapitalization textCapitalization;
+  final int? maxLength;
 
   const AuthTextField({
     super.key,
@@ -211,6 +212,7 @@ class AuthTextField extends StatelessWidget {
     this.textInputAction,
     this.onChanged,
     this.textCapitalization = TextCapitalization.sentences,
+    this.maxLength,
   });
 
   @override
@@ -232,6 +234,10 @@ class AuthTextField extends StatelessWidget {
       inputFormatters: inputFormatters,
       textInputAction: textInputAction ?? TextInputAction.done,
       onChanged: onChanged,
+      maxLength: maxLength,
+      buildCounter: maxLength == null
+          ? null
+          : (context, {required currentLength, required isFocused, maxLength}) => null,
       style: const TextStyle(
         color: Colors.white,
         fontFamily: AppThemeData.medium,

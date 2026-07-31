@@ -4,6 +4,7 @@ import 'package:emartconsumer/AppGlobal.dart';
 import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 // import 'package:emartconsumer/ui/vendorProductsScreen/NewVendorProductsScreen.dart';
@@ -99,10 +100,13 @@ class _ViewAllPopularStoreScreenState extends State<ViewAllPopularStoreScreen> {
 
   Widget buildPopularsItem(VendorModel vendorModel) {
     return GestureDetector(
-      onTap: () => push(
-        context,
-        NewVendorProductsScreen(vendorModel: vendorModel),
-      ),
+      onTap: () {
+        BehaviorTracker.setNextEntrySource('Home');
+        push(
+          context,
+          NewVendorProductsScreen(vendorModel: vendorModel),
+        );
+      },
       child: Container(
         width: MediaQuery.of(context).size.width * 0.75,
         height: (MediaQuery.of(context).size.width * 0.62).clamp(200.0, 300.0),

@@ -1,12 +1,13 @@
-// STAGING Firebase options — placeholder.
+// STAGING Firebase options.
 //
-// Regenerate this file once the `quickdash-staging` Firebase project has
-// Firestore/Auth/Storage enabled and the Android/iOS apps registered:
+// Verified REAL (not placeholder) on 2026-07-10 via `firebase apps:list
+// --project=quickdash-staging` + `firebase apps:sdkconfig ios ... --project=
+// quickdash-staging` — both android/ios appId and apiKey below match the
+// live registered apps exactly. The header comment here previously claimed
+// these were unconfigured placeholders; that was stale, not accurate — this
+// file does not need to be regenerated. If it ever needs regenerating anyway:
 //
 //   flutterfire configure --project=quickdash-staging --out=lib/firebase_options_staging.dart
-//
-// Until then, building the `staging` flavor will compile but Firebase calls
-// will fail with these placeholder values.
 // ignore_for_file: lines_longer_than_80_chars, avoid_classes_with_only_static_members
 import 'package:firebase_core/firebase_core.dart' show FirebaseOptions;
 import 'package:flutter/foundation.dart'

@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/User.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/device_session_service.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/notification_service.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
@@ -53,15 +55,43 @@ class _EmailLoginScreenState extends State<EmailLoginScreen> {
     if (_isBusy) return;
     if (mounted) setState(() => _isBusy = true);
     ShowToastDialog.showLoader('Verifying your account...');
+    // TEMPORARY [LOGIN-PERF] - timing instrumentation for the login-speed
+    // investigation. Remove once done.
+    final totalSw = Stopwatch()..start();
     try {
+      final signInSw = Stopwatch()..start();
       final credential = await auth.FirebaseAuth.instance
           .signInWithEmailAndPassword(email: email, password: password);
+      debugPrint('[LOGIN-PERF] signInWithEmailAndPassword — ${signInSw.elapsedMilliseconds}ms');
       if (credential.user == null) {
         ShowToastDialog.showToast('Login failed. Please try again.');
         return;
       }
 
-      User? userModel = await FireStoreUtils.getUserProfile(credential.user!.uid);
+      // getUserProfile and the FCM token fetch are independent of each other
+      // (the token fetch needs no data from the user profile) — run them
+      // concurrently instead of paying for the token fetch strictly after
+      // the Firestore lookup resolves. Same fix as hasFinishedOnBoarding()
+      // in main.dart's session-restore path. Explicit <dynamic> because
+      // NotificationService.getToken() has no declared return type.
+      // Individually timed (temporary diagnostic) — still run concurrently
+      // via Future.wait, just wrapped so each leg's own completion time is
+      // visible instead of only the combined parallel total.
+      final profileSw = Stopwatch()..start();
+      final profileFuture =
+          FireStoreUtils.getUserProfile(credential.user!.uid).then((r) {
+        debugPrint('[LOGIN-PERF] getUserProfile — ${profileSw.elapsedMilliseconds}ms');
+        return r;
+      });
+      final tokenSw = Stopwatch()..start();
+      final tokenFuture = NotificationService.getToken().then((r) {
+        debugPrint('[LOGIN-PERF] getToken (FCM) — ${tokenSw.elapsedMilliseconds}ms');
+        return r;
+      });
+      final loginResults = await Future.wait<dynamic>([profileFuture, tokenFuture]);
+      debugPrint('[LOGIN-PERF] getUserProfile+getToken (parallel) — ${profileSw.elapsedMilliseconds}ms');
+      User? userModel = loginResults[0] as User?;
+      final fcmToken = loginResults[1] as String;
       if (userModel == null) {
         ShowToastDialog.showToast('No account found. Please sign up to create an account.');
         await auth.FirebaseAuth.instance.signOut();
@@ -82,9 +112,21 @@ class _EmailLoginScreenState extends State<EmailLoginScreen> {
         return;
       }
 
-      userModel.fcmToken = await NotificationService.getToken();
-      await FireStoreUtils.updateCurrentUser(userModel);
+      final deviceSessionSw = Stopwatch()..start();
+      final sessionResult = await DeviceSessionService.authorize(fcmToken: fcmToken);
+      debugPrint('[LOGIN-PERF] DeviceSessionService.authorize — ${deviceSessionSw.elapsedMilliseconds}ms');
+      if (!sessionResult.allowed) {
+        ShowToastDialog.showToast(sessionResult.message!);
+        return;
+      }
+
+      userModel.fcmToken = fcmToken;
+      // Fire-and-forget: navigation doesn't need to wait on this write's
+      // round trip — MyAppState/userModel below already reflect the update
+      // in memory. Same fix as hasFinishedOnBoarding() in main.dart.
+      unawaited(FireStoreUtils.updateCurrentUser(userModel));
       if (!mounted) return;
+      debugPrint('[LOGIN-PERF] TOTAL (tap to navigate) — ${totalSw.elapsedMilliseconds}ms');
       if (userModel.shippingAddress != null && userModel.shippingAddress!.isNotEmpty) {
         if (userModel.shippingAddress!.where((e) => e.isDefault == true).isNotEmpty) {
           MyAppState.selectedPosotion =
@@ -157,6 +199,7 @@ class _EmailLoginScreenState extends State<EmailLoginScreen> {
                         iconPath: 'assets/icons/ic_mail.svg',
                         keyboardType: TextInputType.emailAddress,
                         textCapitalization: TextCapitalization.none,
+                        maxLength: 254,
                       ),
                       const SizedBox(height: 20),
                       AuthFieldLabel(text: 'Password'.tr),

@@ -142,7 +142,10 @@ class ForgotPasswordScreen extends StatelessWidget {
                     width: double.infinity,
                     height: 54,
                     child: ElevatedButton(
-                      onPressed: () => controller.forgotPassword(),
+                      onPressed: () async {
+                        final success = await controller.forgotPassword();
+                        if (success && context.mounted) Navigator.pop(context);
+                      },
                       style: ElevatedButton.styleFrom(
                         backgroundColor: AppThemeData.primary500,
                         elevation: 0,

@@ -86,7 +86,7 @@ class HomeScreenState extends State<OrderTrackingScreen> {
   getCurrentOrder() async {
     ordersFuture = FireStoreUtils().getOrderByID(widget.orderModel.id.toString());
     ordersFuture.listen((event) {
-      print("------->${event!.status}");
+      if (event == null) return;
       setState(() {
         currentOrder = event;
         if (selectedMapType == "osm") {
@@ -112,10 +112,10 @@ class HomeScreenState extends State<OrderTrackingScreen> {
 
   @override
   void dispose() {
-    _mapController!.dispose();
-    FireStoreUtils().driverStreamSub.cancel();
-    FireStoreUtils().ordersStreamController.close();
-    FireStoreUtils().ordersStreamSub.cancel();
+    _mapController?.dispose();
+    try { fireStoreUtils.driverStreamSub.cancel(); } catch (_) {}
+    try { fireStoreUtils.ordersStreamController.close(); } catch (_) {}
+    try { fireStoreUtils.ordersStreamSub.cancel(); } catch (_) {}
     super.dispose();
   }
 

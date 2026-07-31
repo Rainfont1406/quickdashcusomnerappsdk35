@@ -14,6 +14,9 @@ class StoryModel {
   bool approved = false;
   String? storyType;
 
+  String? mediaStatus; // 'ready' | 'processing' | 'failed' — Bunny Stream encode status (video only; images are 'ready' immediately)
+  String? bunnyVideoId; // Bunny Stream video GUID (video only)
+
   // View-package model (replaces day-based `duration` for new stories).
   int? viewPackageSize; // total unique views purchased
   int viewCount = 0; // atomically incremented per unique viewer (per day)
@@ -34,6 +37,8 @@ class StoryModel {
     this.delivery = false,
     this.approved = false,
     this.storyType,
+    this.mediaStatus,
+    this.bunnyVideoId,
     this.viewPackageSize,
     this.viewCount = 0,
     this.pricePerView,
@@ -74,6 +79,8 @@ class StoryModel {
     delivery = json['delivery'] ?? false;
     approved = json['approved'] ?? false;
     storyType = json['storyType'];
+    mediaStatus = json['mediaStatus'];
+    bunnyVideoId = json['bunnyVideoId'];
     viewPackageSize = json['viewPackageSize'];
     viewCount = json['viewCount'] ?? 0;
     pricePerView = json['pricePerView'] != null
@@ -101,6 +108,8 @@ class StoryModel {
     data['delivery'] = delivery;
     data['approved'] = approved;
     data['storyType'] = storyType;
+    data['mediaStatus'] = mediaStatus;
+    data['bunnyVideoId'] = bunnyVideoId;
     data['viewPackageSize'] = viewPackageSize;
     data['viewCount'] = viewCount;
     data['pricePerView'] = pricePerView;
@@ -115,7 +124,10 @@ class StoryModel {
   bool get isVideoStory => hasVideo && !hasImage;
   bool get isImageStory => hasImage && !hasVideo;
   bool get hasBothTypes => hasVideo && hasImage;
-  
+
+  bool get isMediaProcessing => isVideoStory && mediaStatus == 'processing';
+  bool get isMediaFailed => isVideoStory && mediaStatus == 'failed';
+
   // Check if story is expired.
   // View-package stories: expired once views are exhausted or the backstop
   // day-cap is hit, whichever comes first. Legacy day-based stories (no

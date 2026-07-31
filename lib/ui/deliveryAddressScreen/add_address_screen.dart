@@ -11,6 +11,7 @@ import 'package:emartconsumer/services/show_toast_dialog.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/widget/place_picker_osm.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_google_maps_webservices/places.dart' show Component;
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:google_maps_place_picker_mb/google_maps_place_picker.dart';
 import 'package:uuid/uuid.dart';
@@ -104,6 +105,8 @@ class _AddAddressScreenState extends State<AddAddressScreen> {
             zoomControlsEnabled: true,
             initialMapType: MapType.terrain,
             resizeToAvoidBottomInset: false,
+            // Hard filter: only Indian results are returned at all.
+            autocompleteComponents: [Component(Component.country, 'in')],
           ),
         ),
       );

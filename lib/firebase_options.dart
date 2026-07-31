@@ -59,14 +59,14 @@ class DefaultFirebaseOptions {
   );
 
   static const FirebaseOptions ios = FirebaseOptions(
-    apiKey: 'YOUR_IOS_API_KEY',
-    appId: 'YOUR_IOS_APP_ID',
-    messagingSenderId: 'YOUR_IOS_MESSAGING_SENDER_ID',
-    projectId: 'YOUR_IOS_PROJECT_ID',
-    databaseURL: 'YOUR_IOS_DATABASE_URL',
-    storageBucket: 'YOUR_IOS_STORAGE_BUCKET',
-    androidClientId: 'YOUR_ANDROID_CLIENT_ID',
-    iosClientId: 'YOUR_IOS_CLIENT_ID',
-    iosBundleId: 'YOUR_IOS_BUNDLE_ID',
+    apiKey: 'AIzaSyBlqLQTjzVdfQAXoiHXSGc-XwLk4BwX5LA',
+    appId: '1:60208840695:ios:c898a22bcf4f5fed7f78f2',
+    messagingSenderId: '60208840695',
+    projectId: 'quick-dash-84f6a',
+    databaseURL: 'https://quick-dash-84f6a-default-rtdb.firebaseio.com',
+    storageBucket: 'quick-dash-84f6a.firebasestorage.app',
+    androidClientId: '60208840695-1d7tefbqt46vti585bi4pmicrvs0u0g0.apps.googleusercontent.com',
+    iosClientId: '60208840695-v9nctp1ie5i6fdolg89n25kfh3d4nsec.apps.googleusercontent.com',
+    iosBundleId: 'com.quickdash.customer',
   );
 }

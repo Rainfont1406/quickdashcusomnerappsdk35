@@ -48,3 +48,10 @@ app.*.map.json
 
 # FVM Version Cache
 .fvm/
+
+# Release signing key material - must never be committed
+*.jks
+*.keystore
+*.pem
+upload-keystore.jks
+upload_certificate.pem

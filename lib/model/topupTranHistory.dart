@@ -38,13 +38,18 @@ class TopupTranHistoryModel {
   factory TopupTranHistoryModel.fromJson(Map<String, dynamic> parsedJson) {
     return TopupTranHistoryModel(
       amount: parsedJson['amount'] ?? 0.0,
-      id: parsedJson['id'],
+      // id/user_id previously had no fallback at all — a doc missing either
+      // field (or storing it as null) crashed with "type 'Null' is not a
+      // subtype of type 'String'" wherever this model is built directly in
+      // a widget tree (e.g. walletScreen's StreamBuilder), taking down the
+      // whole transaction history list instead of just that one row.
+      id: parsedJson['id']?.toString() ?? '',
       isTopup: parsedJson['isTopUp'] ?? false,
-      date: parsedJson['date'] ?? '',
+      date: parsedJson['date'] is Timestamp ? parsedJson['date'] : Timestamp.now(),
       order_id: parsedJson['order_id'] ?? '',
       payment_method: parsedJson['payment_method'] ?? '',
-      payment_status: parsedJson['payment_status'] ?? false,
-      user_id: parsedJson['user_id'],
+      payment_status: parsedJson['payment_status']?.toString() ?? '',
+      user_id: parsedJson['user_id']?.toString() ?? '',
       serviceType: parsedJson['serviceType'] ?? '',
       transactionUser: parsedJson['transactionUser'],
       note: parsedJson['note'] ?? "Wallet Transaction",

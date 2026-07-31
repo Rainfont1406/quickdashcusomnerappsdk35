@@ -4,6 +4,7 @@ import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/model/ProductModel.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/vendorProductsScreen/newVendorProductsScreen.dart';
@@ -221,7 +222,10 @@ class _ViewAllPopularFoodNearByScreenState
     final isDark = isDarkMode(context);
     final isOpen = vendor.isAcceptingOrders;
     return GestureDetector(
-      onTap: () => push(context, NewVendorProductsScreen(vendorModel: vendor)),
+      onTap: () {
+        BehaviorTracker.setNextEntrySource('Home');
+        push(context, NewVendorProductsScreen(vendorModel: vendor));
+      },
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 6),
         child: Container(

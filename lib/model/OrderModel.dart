@@ -49,9 +49,49 @@ class OrderModel {
 
   String? estimatedTimeToPrepare;
   Timestamp? acceptedAt;
+
+  // Set whenever `status` transitions to ORDER_STATUS_COMPLETED or
+  // ORDER_STATUS_REJECTED — lets the vendor/customer chat stay open for a
+  // limited window after the order reaches a terminal state instead of
+  // locking the instant it does (see isWithinTerminalChatWindow in
+  // helper.dart). Written by the Vendor App/Web, read here.
+  Timestamp? statusUpdatedAt;
   Timestamp? scheduleTime;
   String? orderType; // "Takeaway" or "Dining" for Dineaway feature
   String? staffStatus;
+
+  // ── Vendor-initiated Bill Pay request fields ─────────────────────────────
+  // These three describe the ORIGINAL pending request document only (read
+  // via BillPayRequestScreen/OrdersScreen) — never set on a normal order.
+  String? initiatedBy; // 'vendor' when the vendor built the cart and sent it to the customer for approval
+  Timestamp? billPayExpiresAt; // 60-minute approval deadline, refreshed on vendor edit
+  Timestamp? billPayRespondedAt; // when the customer accepted or declined
+
+  // Set on the brand-new order created by Accept & Pay (see CartScreen's
+  // Bill Pay mode / PaymentScreen) — links it back to the original pending
+  // request so a Cloud Function can reconcile that document afterward. Never
+  // set together with initiatedBy/billPayExpiresAt on the same document.
+  String? billPayRequestId;
+
+  // Set only for orders paid through the new server-verified Razorpay flow
+  // (createVerifiedOrderPayment/verifyRazorpayPayment) — lets
+  // verifyOrderOnCreate cross-check that a matching, consumed
+  // payment_intents doc actually exists before trusting this order's price.
+  String? razorpayOrderId;
+
+  // Immutable purchase-analytics snapshot (2026-07-22) - written ONCE, by
+  // the customer, at order creation (PaymentScreen/CheckoutScreen), and
+  // NEVER touched again by anything - the order document stays fully
+  // immutable from the customer's side after creation. Exists so
+  // PurchaseCompletionListener can learn category/cuisine/budget/order-mode
+  // preference from a COMPLETED order with zero additional Firestore reads
+  // - no re-querying products, no re-querying the vendor, no recomputing
+  // checkout totals - just what was actually purchased, exactly as it was
+  // at the moment of purchase, regardless of later menu/category changes.
+  // Exactly-once idempotency is provided elsewhere (a deterministic-ID
+  // marker doc PurchaseCompletionListener creates under the customer's own
+  // behavior_batches collection) - see that class' own doc comment.
+  Map<String, dynamic>? analyticsSnapshot;
 
   OrderModel({
     this.address,
@@ -82,10 +122,17 @@ class OrderModel {
     this.specialDiscount,
     this.estimatedTimeToPrepare,
     this.acceptedAt,
+    this.statusUpdatedAt,
     this.taxModel,
     this.scheduleTime,
     this.orderType,
     this.staffStatus,
+    this.initiatedBy,
+    this.billPayExpiresAt,
+    this.billPayRespondedAt,
+    this.billPayRequestId,
+    this.razorpayOrderId,
+    this.analyticsSnapshot,
   })  : author = author ?? User(),
         createdAt = createdAt ?? Timestamp.now(),
         vendor = vendor ?? VendorModel();
@@ -112,7 +159,9 @@ class OrderModel {
     }
 
     return OrderModel(
-      address: parsedJson.containsKey('address') ? AddressModel.fromJson(parsedJson['address']) : AddressModel(),
+      address: (parsedJson.containsKey('address') && parsedJson['address'] != null)
+          ? AddressModel.fromJson(parsedJson['address'])
+          : AddressModel(),
       author: parsedJson.containsKey('author') ? User.fromJson(parsedJson['author']) : User(),
       authorID: parsedJson['authorID'] ?? '',
       createdAt: parsedJson['createdAt'] ?? Timestamp.now(),
@@ -143,10 +192,19 @@ class OrderModel {
       specialDiscount: parsedJson["specialDiscount"] ?? {},
       estimatedTimeToPrepare: parsedJson["estimatedTimeToPrepare"] ?? '',
       acceptedAt: parsedJson["acceptedAt"],
+      statusUpdatedAt: parsedJson["statusUpdatedAt"],
       taxModel: taxList,
       scheduleTime: parsedJson["scheduleTime"],
       orderType: parsedJson["orderType"],
       staffStatus: parsedJson["staffStatus"],
+      initiatedBy: parsedJson["initiatedBy"],
+      billPayExpiresAt: parsedJson["billPayExpiresAt"],
+      billPayRespondedAt: parsedJson["billPayRespondedAt"],
+      billPayRequestId: parsedJson["billPayRequestId"],
+      razorpayOrderId: parsedJson["razorpayOrderId"],
+      analyticsSnapshot: parsedJson["analyticsSnapshot"] == null
+          ? null
+          : Map<String, dynamic>.from(parsedJson["analyticsSnapshot"]),
     );
   }
 
@@ -181,8 +239,15 @@ class OrderModel {
       "courierTrackingId": courierTrackingId,
       "estimatedTimeToPrepare": this.estimatedTimeToPrepare,
       "acceptedAt": this.acceptedAt,
+      "statusUpdatedAt": this.statusUpdatedAt,
       "scheduleTime": this.scheduleTime,
       "orderType": this.orderType,
+      "initiatedBy": this.initiatedBy,
+      "billPayExpiresAt": this.billPayExpiresAt,
+      "billPayRespondedAt": this.billPayRespondedAt,
+      "billPayRequestId": this.billPayRequestId,
+      "razorpayOrderId": this.razorpayOrderId,
+      "analyticsSnapshot": this.analyticsSnapshot,
     };
   }
 }

@@ -16,12 +16,18 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 class ProductOptionsDialog extends StatefulWidget {
   final ProductModel productModel;
-  final Function(ProductModel, double) onAddToCart;
+  // int = quantity selected (always 1 unless showProductInfo is true).
+  final Function(ProductModel, double, int) onAddToCart;
   // When re-ordering or editing, pass the old variant_info to pre-populate selections.
   final VariantInfo? initialVariantInfo;
   // Comma-joined add-on names from the cart item (e.g. "Cheese,Extra Sauce").
   // Used to restore add-on quantities when editing an existing cart item.
   final String? initialExtras;
+  // Quick-view mode (tapping the product card, not the "+Add" button): shows
+  // a hero image + description + quantity stepper up front and never
+  // auto-skips itself, even for products with no variants/add-ons. Default
+  // (false) keeps the original compact "+Add" flow untouched.
+  final bool showProductInfo;
 
   const ProductOptionsDialog({
     Key? key,
@@ -29,6 +35,7 @@ class ProductOptionsDialog extends StatefulWidget {
     required this.onAddToCart,
     this.initialVariantInfo,
     this.initialExtras,
+    this.showProductInfo = false,
   }) : super(key: key);
 
   @override
@@ -56,6 +63,9 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
   String finalPrice = "0.0";
   String finalDisPrice = "0.0";
   bool isLoading = true;
+
+  // Only used when widget.showProductInfo is true.
+  int _quantity = 1;
 
   // ── Validation error ──────────────────────────────────────────────────────
   String? _msError;
@@ -430,10 +440,171 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
         }
       }
 
-      widget.onAddToCart(updatedProduct, totalPrice);
+      widget.onAddToCart(updatedProduct, totalPrice, _quantity);
     } catch (e) {
       debugPrint("ProductOptionsDialog._addToCart error: $e");
     }
+  }
+
+  void _updateQuantity(int delta) {
+    setState(() => _quantity = (_quantity + delta).clamp(1, 20));
+  }
+
+  // ── Quick-view header (showProductInfo mode) ───────────────────────────────
+  // Hero image + close button + veg/discount badges + title/price/description.
+  // Replaces the compact thumbnail header used by the "+Add" quick-add flow.
+  Widget _buildProductInfoHeader(BuildContext context) {
+    final isDark = isDarkMode(context);
+    final product = widget.productModel;
+    final disPrice = product.disPrice ?? '0';
+    final hasDiscount = disPrice.isNotEmpty &&
+        disPrice != "0" &&
+        double.tryParse(disPrice) != null &&
+        double.parse(disPrice) > 0;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        ClipRRect(
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+          // Matches the vendor's fixed 16:9 upload crop exactly, so the box
+          // never re-crops an already-cropped photo — see image_crop_16x9.dart.
+          child: AspectRatio(
+            aspectRatio: 16 / 9,
+            child: Stack(
+            children: [
+              NetworkImageWidget(
+                imageUrl: product.photo.toString(),
+                fit: BoxFit.cover,
+                width: double.infinity,
+                height: double.infinity,
+              ),
+              Positioned(
+                top: 12,
+                right: 12,
+                child: GestureDetector(
+                  onTap: () => Navigator.of(context).pop(),
+                  child: Container(
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.4),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(Icons.close, size: 18, color: Colors.white),
+                  ),
+                ),
+              ),
+              Positioned(
+                left: 12,
+                bottom: 12,
+                child: Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(3),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        border: Border.all(
+                          color: product.nonveg ? AppThemeData.error500 : const Color(0xFF10B981),
+                          width: 1.5,
+                        ),
+                        borderRadius: BorderRadius.circular(3),
+                      ),
+                      child: Container(
+                        width: 7, height: 7,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: product.nonveg ? AppThemeData.error500 : const Color(0xFF10B981),
+                        ),
+                      ),
+                    ),
+                    if (hasDiscount) ...[
+                      const SizedBox(width: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: AppThemeData.primary500,
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: Text(
+                          '${_discountPercent(product)}% OFF'.tr(),
+                          style: const TextStyle(
+                            fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+            ),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                product.name,
+                style: TextStyle(
+                  // 21 (2026-07-20, was 19) - explicit readability request.
+                  fontSize: 21, fontWeight: FontWeight.bold,
+                  color: isDark ? AppThemeData.grey50 : AppThemeData.grey900,
+                  fontFamily: AppThemeData.semiBold,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text(
+                    amountShow(
+                        amount: productCommissionPrice(hasDiscount ? disPrice : product.price)),
+                    style: const TextStyle(
+                      fontSize: 18, fontWeight: FontWeight.bold, color: AppThemeData.primary500,
+                    ),
+                  ),
+                  if (hasDiscount) ...[
+                    const SizedBox(width: 8),
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 2),
+                      child: Text(
+                        amountShow(amount: productCommissionPrice(product.price)),
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: isDark ? AppThemeData.grey500 : AppThemeData.grey400,
+                          decoration: TextDecoration.lineThrough,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+              if (product.description.trim().isNotEmpty) ...[
+                const SizedBox(height: 10),
+                Text(
+                  product.description,
+                  style: TextStyle(
+                    // 15 (2026-07-20, was 13) - explicit readability request.
+                    fontSize: 15, height: 1.4,
+                    color: isDark ? AppThemeData.grey400 : AppThemeData.grey600,
+                    fontFamily: AppThemeData.regular,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  String _discountPercent(ProductModel product) {
+    final price = double.tryParse(product.price) ?? 0;
+    final disPrice = double.tryParse(product.disPrice ?? '0') ?? 0;
+    if (price <= 0 || disPrice <= 0 || disPrice >= price) return '0';
+    return (((price - disPrice) / price) * 100).round().toString();
   }
 
   Future<void> _saveNewVariantSelections() async {
@@ -486,9 +657,12 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
 
   @override
   Widget build(BuildContext context) {
-    if (!_hasNewVariants && !_hasLegacyVariants && !_hasAddOns) {
+    if (!widget.showProductInfo &&
+        !_hasNewVariants &&
+        !_hasLegacyVariants &&
+        !_hasAddOns) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        widget.onAddToCart(widget.productModel, totalPrice);
+        widget.onAddToCart(widget.productModel, totalPrice, 1);
       });
       return const SizedBox.shrink();
     }
@@ -505,71 +679,75 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // Handle bar
-          Padding(
-            padding: const EdgeInsets.only(top: 12, bottom: 0),
-            child: Container(
-              width: 40, height: 4,
-              decoration: BoxDecoration(
-                color: isDarkMode(context) ? AppThemeData.grey600 : AppThemeData.grey300,
-                borderRadius: BorderRadius.circular(2),
+          if (widget.showProductInfo)
+            _buildProductInfoHeader(context)
+          else ...[
+            // Handle bar
+            Padding(
+              padding: const EdgeInsets.only(top: 12, bottom: 0),
+              child: Container(
+                width: 40, height: 4,
+                decoration: BoxDecoration(
+                  color: isDarkMode(context) ? AppThemeData.grey600 : AppThemeData.grey300,
+                  borderRadius: BorderRadius.circular(2),
+                ),
               ),
             ),
-          ),
-          // Header
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(10),
-                  child: NetworkImageWidget(
-                    imageUrl: widget.productModel.photo.toString(),
-                    fit: BoxFit.cover, height: 60, width: 60,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        widget.productModel.name,
-                        style: TextStyle(
-                          fontSize: 17, fontWeight: FontWeight.bold,
-                          color: isDarkMode(context) ? AppThemeData.grey50 : AppThemeData.grey900,
-                          fontFamily: AppThemeData.semiBold,
-                        ),
-                        maxLines: 2, overflow: TextOverflow.ellipsis,
-                      ),
-                      const SizedBox(height: 3),
-                      Text(
-                        "Customize your order".tr(),
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: isDarkMode(context) ? AppThemeData.grey400 : AppThemeData.grey600,
-                          fontFamily: AppThemeData.regular,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                GestureDetector(
-                  onTap: () => Navigator.of(context).pop(),
-                  child: Container(
-                    padding: const EdgeInsets.all(6),
-                    decoration: BoxDecoration(
-                      color: isDarkMode(context) ? AppThemeData.grey800 : AppThemeData.grey100,
-                      shape: BoxShape.circle,
+            // Header
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(10),
+                    child: NetworkImageWidget(
+                      imageUrl: widget.productModel.photo.toString(),
+                      fit: BoxFit.cover, height: 60, width: 60,
                     ),
-                    child: Icon(Icons.close, size: 18,
-                        color: isDarkMode(context) ? AppThemeData.grey300 : AppThemeData.grey700),
                   ),
-                ),
-              ],
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          widget.productModel.name,
+                          style: TextStyle(
+                            fontSize: 17, fontWeight: FontWeight.bold,
+                            color: isDarkMode(context) ? AppThemeData.grey50 : AppThemeData.grey900,
+                            fontFamily: AppThemeData.semiBold,
+                          ),
+                          maxLines: 2, overflow: TextOverflow.ellipsis,
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          "Customize your order".tr(),
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: isDarkMode(context) ? AppThemeData.grey400 : AppThemeData.grey600,
+                            fontFamily: AppThemeData.regular,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  GestureDetector(
+                    onTap: () => Navigator.of(context).pop(),
+                    child: Container(
+                      padding: const EdgeInsets.all(6),
+                      decoration: BoxDecoration(
+                        color: isDarkMode(context) ? AppThemeData.grey800 : AppThemeData.grey100,
+                        shape: BoxShape.circle,
+                      ),
+                      child: Icon(Icons.close, size: 18,
+                          color: isDarkMode(context) ? AppThemeData.grey300 : AppThemeData.grey700),
+                    ),
+                  ),
+                ],
+              ),
             ),
-          ),
+          ],
           Divider(height: 20, thickness: 1, color: divColor),
           // Scrollable content
           Flexible(
@@ -625,6 +803,59 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
                       ),
                     ),
                   ],
+                  if (widget.showProductInfo) ...[
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 12),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Container(
+                            decoration: BoxDecoration(
+                              border: Border.all(
+                                color: isDarkMode(context) ? AppThemeData.grey700 : AppThemeData.grey300,
+                                width: 1.5,
+                              ),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                GestureDetector(
+                                  onTap: () => _updateQuantity(-1),
+                                  child: Container(
+                                    width: 40, height: 40,
+                                    alignment: Alignment.center,
+                                    child: Icon(Icons.remove,
+                                        size: 16,
+                                        color: isDarkMode(context) ? AppThemeData.grey300 : AppThemeData.grey700),
+                                  ),
+                                ),
+                                SizedBox(
+                                  width: 32,
+                                  child: Text(
+                                    '$_quantity',
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(
+                                      fontSize: 15, fontWeight: FontWeight.bold,
+                                      color: isDarkMode(context) ? AppThemeData.grey50 : AppThemeData.grey900,
+                                    ),
+                                  ),
+                                ),
+                                GestureDetector(
+                                  onTap: () => _updateQuantity(1),
+                                  child: Container(
+                                    width: 40, height: 40,
+                                    alignment: Alignment.center,
+                                    child: const Icon(Icons.add, size: 16, color: AppThemeData.primary500),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                   Row(
                 children: [
                   Expanded(
@@ -642,7 +873,9 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          amountShow(amount: totalPrice.toStringAsFixed(2)),
+                          amountShow(
+                              amount: (totalPrice * (widget.showProductInfo ? _quantity : 1))
+                                  .toStringAsFixed(2)),
                           style: const TextStyle(
                             fontSize: 20, fontWeight: FontWeight.bold,
                             color: AppThemeData.primary500,

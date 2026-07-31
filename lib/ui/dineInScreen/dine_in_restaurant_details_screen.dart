@@ -10,6 +10,9 @@ import 'package:emartconsumer/model/User.dart';
 import 'package:emartconsumer/model/topupTranHistory.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/behavior/behavior_counters.dart';
+import 'package:emartconsumer/services/behavior/behavior_event_types.dart';
+import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/rozorpayConroller.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
@@ -75,6 +78,23 @@ class _DineInRestaurantDetailsScreenState
     end: Alignment.bottomRight,
   );
 
+  // Interest-duration signal, mirroring newVendorProductsScreen.dart's
+  // dwell timer — single bounded Timer, fires once, cancelled in dispose()
+  // if left early. Never a repeating/continuous timer.
+  Timer? _dwellTimer;
+
+  // Restaurant Engagement session (Phase 2, 2026-07-24, collection-only) -
+  // a lighter version of NewVendorProductsScreen's own: this screen is a
+  // dine-in booking flow (date/slot/guest picker), not a product menu, so
+  // there is no product-view/add-to-cart signal to collect here - only
+  // entry source + how long the customer spent on this screen. See
+  // newVendorProductsScreen.dart's _trackRestaurantSessionEnded for the
+  // full-featured sibling.
+  String _restaurantSessionId = '';
+  String _sessionEntrySource = 'Direct';
+  DateTime? _sessionStartedAt;
+  bool _sessionEndFired = false;
+
   @override
   void initState() {
     super.initState();
@@ -94,12 +114,55 @@ class _DineInRestaurantDetailsScreenState
             curve: Curves.easeInOut);
       });
     }
+
+    _sessionStartedAt = DateTime.now();
+    final session = BehaviorTracker.startRestaurantSession(widget.vendorModel.id);
+    _restaurantSessionId = session.sessionId;
+    _sessionEntrySource = session.entrySource;
+
+    // ignore: unawaited_futures
+    _trackRestaurantOpened();
+    _dwellTimer = Timer(const Duration(seconds: kDwellThresholdSeconds), () {
+      BehaviorTracker.track(
+          kEvtRestaurantInterest, {'vendorId': widget.vendorModel.id});
+    });
+  }
+
+  Future<void> _trackRestaurantOpened() async {
+    final visitCount =
+        await BehaviorCounters.increment('restaurant_visit', widget.vendorModel.id);
+    BehaviorTracker.track(kEvtRestaurantOpened, {
+      'vendorId': widget.vendorModel.id,
+      'cuisineIds': widget.vendorModel.cuisineIds,
+      'visitCount': visitCount,
+      'orderMode': 'Dining',
+    });
+  }
+
+  void _trackRestaurantSessionEnded() {
+    if (_sessionEndFired || _restaurantSessionId.isEmpty) return;
+    _sessionEndFired = true;
+    final startedAt = _sessionStartedAt ?? DateTime.now();
+    BehaviorTracker.track(kEvtRestaurantSessionEnded, {
+      'vendorId': widget.vendorModel.id,
+      'sessionId': _restaurantSessionId,
+      'entrySource': _sessionEntrySource,
+      'searchKeyword': '',
+      'searchType': '',
+      'startedAt': startedAt.toIso8601String(),
+      'menuDurationSeconds': DateTime.now().difference(startedAt).inSeconds,
+      'productViewCount': 0,
+      'categoriesBrowsedCount': 0,
+      'addToCartCount': 0,
+    });
   }
 
   @override
   void dispose() {
+    _trackRestaurantSessionEnded();
     _headerTimer?.cancel();
     _headerCtrl.dispose();
+    _dwellTimer?.cancel();
     super.dispose();
   }
 
@@ -357,12 +420,16 @@ class _DineInRestaurantDetailsScreenState
           const SizedBox(height: 6),
           Row(
             children: [
-              if (vendor.cuisineType.isNotEmpty) ...[
+              if (vendor.cuisineNames.isNotEmpty) ...[
                 Icon(Icons.restaurant_menu, size: 14, color: Colors.grey.shade500),
                 const SizedBox(width: 4),
-                Text(vendor.cuisineType,
-                    style: TextStyle(
-                        fontSize: 13, color: dark ? Colors.white60 : Colors.grey.shade600)),
+                Expanded(
+                  child: Text(vendor.cuisineNames.join(' · '),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                          fontSize: 13, color: dark ? Colors.white60 : Colors.grey.shade600)),
+                ),
                 const SizedBox(width: 12),
               ],
               Icon(Icons.location_on_outlined, size: 14, color: Colors.grey.shade500),

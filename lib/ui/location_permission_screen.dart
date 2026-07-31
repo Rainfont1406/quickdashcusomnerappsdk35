@@ -17,11 +17,11 @@ import 'package:emartconsumer/ui/auth_screen/auth_widgets.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/ui/auth_screen/login_screen.dart';
 import 'package:emartconsumer/ui/container/ContainerScreen.dart';
+import 'package:flutter_google_maps_webservices/places.dart' show Component;
 import 'package:geocoding/geocoding.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:google_maps_place_picker_mb/google_maps_place_picker.dart';
-import 'package:uuid/uuid.dart';
 import 'package:firebase_auth/firebase_auth.dart' as auth;
 import 'package:provider/provider.dart';
 import 'deliveryAddressScreen/DeliveryAddressScreen.dart';
@@ -127,42 +127,6 @@ class _LocationPermissionScreenState extends State<LocationPermissionScreen> {
     }
   }
 
-  Future<void> _onUseCurrentLocation() async {
-    checkPermission(() async {
-      await showProgress("Please wait...".tr(), false);
-      AddressModel addressModel = AddressModel();
-      try {
-        await Geolocator.requestPermission();
-        await Geolocator.getCurrentPosition();
-        await hideProgress();
-        Position newLocalData = await Geolocator.getCurrentPosition(
-            desiredAccuracy: LocationAccuracy.high);
-        await placemarkFromCoordinates(
-                newLocalData.latitude, newLocalData.longitude)
-            .then((valuePlaceMaker) {
-          Placemark placeMark = valuePlaceMaker[0];
-          setState(() {
-            addressModel.id = Uuid().v4();
-            addressModel.location = UserLocation(
-                latitude: newLocalData.latitude,
-                longitude: newLocalData.longitude);
-            String currentLocation =
-                "${placeMark.name}, ${placeMark.subLocality}, ${placeMark.locality}, ${placeMark.administrativeArea}, ${placeMark.postalCode}, ${placeMark.country}";
-            addressModel.locality = currentLocation;
-          });
-        });
-        setState(() {});
-        MyAppState.selectedPosotion = addressModel;
-        await _autoSelectFirstServiceAndNavigate();
-      } catch (e) {
-        // GPS failed — proceed without a location so the user must
-        // pick their address manually. No hardcoded fallback.
-        await hideProgress();
-        await _autoSelectFirstServiceAndNavigate();
-      }
-    }, context);
-  }
-
   Future<void> _onSetFromMap() async {
     checkPermission(() async {
       await showProgress("Please wait...".tr(), false);
@@ -213,6 +177,8 @@ class _LocationPermissionScreenState extends State<LocationPermissionScreen> {
                 zoomControlsEnabled: true,
                 initialMapType: MapType.terrain,
                 resizeToAvoidBottomInset: false,
+                // Hard filter: only Indian results are returned at all.
+                autocompleteComponents: [Component(Component.country, 'in')],
               ),
             ),
           );
@@ -289,15 +255,11 @@ class _LocationPermissionScreenState extends State<LocationPermissionScreen> {
               const SizedBox(height: 40),
 
               // ── Primary button ──────────────────────────────────────
+              // "Use Current Location" was removed — the map screen this
+              // opens already has its own current-location button plus
+              // search and manual pin-drop, so it covered every case the
+              // standalone button did and more. One button, not two.
               AuthPrimaryButton(
-                label: 'Use Current Location'.tr(),
-                onTap: _onUseCurrentLocation,
-              ),
-
-              const SizedBox(height: 12),
-
-              // ── Secondary button ────────────────────────────────────
-              AuthOutlinedButton(
                 label: 'Set from Map'.tr(),
                 onTap: _onSetFromMap,
               ),

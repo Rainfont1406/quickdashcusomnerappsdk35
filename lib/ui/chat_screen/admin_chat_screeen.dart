@@ -21,7 +21,9 @@ class _AdminChatScreenState extends State<AdminChatScreen> {
   final TextEditingController _controller = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   late final String _userId;
-  bool _isSending = false;
+  // Stream is created once in initState so setState calls never tear it down.
+  late final Stream<QuerySnapshot> _messagesStream;
+  bool _initialScrollDone = false;
 
   static const _quickOptions = [
     'My order is delayed',
@@ -39,7 +41,15 @@ class _AdminChatScreenState extends State<AdminChatScreen> {
     _userId = MyAppState.currentUser?.userID.isNotEmpty == true
         ? MyAppState.currentUser!.userID
         : (FirebaseAuth.instance.currentUser?.uid ?? '');
-    debugPrint('AdminChat DEBUG: _userId=$_userId orderId=${widget.orderId}');
+
+    var query = FirebaseFirestore.instance
+        .collection('messages')
+        .where('userId', isEqualTo: _userId);
+    if (widget.orderId?.isNotEmpty ?? false) {
+      query = query.where('orderId', isEqualTo: widget.orderId);
+    }
+    _messagesStream = query.snapshots();
+
     if (widget.initialMessage?.isNotEmpty ?? false) {
       _controller.text = widget.initialMessage!;
     }
@@ -58,10 +68,12 @@ class _AdminChatScreenState extends State<AdminChatScreen> {
     return '#${id.length >= 8 ? id.substring(id.length - 8).toUpperCase() : id.toUpperCase()}';
   }
 
+  bool _sending = false;
+
   Future<void> _send(String text) async {
     final content = text.trim();
-    if (content.isEmpty || _isSending) return;
-    setState(() => _isSending = true);
+    if (content.isEmpty || _sending) return;
+    _sending = true;
     _controller.clear();
     try {
       await FirebaseFirestore.instance.collection('messages').add({
@@ -74,7 +86,8 @@ class _AdminChatScreenState extends State<AdminChatScreen> {
         'isNewMsgCustomer': false,
         'isNewMsgAdmin': true,
       });
-      _scrollToBottom();
+      // Scroll is handled by the stream's postFrameCallback when the new
+      // message arrives — no setState, no competing animateTo here.
     } catch (e) {
       debugPrint('AdminChat send error: $e');
       if (mounted) {
@@ -83,19 +96,13 @@ class _AdminChatScreenState extends State<AdminChatScreen> {
         );
       }
     }
-    if (mounted) setState(() => _isSending = false);
+    _sending = false;
   }
 
-  void _scrollToBottom() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients) {
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 280),
-          curve: Curves.easeOut,
-        );
-      }
-    });
+  bool _isNearBottom() {
+    if (!_scrollController.hasClients) return true;
+    final pos = _scrollController.position;
+    return pos.pixels >= pos.maxScrollExtent - 120;
   }
 
   // ── Build ──────────────────────────────────────────────────────────────────
@@ -193,16 +200,8 @@ class _AdminChatScreenState extends State<AdminChatScreen> {
   // ── Message area ───────────────────────────────────────────────────────────
 
   Widget _buildMessageArea(bool dark) {
-    // Filter by both userId and orderId so chips are per-conversation, not per-user.
-    var query = FirebaseFirestore.instance
-        .collection('messages')
-        .where('userId', isEqualTo: _userId);
-    if (widget.orderId?.isNotEmpty ?? false) {
-      query = query.where('orderId', isEqualTo: widget.orderId);
-    }
-
     return StreamBuilder<QuerySnapshot>(
-      stream: query.snapshots(),
+      stream: _messagesStream,
       builder: (context, snapshot) {
         final loading = snapshot.connectionState == ConnectionState.waiting;
         final msgs = (snapshot.data?.docs ?? [])
@@ -218,12 +217,17 @@ class _AdminChatScreenState extends State<AdminChatScreen> {
             return at.compareTo(bt);
           });
 
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (_scrollController.hasClients && msgs.isNotEmpty) {
-            _scrollController
-                .jumpTo(_scrollController.position.maxScrollExtent);
-          }
-        });
+        // Scroll to bottom on first load, or when user is already near bottom.
+        // Never force-scroll when user has scrolled up to read history.
+        if (!_initialScrollDone || _isNearBottom()) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (_scrollController.hasClients && msgs.isNotEmpty) {
+              _scrollController
+                  .jumpTo(_scrollController.position.maxScrollExtent);
+              _initialScrollDone = true;
+            }
+          });
+        }
 
         return ListView(
           controller: _scrollController,
@@ -643,38 +647,23 @@ class _AdminChatScreenState extends State<AdminChatScreen> {
           ),
           const SizedBox(width: 10),
           GestureDetector(
-            onTap: _isSending ? null : () => _send(_controller.text),
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 150),
+            onTap: () => _send(_controller.text),
+            child: Container(
               width: 46,
               height: 46,
               decoration: BoxDecoration(
-                color: _isSending
-                    ? AppThemeData.primary500.withValues(alpha: 0.55)
-                    : AppThemeData.primary500,
+                color: AppThemeData.primary500,
                 borderRadius: BorderRadius.circular(14),
-                boxShadow: _isSending
-                    ? []
-                    : [
-                        BoxShadow(
-                          color:
-                              AppThemeData.primary500.withValues(alpha: 0.35),
-                          blurRadius: 10,
-                          offset: const Offset(0, 4),
-                        ),
-                      ],
+                boxShadow: [
+                  BoxShadow(
+                    color: AppThemeData.primary500.withValues(alpha: 0.35),
+                    blurRadius: 10,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
               ),
-              child: _isSending
-                  ? const Padding(
-                      padding: EdgeInsets.all(13),
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        valueColor:
-                            AlwaysStoppedAnimation(Colors.white),
-                      ),
-                    )
-                  : const Icon(Icons.send_rounded,
-                      color: Colors.white, size: 20),
+              child: const Icon(Icons.send_rounded,
+                  color: Colors.white, size: 20),
             ),
           ),
         ],

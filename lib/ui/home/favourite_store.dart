@@ -4,6 +4,7 @@ import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/FavouriteModel.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:flutter/material.dart';
@@ -143,10 +144,13 @@ class _FavouriteStoreScreenState extends State<FavouriteStoreScreen> with Single
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 10),
       child: GestureDetector(
-        onTap: () => push(
-          context,
-          NewVendorProductsScreen(vendorModel: vendorModel),
-        ),
+        onTap: () {
+          BehaviorTracker.setNextEntrySource('Favourites');
+          push(
+            context,
+            NewVendorProductsScreen(vendorModel: vendorModel),
+          );
+        },
         child: Container(
           clipBehavior: Clip.antiAlias,
           decoration: ShapeDecoration(

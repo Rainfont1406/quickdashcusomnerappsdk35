@@ -8,6 +8,7 @@ import 'package:easy_localization/easy_localization.dart'; // also re-exports in
 import 'package:emartconsumer/model/CurrencyModel.dart';
 import 'package:emartconsumer/model/SectionModel.dart';
 import 'package:emartconsumer/model/User.dart';
+import 'package:emartconsumer/model/VendorCategoryModel.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/model/mail_setting.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
@@ -61,6 +62,11 @@ const RENTALVEHICLETYPE = 'rental_vehicle_type';
 const REPORTS = 'reports';
 const Deliverycharge = 6;
 const CATEGORIES = 'vendor_categories';
+// Admin-managed Business Context master data (2026-07-19) - Restaurant
+// Type/Cuisine -> preferred Product Category IDs, consumed by
+// RecommendationEngine. See FirebaseHelper.getBusinessContext.
+const BUSINESS_CONTEXT_TYPE_PROFILES = 'business_context_type_profiles';
+const BUSINESS_CONTEXT_CUISINE_AFFINITY = 'business_context_cuisine_affinity';
 const VENDORS = 'vendors';
 const PRODUCTS = 'vendor_products';
 const SECTION = 'sections';
@@ -156,6 +162,11 @@ const PARCELCATEGORY = "parcel_categories";
 const PARCELWEIGHT = "parcel_weight";
 
 const Setting = 'settings';
+// Safe-fields-only mirror of gateway settings (public key + enabled flags,
+// never a secret) - kept in sync by the mirrorRazorpayPublicSettings Cloud
+// Function. settings/razorpaySettings itself is admin-only now that its
+// secret is no longer publicly readable.
+const SettingPublic = 'settings_public';
 const StripeSetting = 'stripeSettings';
 const FavouriteStore = "favorite_vendor";
 const FavouriteItem = "favorite_item";
@@ -172,6 +183,18 @@ const STORAGE_ROOT = 'emart';
 CurrencyModel? currencyData;
 SectionModel? sectionConstantModel;
 List<VendorModel> allstoreList = [];
+// Product-level category master list (vendor_categories, scoped to the
+// current section) — populated once by HomeScreen.getBanner()'s existing
+// getCuisines() call (same collection AddOrUpdateProductScreen's per-item
+// category picker reads). Shared globally, same lifecycle/pattern as
+// allstoreList above, so SearchScreen's "Product Category" search tier can
+// reuse it instead of firing its own independent query.
+List<VendorCategoryModel> allProductCategoriesList = [];
+// O(1) lookup companion to allProductCategoriesList above (2026-07-21,
+// Category-Based Pairing Configuration) - rebuilt every time that list is,
+// right alongside it, so nothing ever has to linear-scan the category list
+// per product tap. See newVendorProductsScreen.dart's _resolvedPairsWellWith.
+Map<String, VendorCategoryModel> productCategoryById = {};
 
 // Live, app-wide Delivery-mode gate. Updated by a single Firestore listener
 // started in ContainerScreen (not per-screen), so every screen that gates
@@ -488,7 +511,25 @@ String getImageVAlidUrl(String? url) {
   if (url != null && url.isNotEmpty) {
     imageUrl = url;
   }
-  return imageUrl;
+  return bunnyOptimizedUrl(imageUrl);
+}
+
+// Bunny's Optimizer add-on (enabled 2026-07-30 on the production pull zone)
+// supports on-the-fly resizing via ?width=&quality= query params on any
+// cdn.quickdash.co.in URL — see IMAGE_OPTIMIZATION_AUDIT.md. This is the
+// dominant chokepoint (getImageVAlidUrl is called from ~22 files) so a single
+// change here covers nearly every image in the app. 800px is a deliberately
+// generic, safe-for-most-contexts cap (thumbnails/cards/avatars all display
+// well under this) — narrower than an ideal per-widget size in some cases,
+// but converts what were previously 1-5MB originals into a consistently
+// moderate size everywhere, without touching every call site's widget code.
+// Only Bunny URLs understand these params; Firebase Storage URLs (still in
+// use for some legacy images) are left untouched.
+String bunnyOptimizedUrl(String url, {int width = 800, int quality = 80}) {
+  if (!url.contains('cdn.quickdash.co.in')) return url;
+  if (url.contains('width=')) return url; // already has explicit params — don't double up
+  final separator = url.contains('?') ? '&' : '?';
+  return '$url${separator}width=$width&quality=$quality';
 }
 
 MailSettings? mailSettings;

@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>QuickDash Customer App — Windows Build Setup</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff;
+    --fg: #1a1a1a;
+    --muted: #5b5b5b;
+    --border: #e2e2e2;
+    --code-bg: #f5f5f7;
+    --accent: #7C3AED;
+    --accent-bg: #f4edff;
+    --warn-bg: #fff8e6;
+    --warn-border: #f0c948;
+    --ok-bg: #eafaf0;
+    --ok-border: #34a853;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14141a;
+      --fg: #e8e8ec;
+      --muted: #a3a3ad;
+      --border: #2e2e38;
+      --code-bg: #1d1d26;
+      --accent: #b794f6;
+      --accent-bg: #241a38;
+      --warn-bg: #2a230f;
+      --warn-border: #a3821f;
+      --ok-bg: #12261a;
+      --ok-border: #2f8c53;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.55;
+    max-width: 920px;
+    margin: 0 auto;
+    padding: 2.5rem 1.5rem 5rem;
+  }
+  h1 { font-size: 1.8rem; margin-bottom: 0.25rem; }
+  .subtitle { color: var(--muted); margin-top: 0; margin-bottom: 2rem; font-size: 0.95rem; }
+  h2 {
+    font-size: 1.25rem;
+    margin-top: 2.5rem;
+    padding-bottom: 0.4rem;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  h2 .num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.6rem;
+    height: 1.6rem;
+    border-radius: 50%;
+    background: var(--accent-bg);
+    color: var(--accent);
+    font-size: 0.85rem;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+  h3 { font-size: 1rem; margin-top: 1.5rem; margin-bottom: 0.5rem; }
+  p { margin: 0.6rem 0; }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin: 0.3rem 0; }
+  code {
+    background: var(--code-bg);
+    padding: 0.15rem 0.4rem;
+    border-radius: 4px;
+    font-family: "SF Mono", Consolas, Menlo, monospace;
+    font-size: 0.88em;
+  }
+  pre {
+    background: var(--code-bg);
+    padding: 0.9rem 1rem;
+    border-radius: 8px;
+    overflow-x: auto;
+    font-size: 0.85rem;
+    line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0.8rem 0;
+    font-size: 0.9rem;
+  }
+  th, td {
+    text-align: left;
+    padding: 0.5rem 0.7rem;
+    border-bottom: 1px solid var(--border);
+  }
+  th { color: var(--muted); font-weight: 600; }
+  .callout {
+    border-radius: 8px;
+    padding: 0.9rem 1.1rem;
+    margin: 1rem 0;
+    border: 1px solid var(--border);
+  }
+  .callout.warn { background: var(--warn-bg); border-color: var(--warn-border); }
+  .callout.ok { background: var(--ok-bg); border-color: var(--ok-border); }
+  .callout strong { display: block; margin-bottom: 0.3rem; }
+  .checklist { list-style: none; padding-left: 0; }
+  .checklist li { padding-left: 1.7rem; position: relative; }
+  .checklist li::before {
+    content: "☐";
+    position: absolute;
+    left: 0;
+    color: var(--accent);
+  }
+  .toc { background: var(--code-bg); border-radius: 8px; padding: 1rem 1.3rem; }
+  .toc ul { margin: 0.3rem 0; }
+  .toc a { color: var(--fg); text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+  .muted { color: var(--muted); font-size: 0.88rem; }
+  footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); color: var(--muted); font-size: 0.82rem; }
+</style>
+</head>
+<body>
+
+<h1>QuickDash Customer App — Windows Build Setup</h1>
+<p class="subtitle">What a Windows machine needs to build <code>QuickDashCustomerApp</code> (Flutter), verified against this project's actual config — not generic Flutter boilerplate.</p>
+
+<div class="toc">
+  <strong>Contents</strong>
+  <ul>
+    <li><a href="#core-tools">1. Core tools</a></li>
+    <li><a href="#env-vars">2. Environment variables</a></li>
+    <li><a href="#android-sdk">3. Android SDK components</a></li>
+    <li><a href="#project-files">4. Project-specific files (not in git)</a></li>
+    <li><a href="#first-build">5. First-time build steps</a></li>
+    <li><a href="#build-commands">6. Build commands</a></li>
+    <li><a href="#device-testing">7. Device testing (ADB)</a></li>
+    <li><a href="#gotchas">8. Known gotchas</a></li>
+  </ul>
+</div>
+
+<h2><span class="num">1</span> Core tools <span id="core-tools"></span></h2>
+<table>
+  <tr><th>Tool</th><th>Version used</th><th>Notes</th></tr>
+  <tr><td>Flutter SDK</td><td>3.35.1 (stable channel)</td><td>Dart 3.9.0 bundled. Project's <code>pubspec.yaml</code> only requires Dart <code>&gt;=3.4.3 &lt;4.0.0</code>, but build this against the same stable channel to avoid version-solving surprises.</td></tr>
+  <tr><td>JDK</td><td>17</td><td><code>android/app/build.gradle</code> pins <code>sourceCompatibility</code>/<code>targetCompatibility</code>/<code>kotlinOptions.jvmTarget</code> to Java 17 explicitly.</td></tr>
+  <tr><td>Android SDK / Android Studio</td><td>SDK 35 (compile + target), min SDK 26</td><td>Android Studio is the easiest way to get the SDK manager; the IDE itself isn't required to build from the command line.</td></tr>
+  <tr><td>Gradle</td><td>8.7 (via wrapper)</td><td>Pulled automatically by <code>gradlew</code> — don't install Gradle manually.</td></tr>
+  <tr><td>Git</td><td>any recent</td><td>Git Bash also works fine as the build shell.</td></tr>
+</table>
+
+<h2><span class="num">2</span> Environment variables <span id="env-vars"></span></h2>
+<ul>
+  <li><code>ANDROID_HOME</code> (or <code>ANDROID_SDK_ROOT</code>) → e.g. <code>C:\Users\&lt;you&gt;\AppData\Local\Android\sdk</code></li>
+  <li><code>PATH</code> should include:
+    <ul>
+      <li><code>%ANDROID_HOME%\platform-tools</code> (gives you <code>adb</code>)</li>
+      <li><code>%ANDROID_HOME%\cmdline-tools\latest\bin</code></li>
+      <li>the Flutter SDK's own <code>bin</code> folder</li>
+    </ul>
+  </li>
+  <li><code>JAVA_HOME</code> → pointing at a JDK 17 install</li>
+</ul>
+<p class="muted">If <code>adb</code> isn't recognized in a fresh shell even after adding it to PATH, use the full path directly (<code>%ANDROID_HOME%\platform-tools\adb.exe</code>) rather than fighting shell PATH caching.</p>
+
+<h2><span class="num">3</span> Android SDK components <span id="android-sdk"></span></h2>
+<p>Install via Android Studio's SDK Manager (or <code>sdkmanager</code> CLI):</p>
+<ul class="checklist">
+  <li>Android SDK Platform 35</li>
+  <li>Android SDK Build-Tools (matching 35)</li>
+  <li>Android SDK Platform-Tools</li>
+  <li>Android SDK Command-line Tools</li>
+  <li>CMake 3.22.1 <span class="muted">— not something you need to manually install; the SDK manager auto-installs it the first time a build needs it (you'll see "Installing CMake 3.22.1" scroll by), just don't be alarmed when it happens mid-build</span></li>
+</ul>
+<p>Accept SDK licenses once: <code>flutter doctor --android-licenses</code></p>
+
+<h2><span class="num">4</span> Project-specific files (not in git) <span id="project-files"></span></h2>
+<div class="callout warn">
+  <strong>These are gitignored on purpose — you must obtain/create them separately per machine.</strong>
+  Ask whoever owns the Firebase project / signing keys for the real values.
+</div>
+
+<h3><code>android/local.properties</code></h3>
+<pre><code>sdk.dir=C:\\Users\\&lt;you&gt;\\AppData\\Local\\Android\\sdk
+flutter.sdk=C:\\src\\flutter
+flutter.buildMode=debug
+flutter.versionName=1.0.3
+flutter.versionCode=3
+GOOGLE_MAPS_API_KEY=&lt;your Google Maps API key&gt;
+RELEASE_STORE_FILE=../../upload-keystore.jks
+RELEASE_STORE_PASSWORD=&lt;keystore password&gt;
+RELEASE_KEY_ALIAS=upload
+RELEASE_KEY_PASSWORD=&lt;key password&gt;</code></pre>
+<p class="muted">Debug builds don't need a real keystore/passwords to run — those four <code>RELEASE_*</code> values only matter for a signed <code>--release</code> build. <code>sdk.dir</code>/<code>flutter.sdk</code> paths must match wherever you actually installed them on your machine.</p>
+
+<h3>Firebase config (two flavors, two files)</h3>
+<ul>
+  <li><code>android/app/google-services.json</code> — production Firebase project (<code>quick-dash-84f6a</code>)</li>
+  <li><code>android/app/src/staging/google-services.json</code> — staging Firebase project</li>
+</ul>
+
+<h3>Release signing keystore</h3>
+<p><code>upload-keystore.jks</code> — referenced from <code>local.properties</code> as <code>../../upload-keystore.jks</code> (i.e. sits at the Flutter project root, two levels up from <code>android/app/</code>). Only required for a signed release build, not for debug.</p>
+
+<h2><span class="num">5</span> First-time build steps <span id="first-build"></span></h2>
+<ol>
+  <li><code>flutter doctor</code> — confirm no blocking issues</li>
+  <li><code>flutter pub get</code> — resolve Dart dependencies</li>
+  <li>Create <code>android/local.properties</code> and drop in both <code>google-services.json</code> files as above</li>
+  <li>Run a debug build for a first sanity check (see next section)</li>
+</ol>
+
+<h2><span class="num">6</span> Build commands <span id="build-commands"></span></h2>
+<p>This app has two flavors — <code>production</code> and <code>staging</code> — the flavor flag is <strong>required</strong>, a bare <code>flutter run</code>/<code>flutter build</code> without it will not target the flavor you expect.</p>
+<pre><code># Debug APK, production flavor
+flutter build apk --debug --flavor production -t lib/main.dart
+
+# Debug APK, staging flavor
+flutter build apk --debug --flavor staging -t lib/main.dart
+
+# Release APK, production flavor (needs the real keystore values above)
+flutter build apk --release --flavor production -t lib/main.dart</code></pre>
+<p>Output lands in <code>build\app\outputs\flutter-apk\app-&lt;flavor&gt;-&lt;mode&gt;.apk</code>.</p>
+
+<h2><span class="num">7</span> Device testing (ADB) <span id="device-testing"></span></h2>
+<ul>
+  <li>Enable Developer Options + USB debugging on the test device</li>
+  <li><code>adb devices</code> should list it as <code>device</code> (not <code>unauthorized</code>/<code>offline</code>) — accept the on-device authorization prompt if it shows <code>unauthorized</code></li>
+  <li>Install a built APK: <code>adb install -r build\app\outputs\flutter-apk\app-production-debug.apk</code></li>
+  <li>If the device drops to <code>offline</code>/<code>unauthorized</code> mid-session: <code>adb kill-server &amp;&amp; adb start-server</code>, then re-accept the prompt</li>
+</ul>
+
+<h2><span class="num">8</span> Known gotchas <span id="gotchas"></span></h2>
+
+<div class="callout warn">
+  <strong>Disk space</strong>
+  Gradle's build cache (<code>~/.gradle/caches</code>) and pub cache can consume many GB. A build failing with a Jetifier/transform error mentioning "not enough space on the disk" means free up space, not a real config problem. Clearing <code>~/.gradle/caches</code> is always safe (regenerates automatically) — just fully stop any Gradle daemon first (<code>gradlew --stop</code>) or you'll get a half-deleted, corrupted cache that breaks the <em>next</em> build instead.
+</div>
+
+<div class="callout warn">
+  <strong><code>intl</code> version conflict</strong>
+  <code>pubspec.yaml</code>'s <code>intl</code> constraint must satisfy whatever <code>flutter_localizations</code> pins for your installed Flutter SDK version (Flutter 3.35.1 wants <code>intl ^0.20.2</code>). If <code>flutter pub get</code> fails with a version-solving error mentioning <code>intl</code>/<code>easy_localization</code>, bump the <code>intl</code> constraint in <code>pubspec.yaml</code> to match.
+</div>
+
+<div class="callout warn">
+  <strong><code>razorpay_flutter</code> compile error on newer Flutter engines</strong>
+  Versions before 1.4.0 use the removed Flutter v1 plugin-embedding API (<code>PluginRegistry.Registrar</code>) and fail with <code>cannot find symbol: class Registrar</code> on current Flutter engines. Project pins <code>^1.4.5</code> — don't downgrade below 1.4.0.
+</div>
+
+<div class="callout ok">
+  <strong>A successful build looks like this</strong>
+  A handful of harmless <code>google_api_headers</code> "default plugin" warnings are expected and safe to ignore — the actual signal is <code>√ Built build\app\outputs\flutter-apk\app-&lt;flavor&gt;-&lt;mode&gt;.apk</code> at the end.
+</div>
+
+<footer>
+  Generated from an actual verified build session on this project — versions/paths reflect the real config in <code>android/app/build.gradle</code>, <code>android/local.properties</code>, and <code>android/gradle/wrapper/gradle-wrapper.properties</code> at time of writing. Re-check against those files if this drifts out of date.
+</footer>
+
+</body>
+</html>

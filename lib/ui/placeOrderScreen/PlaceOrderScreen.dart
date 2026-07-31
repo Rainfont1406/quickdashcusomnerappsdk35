@@ -18,15 +18,26 @@ import 'package:provider/provider.dart';
 enum _OrderState { processing, success, error }
 
 class PlaceOrderScreen extends StatefulWidget {
-  final OrderModel orderModel;
+  /// Already-placed order — used by COD / wallet flows where Firestore write
+  /// happens before this screen is pushed.
+  final OrderModel? orderModel;
+
+  /// Factory that performs the Firestore write and returns the placed order.
+  /// Used by online payment flows (Razorpay etc.) so this screen is pushed
+  /// BEFORE the write, letting the loading animation run concurrently.
+  final Future<OrderModel> Function()? orderFactory;
+
   // true = payment already collected (Razorpay / online); shows payment-specific steps
   final bool isPaymentVerified;
 
   const PlaceOrderScreen({
     Key? key,
-    required this.orderModel,
+    this.orderModel,
+    this.orderFactory,
     this.isPaymentVerified = false,
-  }) : super(key: key);
+  })  : assert(orderModel != null || orderFactory != null,
+            'Provide either orderModel or orderFactory'),
+        super(key: key);
 
   @override
   _PlaceOrderScreenState createState() => _PlaceOrderScreenState();
@@ -38,6 +49,9 @@ class _PlaceOrderScreenState extends State<PlaceOrderScreen>
   _OrderState _orderState = _OrderState.processing;
   String? _errorMessage;
   bool _navigationStarted = false;
+
+  // Resolved order — null until _processOrder completes (orderFactory path)
+  OrderModel? _order;
 
   // ── Step messages ─────────────────────────────────────────────────────────
   int _currentStep = 0;
@@ -118,16 +132,27 @@ class _PlaceOrderScreenState extends State<PlaceOrderScreen>
   // ── Core logic ────────────────────────────────────────────────────────────
   Future<void> _processOrder() async {
     try {
-      // Clear cart (non-critical — order is already placed)
-      Provider.of<CartDatabase>(context, listen: false).deleteAllProducts();
-
-      // Fire notifications and email in background
-      _sendNotificationsBackground();
-
-      // Small delay so the animation is visible
-      await Future.delayed(const Duration(milliseconds: 2000));
+      if (widget.orderFactory != null) {
+        // Online payment path: place order concurrently with the loading animation.
+        // Enforce a minimum 2-second animation window so it doesn't flash by.
+        final start = DateTime.now();
+        _order = await widget.orderFactory!();
+        final elapsed = DateTime.now().difference(start).inMilliseconds;
+        final remaining = 2000 - elapsed;
+        if (remaining > 0) {
+          await Future.delayed(Duration(milliseconds: remaining));
+        }
+      } else {
+        // COD / wallet path: order is already placed, just animate
+        _order = widget.orderModel;
+        await Future.delayed(const Duration(milliseconds: 2000));
+      }
 
       if (!mounted) return;
+
+      // Clear cart and send notifications now that we have a resolved order
+      Provider.of<CartDatabase>(context, listen: false).deleteAllProducts();
+      _sendNotificationsBackground();
 
       _stepTimer?.cancel();
       _pulseCtrl.stop();
@@ -153,16 +178,15 @@ class _PlaceOrderScreenState extends State<PlaceOrderScreen>
 
   void _sendNotificationsBackground() {
     _sendVendorNotification().catchError((_) {});
-    FireStoreUtils.sendOrderEmail(orderModel: widget.orderModel)
+    FireStoreUtils.sendOrderEmail(orderModel: _order!)
         .catchError((_) {});
   }
 
   Future<void> _sendVendorNotification() async {
     try {
       // Always fetch the live token from Firestore — never use the
-      // cached value from widget.orderModel.vendor which may be stale
-      // (e.g. vendor logged out after customer opened the restaurant page).
-      final vendorId = widget.orderModel.vendor.id;
+      // cached value which may be stale (e.g. vendor logged out).
+      final vendorId = _order!.vendor.id;
       String liveToken = '';
       if (vendorId.isNotEmpty) {
         final doc = await FireStoreUtils.firestore
@@ -172,16 +196,18 @@ class _PlaceOrderScreenState extends State<PlaceOrderScreen>
         liveToken = (doc.data()?['fcmToken'] as String?) ?? '';
       }
 
-      // If vendor is logged out their token will be empty — skip silently
       if (liveToken.isEmpty) return;
 
+      final bool isBillPayAccept = _order!.billPayRequestId != null;
       final payload = <String, dynamic>{
-        'type': 'vendor_order',
-        'orderId': widget.orderModel.id,
+        'type': isBillPayAccept ? 'customer_bill_pay_response' : 'vendor_order',
+        'orderId': _order!.id,
+        if (isBillPayAccept) 'action': 'accepted',
+        if (isBillPayAccept) 'billPayRequestId': _order!.billPayRequestId,
       };
-      final type = widget.orderModel.scheduleTime != null
-          ? scheduleOrder
-          : orderPlaced;
+      final type = isBillPayAccept
+          ? billPayRequestAccepted
+          : (_order!.scheduleTime != null ? scheduleOrder : orderPlaced);
       SendNotification.sendFcmMessage(type, liveToken, payload);
     } catch (_) {}
   }
@@ -190,11 +216,11 @@ class _PlaceOrderScreenState extends State<PlaceOrderScreen>
     if (_navigationStarted || !mounted) return;
     _navigationStarted = true;
 
-    // Capture nav and orderModel before the first push — pushAndRemoveUntil
+    // Capture nav and order before the first push — pushAndRemoveUntil
     // deactivates this widget's context, so a second Navigator.of(context)
     // call would trigger the _dependents.isEmpty assertion.
     final nav = Navigator.of(context);
-    final orderModel = widget.orderModel;
+    final orderModel = _order;
 
     nav.pushAndRemoveUntil(
       MaterialPageRoute(
@@ -513,7 +539,7 @@ class _PlaceOrderScreenState extends State<PlaceOrderScreen>
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        '#${widget.orderModel.id}',
+                        '#${_order!.id}',
                         style: TextStyle(
                           fontSize: 13,
                           fontWeight: FontWeight.w700,
@@ -525,7 +551,7 @@ class _PlaceOrderScreenState extends State<PlaceOrderScreen>
                       ),
                       const SizedBox(height: 2),
                       Text(
-                        widget.orderModel.vendor.title,
+                        _order!.vendor.title,
                         style: TextStyle(
                           fontSize: 12,
                           color: dark

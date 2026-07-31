@@ -22,30 +22,32 @@ class OnBoardingController extends GetxController {
   RxList<OnBoardingModel> onBoardingList = <OnBoardingModel>[].obs;
 
   getOnBoardingData() async {
-    await FireStoreUtils.firestore.collection(Setting).doc("globalSettings").get().then((value) {
+    try {
+      final value = await FireStoreUtils.firestore
+          .collection(Setting)
+          .doc("globalSettings")
+          .get()
+          .timeout(const Duration(seconds: 10));
       if (value.exists) {
-        AppThemeData.primary300 = Color(int.parse(value.data()!['app_customer_color'].replaceFirst("#", "0xff")));
+        final rawColor = value.data()?['app_customer_color'];
+        if (rawColor is String && rawColor.isNotEmpty) {
+          try {
+            AppThemeData.primary300 = Color(int.parse(rawColor.replaceFirst("#", "0xff")));
+          } catch (e) {
+            debugPrint('OnBoarding: bad app_customer_color "$rawColor" -> $e');
+          }
+        }
       }
-    });
-    await FireStoreUtils.getOnBoardingList().then((value) {
+    } catch (e) {
+      debugPrint('OnBoarding: failed to load globalSettings -> $e');
+    }
+
+    try {
+      final value = await FireStoreUtils.getOnBoardingList().timeout(const Duration(seconds: 10));
       onBoardingList.value = value;
-    });
-    // onBoardingList.add(OnBoardingModel(
-    //     id: "",
-    //     title: "All-in-One Multi-Service App",
-    //     description: "Discover eMart, the ultimate platform for food delivery, on-demand eCommerce, parcel services, taxi booking, and car rentals—all in one app.",
-    //     image: "assets/images/image_1.png"));
-    // onBoardingList.add(OnBoardingModel(
-    //     id: "",
-    //     title: "Convenient & Captivating User Experience",
-    //     description:
-    //         "Enjoy eMart’s modern UI that makes navigating multiple services a breeze. Whether it’s booking a taxi or ordering groceries, every service is at your fingertips.",
-    //     image: "assets/images/image_2.png"));
-    // onBoardingList.add(OnBoardingModel(
-    //     id: "",
-    //     title: "From Shopping to Rides, We’ve Got You Covered",
-    //     description: "Manage vendors, orders, bookings, and transactions efficiently with a user-friendly interface.",
-    //     image: "assets/images/image_3.png"));
+    } catch (e) {
+      debugPrint('OnBoarding: failed to load onboarding list -> $e');
+    }
 
     isLoading.value = false;
     update();

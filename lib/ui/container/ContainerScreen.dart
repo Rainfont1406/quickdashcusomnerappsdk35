@@ -22,7 +22,6 @@ import 'package:emartconsumer/ui/dineInScreen/my_booking_screen.dart';
 import 'package:emartconsumer/ui/home/HomeScreen.dart';
 import 'package:emartconsumer/ui/home/favourite_item.dart';
 import 'package:emartconsumer/ui/home/favourite_store.dart';
-import 'package:emartconsumer/ui/location_permission_screen.dart';
 import 'package:emartconsumer/ui/mapView/MapViewScreen.dart';
 import 'package:emartconsumer/ui/ordersScreen/OrdersScreen.dart';
 import 'package:emartconsumer/ui/privacy_policy/privacy_policy.dart';
@@ -34,11 +33,9 @@ import 'package:emartconsumer/ui/wallet/walletScreen.dart';
 import 'package:emartconsumer/userPrefrence.dart';
 import 'package:emartconsumer/widget/userAvatar.dart';
 import 'package:firebase_auth/firebase_auth.dart' as auth;
-import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:provider/provider.dart';
-import 'package:emartconsumer/ui/contactUs/ContactUsScreen.dart';
 
 enum DrawerSelection {
   Dashboard,
@@ -60,8 +57,7 @@ enum DrawerSelection {
   privacyPolicy,
   LikedStore,
   LikedProduct,
-  giftCard,
-  contactUs
+  giftCard
 }
 
 class ContainerScreen extends StatefulWidget {
@@ -404,39 +400,9 @@ class _ContainerScreen extends State<ContainerScreen> with WidgetsBindingObserve
                   ),
                 ),
 
-                // Debug-only entry point to reach LocationPermissionScreen
-                // for design QA — that screen normally only shows once
-                // during onboarding, so there's no other way to get back to
-                // it without clearing app data. Never appears in a release
-                // build (kDebugMode is false there).
-                if (kDebugMode) ...[
-                  _sectionGap(dark),
-                  _sectionLabel('Debug', dark),
-                  _drawerItem(
-                    sel: DrawerSelection.Home,
-                    icon: Icons.bug_report_outlined,
-                    label: 'Location Screen (Debug)',
-                    dark: dark,
-                    onTap: () {
-                      Navigator.pop(context);
-                      push(context, const LocationPermissionScreen());
-                    },
-                  ),
-                ],
-
                 _sectionGap(dark),
 
                 _sectionLabel('Support & Legal', dark),
-                _drawerItem(
-                  sel: DrawerSelection.contactUs,
-                  icon: Icons.headset_mic_outlined,
-                  label: 'Contact Us',
-                  dark: dark,
-                  onTap: () {
-                    Navigator.pop(context);
-                    push(context, const ContactUsScreen());
-                  },
-                ),
                 _drawerItem(
                   sel: DrawerSelection.termsCondition,
                   icon: Icons.gavel_rounded,

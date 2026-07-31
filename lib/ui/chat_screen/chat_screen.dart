@@ -16,8 +16,6 @@ import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/fullScreenImageViewer/FullScreenImageViewer.dart';
 import 'package:emartconsumer/ui/fullScreenVideoViewer/FullScreenVideoViewer.dart';
-import 'package:emartconsumer/widget/firebase_pagination/src/firestore_pagination.dart';
-import 'package:emartconsumer/widget/firebase_pagination/src/models/view_type.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
@@ -56,18 +54,81 @@ class ChatScreens extends StatefulWidget {
 
 class _ChatScreensState extends State<ChatScreens> {
   final TextEditingController _messageController = TextEditingController();
-
   final ScrollController _controller = ScrollController();
   final FireStoreUtils _fireStoreUtils = FireStoreUtils();
   String? token;
+  late final Stream<QuerySnapshot> _chatStream;
+  bool _initialScrollDone = false;
+
+  // Messages added locally before Firestore confirms them — removed once the
+  // stream returns the same ID, giving instant display with no UI blocking.
+  final List<ConversationModel> _optimisticMessages = [];
 
   @override
   void initState() {
     super.initState();
     token = widget.token;
-    if (_controller.hasClients) {
-      Timer(const Duration(milliseconds: 500), () => _controller.jumpTo(_controller.position.maxScrollExtent));
+    _chatStream = FireStoreUtils.firestore
+        .collection(widget.chatType == "Driver"
+            ? 'chat_driver'
+            : widget.chatType == "Provider"
+                ? 'chat_provider'
+                : widget.chatType == "Worker"
+                    ? 'chat_worker'
+                    : 'chat_store')
+        .doc(widget.orderId)
+        .collection("thread")
+        .orderBy('createdAt', descending: false)
+        .snapshots();
+  }
+
+  // Returns "hh:mm a" for today/yesterday messages (the date-separator chip
+  // already provides the day context), and the full "MMM d, yyyy hh:mm a"
+  // for older messages.
+  String _formatTimestamp(Timestamp? ts) {
+    if (ts == null) return '';
+    final dt = ts.toDate();
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final msgDay = DateTime(dt.year, dt.month, dt.day);
+    if (msgDay == today || msgDay == today.subtract(const Duration(days: 1))) {
+      return DateFormat('hh:mm a').format(dt);
     }
+    return DateFormat('MMM d, yyyy hh:mm a').format(dt);
+  }
+
+  // Adds the message to the UI immediately, then writes to Firestore in the
+  // background. The stream will confirm it shortly after; at that point the
+  // optimistic entry is removed so no duplicate appears.
+  void _onSend() {
+    final text = _messageController.text.trim();
+    if (text.isEmpty) return;
+    final id = const Uuid().v4();
+    _messageController.clear();
+
+    setState(() {
+      _optimisticMessages.add(ConversationModel(
+        id: id,
+        message: text,
+        senderId: widget.customerId,
+        receiverId: widget.restaurantId,
+        createdAt: Timestamp.now(),
+        orderId: widget.orderId,
+        messageType: 'text',
+        videoThumbnail: '',
+      ));
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_controller.hasClients) _controller.jumpTo(_controller.position.maxScrollExtent);
+    });
+
+    _sendMessage(id, text, null, '', 'text').catchError((e) {
+      if (mounted) {
+        setState(() => _optimisticMessages.removeWhere((m) => m.id == id));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to send message')));
+      }
+    });
   }
 
   @override
@@ -105,69 +166,97 @@ class _ChatScreensState extends State<ChatScreens> {
           children: <Widget>[
             Expanded(
               child: GestureDetector(
-                onTap: () {
-                  FocusScope.of(context).unfocus();
-                  setState(() {
-                    // currentRecordingState = RecordingState.HIDDEN;
-                  });
-                },
-                child: FirestorePagination(
-                  controller: _controller,
-                  physics: const BouncingScrollPhysics(),
-                  itemBuilder: (context, documentSnapshots, index) {
-                    final ConversationModel inboxModel = ConversationModel.fromJson(
-                        documentSnapshots[index].data() as Map<String, dynamic>);
-                    final bool showSeparator;
-                    if (index == 0 || inboxModel.createdAt == null) {
-                      showSeparator = true;
-                    } else {
-                      final ConversationModel prev = ConversationModel.fromJson(
-                          documentSnapshots[index - 1].data() as Map<String, dynamic>);
-                      showSeparator = prev.createdAt == null ||
-                          !_isSameDay(
-                            prev.createdAt!.toDate(),
-                            inboxModel.createdAt!.toDate(),
-                          );
+                onTap: () => FocusScope.of(context).unfocus(),
+                child: StreamBuilder<QuerySnapshot>(
+                  stream: _chatStream,
+                  builder: (context, snapshot) {
+                    if (!snapshot.hasData) {
+                      return const Center(child: CircularProgressIndicator());
                     }
-                    return Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (showSeparator && inboxModel.createdAt != null)
-                          _buildDateSeparator(inboxModel.createdAt!.toDate()),
-                        chatItemView(
-                            inboxModel.senderId == MyAppState.currentUser!.userID,
-                            inboxModel),
-                      ],
+                    final docs = snapshot.data!.docs;
+
+                    // Build the confirmed list from Firestore
+                    final streamMsgs = docs
+                        .map((d) => ConversationModel.fromJson(d.data() as Map<String, dynamic>))
+                        .toList();
+
+                    // IDs the server has confirmed
+                    final confirmedIds = {
+                      for (final m in streamMsgs)
+                        if (m.id != null && m.id!.isNotEmpty) m.id!
+                    };
+
+                    // Drop confirmed optimistic entries (post-frame to avoid
+                    // calling setState during build).
+                    if (_optimisticMessages.any((m) => confirmedIds.contains(m.id))) {
+                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                        if (mounted) {
+                          setState(() {
+                            _optimisticMessages.removeWhere((m) => confirmedIds.contains(m.id));
+                          });
+                        }
+                      });
+                    }
+
+                    // Pending = optimistic messages not yet confirmed by the stream
+                    final pending = _optimisticMessages
+                        .where((m) => !confirmedIds.contains(m.id ?? ''))
+                        .toList();
+
+                    final allMsgs = [...streamMsgs, ...pending];
+
+                    if (allMsgs.isEmpty) {
+                      return Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.chat_bubble_outline_rounded, size: 72, color: AppThemeData.primary500.withValues(alpha: 0.35)),
+                            const SizedBox(height: 16),
+                            Text('No messages yet', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: AppThemeData.grey500)).tr(),
+                            const SizedBox(height: 6),
+                            Text('Send a message to start the conversation', style: TextStyle(fontSize: 13, color: AppThemeData.grey400)).tr(),
+                          ],
+                        ),
+                      );
+                    }
+                    if (!_initialScrollDone || _isNearBottom()) {
+                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                        if (_controller.hasClients) {
+                          _controller.jumpTo(_controller.position.maxScrollExtent);
+                          _initialScrollDone = true;
+                        }
+                      });
+                    }
+                    return ListView.builder(
+                      controller: _controller,
+                      physics: const BouncingScrollPhysics(),
+                      itemCount: allMsgs.length,
+                      itemBuilder: (context, index) {
+                        final inboxModel = allMsgs[index];
+                        final bool showSeparator;
+                        if (index == 0 || inboxModel.createdAt == null) {
+                          showSeparator = true;
+                        } else {
+                          final prev = allMsgs[index - 1];
+                          showSeparator = prev.createdAt == null ||
+                              !_isSameDay(
+                                prev.createdAt!.toDate(),
+                                inboxModel.createdAt!.toDate(),
+                              );
+                        }
+                        return Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (showSeparator && inboxModel.createdAt != null)
+                              _buildDateSeparator(inboxModel.createdAt!.toDate()),
+                            chatItemView(
+                                inboxModel.senderId == MyAppState.currentUser!.userID,
+                                inboxModel),
+                          ],
+                        );
+                      },
                     );
                   },
-                  onEmpty: Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(Icons.chat_bubble_outline_rounded, size: 72, color: AppThemeData.primary500.withValues(alpha: 0.35)),
-                        const SizedBox(height: 16),
-                        Text('No messages yet', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: AppThemeData.grey500)).tr(),
-                        const SizedBox(height: 6),
-                        Text('Send a message to start the conversation', style: TextStyle(fontSize: 13, color: AppThemeData.grey400)).tr(),
-                      ],
-                    ),
-                  ),
-                  // orderBy is compulsory to enable pagination
-                  query: FireStoreUtils.firestore
-                      .collection(widget.chatType == "Driver"
-                          ? 'chat_driver'
-                          : widget.chatType == "Provider"
-                              ? 'chat_provider'
-                              : widget.chatType == "Worker"
-                                  ? 'chat_worker'
-                                  : 'chat_store')
-                      .doc(widget.orderId)
-                      .collection("thread")
-                      .orderBy('createdAt', descending: false),
-                  //Change types customerId
-                  viewType: ViewType.list,
-                  // to fetch real-time data
-                  isLive: true,
                 ),
               ),
             ),
@@ -212,21 +301,7 @@ class _ChatScreensState extends State<ChatScreens> {
                             ),
                             hintText: 'Start typing ...'.tr(),
                           ),
-                          onSubmitted: (value) async {
-                            if (_messageController.text.isNotEmpty) {
-                              final text = _messageController.text;
-                              try {
-                                await _sendMessage(text, null, '', 'text');
-                                _messageController.clear();
-                                Timer(const Duration(milliseconds: 500), () => _controller.jumpTo(_controller.position.maxScrollExtent));
-                                setState(() {});
-                              } catch (e) {
-                                if (mounted) {
-                                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to send message: $e')));
-                                }
-                              }
-                            }
-                          },
+                          onSubmitted: (_) => _onSend(),
                         ),
                       )),
                       Container(
@@ -236,20 +311,7 @@ class _ChatScreensState extends State<ChatScreens> {
                           borderRadius: BorderRadius.circular(30),
                         ),
                         child: IconButton(
-                          onPressed: () async {
-                            if (_messageController.text.isNotEmpty) {
-                              final text = _messageController.text;
-                              try {
-                                await _sendMessage(text, null, '', 'text');
-                                _messageController.clear();
-                                setState(() {});
-                              } catch (e) {
-                                if (mounted) {
-                                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to send message: $e')));
-                                }
-                              }
-                            }
-                          },
+                          onPressed: _onSend,
                           icon: const Icon(Icons.send_rounded),
                           color: AppThemeData.primary500,
                         ),
@@ -266,6 +328,12 @@ class _ChatScreensState extends State<ChatScreens> {
 
   bool _isSameDay(DateTime a, DateTime b) =>
       a.year == b.year && a.month == b.month && a.day == b.day;
+
+  bool _isNearBottom() {
+    if (!_controller.hasClients) return true;
+    final pos = _controller.position;
+    return pos.maxScrollExtent - pos.pixels < 100;
+  }
 
   Widget _buildDateSeparator(DateTime date) {
     final now = DateTime.now();
@@ -380,9 +448,11 @@ class _ChatScreensState extends State<ChatScreens> {
                                 color: Colors.white,
                               ),
                             ),
-                  SizedBox(height: 5),
-                  Text(DateFormat('MMM d, yyyy hh:mm aa').format(DateTime.fromMillisecondsSinceEpoch(data.createdAt!.millisecondsSinceEpoch)),
-                      style: TextStyle(color: Colors.grey, fontSize: 12)),
+                  const SizedBox(height: 5),
+                  Text(
+                    _formatTimestamp(data.createdAt),
+                    style: TextStyle(color: Colors.grey, fontSize: 12),
+                  ),
                 ],
               ),
             )
@@ -452,16 +522,20 @@ class _ChatScreensState extends State<ChatScreens> {
                               ),
                   ],
                 ),
-                SizedBox(height: 5),
-                Text(DateFormat('MMM d, yyyy hh:mm aa').format(DateTime.fromMillisecondsSinceEpoch(data.createdAt!.millisecondsSinceEpoch)),
-                    style: TextStyle(color: Colors.grey, fontSize: 12)),
+                const SizedBox(height: 5),
+                Text(
+                  _formatTimestamp(data.createdAt),
+                  style: TextStyle(color: Colors.grey, fontSize: 12),
+                ),
               ],
             ),
     );
   }
 
-  _sendMessage(String message, Url? url, String videoThumbnail, String messageType) async {
-    InboxModel inboxModel = InboxModel(
+  // Writes inbox + chat in parallel (vs. the old sequential await-then-await),
+  // then fires the FCM push in the background.
+  Future<void> _sendMessage(String id, String message, Url? url, String videoThumbnail, String messageType) async {
+    final inboxModel = InboxModel(
         customerId: widget.customerId,
         customerName: widget.customerName,
         restaurantId: widget.restaurantId,
@@ -470,21 +544,11 @@ class _ChatScreensState extends State<ChatScreens> {
         orderId: widget.orderId,
         customerProfileImage: widget.customerProfileImage,
         restaurantProfileImage: widget.restaurantProfileImage,
-        lastMessage: _messageController.text,
+        lastMessage: message,
         chatType: widget.chatType);
 
-    if (widget.chatType == "Driver") {
-      await FireStoreUtils.addDriverInbox(inboxModel);
-    } else if (widget.chatType == "Provider") {
-      await FireStoreUtils.addProviderInbox(inboxModel);
-    } else if (widget.chatType == "Worker") {
-      await FireStoreUtils.addWorkerInbox(inboxModel);
-    } else {
-      await FireStoreUtils.addRestaurantInbox(inboxModel);
-    }
-
-    ConversationModel conversationModel = ConversationModel(
-        id: const Uuid().v4(),
+    final conversationModel = ConversationModel(
+        id: id,
         message: message,
         senderId: widget.customerId,
         receiverId: widget.restaurantId,
@@ -502,7 +566,7 @@ class _ChatScreensState extends State<ChatScreens> {
       } else if (url.mime.contains('audio')) {
         conversationModel.message = "sent A VoiceMessage".tr(args: ['${MyAppState.currentUser!.firstName} ${MyAppState.currentUser!.lastName}']);
       }
-    } else if (messageType.toString() != "text") {
+    } else if (messageType != "text") {
       conversationModel.message = messageType == "image"
           ? "sent An Image"
           : messageType == "video"
@@ -510,79 +574,95 @@ class _ChatScreensState extends State<ChatScreens> {
               : "sent A VoiceMessage";
     }
 
-    if (widget.chatType == "Driver") {
-      await FireStoreUtils.addDriverChat(conversationModel);
-    } else if (widget.chatType == "Provider") {
-      await FireStoreUtils.addProviderChat(conversationModel);
-    } else if (widget.chatType == "Worker") {
-      await FireStoreUtils.addWorkerChat(conversationModel);
-    } else {
-      await FireStoreUtils.addRestaurantChat(conversationModel);
-    }
-    Map<String, dynamic> payLoad = <String, dynamic>{};
-    if (widget.type == "cab_parcel_chat") {
-      User? driver = await FireStoreUtils.getCurrentUser(widget.restaurantId.toString());
-      token = driver?.fcmToken;
-      payLoad = {
-        "type": "cab_parcel_chat",
-        "customerName": widget.customerName.toString(),
-        "restaurantName": widget.restaurantName.toString(),
-        "orderId": widget.orderId,
-        "restaurantId": widget.restaurantId,
-        "customerId": widget.customerId,
-        "customerProfileImage": widget.customerProfileImage,
-        "restaurantProfileImage": widget.restaurantProfileImage,
-        "token": token,
-        "chatType": widget.chatType,
-      };
-    } else if (widget.type == "vendor_chat") {
-      OrderModel? orderModel;
-      await FireStoreUtils().getOrderById(widget.orderId).then((value) {
-        orderModel = value;
-      });
-      if (widget.chatType == "Restaurant") {
-        User? restaurantUser = await FireStoreUtils.getCurrentUser(orderModel!.vendor.author);
-        token = restaurantUser?.fcmToken;
-      } else {
-        User? driver = await FireStoreUtils.getCurrentUser(orderModel!.driverID.toString());
-        token = driver?.fcmToken;
-      }
-      payLoad = {
-        "type": "vendor_chat",
-        "customerName": widget.customerName.toString(),
-        "restaurantName": widget.restaurantName.toString(),
-        "orderId": widget.orderId,
-        "restaurantId": widget.restaurantId,
-        "customerId": widget.customerId,
-        "customerProfileImage": widget.customerProfileImage,
-        "restaurantProfileImage": widget.restaurantProfileImage,
-        "token": token,
-        "chatType": widget.chatType,
-      };
-    } else {
-      // Inbox screen
-      User? restaurantUser = await FireStoreUtils.getCurrentUser(widget.restaurantId.toString());
-      token = restaurantUser?.fcmToken;
-      payLoad = {
-        "customerName": widget.customerName.toString(),
-        "restaurantName": widget.restaurantName.toString(),
-        "orderId": widget.orderId,
-        "restaurantId": widget.restaurantId,
-        "customerId": widget.customerId,
-        "customerProfileImage": widget.customerProfileImage,
-        "restaurantProfileImage": widget.restaurantProfileImage,
-        "token": token,
-        "chatType": widget.chatType,
-      };
-    }
+    await Future.wait([
+      _writeInbox(inboxModel),
+      _writeChat(conversationModel),
+    ]);
 
-    if (token != null && token!.isNotEmpty) {
-      SendNotification.sendChatFcmMessage(
-          "${MyAppState.currentUser!.fullName()} ${messageType == "image" ? "sent image to you" : messageType == "video" ? "sent video to you" : "sent message to you"}",
-          conversationModel.message.toString(),
-          token.toString(),
-          payLoad);
-    }
+    _sendNotificationInBackground(conversationModel, messageType);
+  }
+
+  Future<void> _writeInbox(InboxModel inboxModel) {
+    if (widget.chatType == "Driver") return FireStoreUtils.addDriverInbox(inboxModel);
+    if (widget.chatType == "Provider") return FireStoreUtils.addProviderInbox(inboxModel);
+    if (widget.chatType == "Worker") return FireStoreUtils.addWorkerInbox(inboxModel);
+    return FireStoreUtils.addRestaurantInbox(inboxModel);
+  }
+
+  Future<void> _writeChat(ConversationModel conv) {
+    if (widget.chatType == "Driver") return FireStoreUtils.addDriverChat(conv);
+    if (widget.chatType == "Provider") return FireStoreUtils.addProviderChat(conv);
+    if (widget.chatType == "Worker") return FireStoreUtils.addWorkerChat(conv);
+    return FireStoreUtils.addRestaurantChat(conv);
+  }
+
+  void _sendNotificationInBackground(ConversationModel cm, String messageType) async {
+    try {
+      String? fcmToken;
+      Map<String, dynamic> payLoad;
+
+      if (widget.type == "cab_parcel_chat") {
+        final driver = await FireStoreUtils.getCurrentUser(widget.restaurantId.toString());
+        fcmToken = driver?.fcmToken;
+        payLoad = {
+          "type": "cab_parcel_chat",
+          "customerName": widget.customerName.toString(),
+          "restaurantName": widget.restaurantName.toString(),
+          "orderId": widget.orderId,
+          "restaurantId": widget.restaurantId,
+          "customerId": widget.customerId,
+          "customerProfileImage": widget.customerProfileImage,
+          "restaurantProfileImage": widget.restaurantProfileImage,
+          "token": fcmToken,
+          "chatType": widget.chatType,
+        };
+      } else if (widget.type == "vendor_chat") {
+        final orderModel = await FireStoreUtils().getOrderById(widget.orderId);
+        if (orderModel != null) {
+          if (widget.chatType == "Restaurant") {
+            final u = await FireStoreUtils.getCurrentUser(orderModel.vendor.author);
+            fcmToken = u?.fcmToken;
+          } else {
+            final u = await FireStoreUtils.getCurrentUser(orderModel.driverID.toString());
+            fcmToken = u?.fcmToken;
+          }
+        }
+        payLoad = {
+          "type": "vendor_chat",
+          "customerName": widget.customerName.toString(),
+          "restaurantName": widget.restaurantName.toString(),
+          "orderId": widget.orderId,
+          "restaurantId": widget.restaurantId,
+          "customerId": widget.customerId,
+          "customerProfileImage": widget.customerProfileImage,
+          "restaurantProfileImage": widget.restaurantProfileImage,
+          "token": fcmToken,
+          "chatType": widget.chatType,
+        };
+      } else {
+        final u = await FireStoreUtils.getCurrentUser(widget.restaurantId.toString());
+        fcmToken = u?.fcmToken;
+        payLoad = {
+          "customerName": widget.customerName.toString(),
+          "restaurantName": widget.restaurantName.toString(),
+          "orderId": widget.orderId,
+          "restaurantId": widget.restaurantId,
+          "customerId": widget.customerId,
+          "customerProfileImage": widget.customerProfileImage,
+          "restaurantProfileImage": widget.restaurantProfileImage,
+          "token": fcmToken,
+          "chatType": widget.chatType,
+        };
+      }
+
+      if (fcmToken != null && fcmToken.isNotEmpty) {
+        SendNotification.sendChatFcmMessage(
+            "${MyAppState.currentUser!.fullName()} ${messageType == "image" ? "sent image to you" : messageType == "video" ? "sent video to you" : "sent message to you"}",
+            cm.message.toString(),
+            fcmToken,
+            payLoad);
+      }
+    } catch (_) {}
   }
 
   final ImagePicker _imagePicker = ImagePicker();
@@ -602,7 +682,7 @@ class _ChatScreensState extends State<ChatScreens> {
             XFile? image = await _imagePicker.pickImage(source: ImageSource.gallery);
             if (image != null) {
               Url url = await FireStoreUtils().uploadChatImageToFireStorage(File(image.path), context);
-              _sendMessage('', url, '', 'image');
+              _sendMessage(const Uuid().v4(), '', url, '', 'image');
             }
           },
         ),
@@ -614,7 +694,7 @@ class _ChatScreensState extends State<ChatScreens> {
             XFile? galleryVideo = await _imagePicker.pickVideo(source: ImageSource.gallery);
             if (galleryVideo != null) {
               ChatVideoContainer videoContainer = await FireStoreUtils().uploadChatVideoToFireStorage(File(galleryVideo.path), context);
-              _sendMessage('', videoContainer.videoUrl, videoContainer.thumbnailUrl, 'video');
+              _sendMessage(const Uuid().v4(), '', videoContainer.videoUrl, videoContainer.thumbnailUrl, 'video');
             }
           },
         ),
@@ -626,7 +706,7 @@ class _ChatScreensState extends State<ChatScreens> {
             XFile? image = await _imagePicker.pickImage(source: ImageSource.camera);
             if (image != null) {
               Url url = await FireStoreUtils().uploadChatImageToFireStorage(File(image.path), context);
-              _sendMessage('', url, '', 'image');
+              _sendMessage(const Uuid().v4(), '', url, '', 'image');
             }
           },
         ),
@@ -638,7 +718,7 @@ class _ChatScreensState extends State<ChatScreens> {
             XFile? recordedVideo = await _imagePicker.pickVideo(source: ImageSource.camera);
             if (recordedVideo != null) {
               ChatVideoContainer videoContainer = await FireStoreUtils().uploadChatVideoToFireStorage(File(recordedVideo.path), context);
-              _sendMessage('', videoContainer.videoUrl, videoContainer.thumbnailUrl, 'video');
+              _sendMessage(const Uuid().v4(), '', videoContainer.videoUrl, videoContainer.thumbnailUrl, 'video');
             }
           },
         )

@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:developer';
+import 'dart:io';
 
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/services/helper.dart';
@@ -39,17 +41,58 @@ enum ReconnectCheckResult { active, invalidated, unknown }
 /// admin.quickdash.co.in backend). The server owns the clock and the
 /// allow/deny decision; this client only calls it and acts on the result.
 class DeviceSessionService {
-  /// Stable per-install identifier. Persisted locally — a reinstall gets a
-  /// new one, which is expected (there's no cross-install device identity
-  /// on mobile without a native plugin).
+  /// Stable per-device identifier, backed by the OS-level Android ID /
+  /// iOS identifierForVendor rather than a random value stored in app data.
+  /// SharedPreferences here is just a cache to avoid repeated plugin calls —
+  /// it is NOT the source of truth, specifically because it isn't durable:
+  /// (2026-07-30) root-caused a "logged in on another device" report to a
+  /// user clearing app storage (which wipes SharedPreferences) and logging
+  /// back in on the SAME physical phone — the old random-UUID-in-prefs
+  /// approach had no way to tell that apart from a genuinely different
+  /// device, since it minted a brand-new id every time prefs was empty, and
+  /// the server's one-device gate correctly (by its own logic) read that as
+  /// a device-switch attempt. This also independently guards against the
+  /// SharedPreferences.apply() write-loss race noted below, since re-reading
+  /// the platform id after a lost write returns the identical value instead
+  /// of minting a new one.
   static Future<String> getDeviceId() async {
     final prefs = await SharedPreferences.getInstance();
     var id = prefs.getString(_kDeviceIdPrefKey);
     if (id == null || id.isEmpty) {
-      id = const Uuid().v4();
+      id = await _readPlatformDeviceId();
       await prefs.setString(_kDeviceIdPrefKey, id);
+      // TEMPORARY [DEVICESESSION-DEBUG] - remove once the same-device
+      // auto-logout report is confirmed fixed in the field. A fresh id
+      // being cached here should now consistently reproduce the same
+      // platform id across storage clears / lost prefs writes - if this
+      // line ever logs a DIFFERENT id for the same physical device, the
+      // platform id itself isn't as stable as expected and needs revisiting.
+      log('[DEVICESESSION-DEBUG] getDeviceId() cached platform id: $id (no prior id found in prefs)');
+    } else {
+      log('[DEVICESESSION-DEBUG] getDeviceId() read EXISTING id from prefs: $id');
     }
     return id;
+  }
+
+  /// Reads the OS-level device identifier. Falls back to a random UUID
+  /// (the old behavior) on any platform the plugin doesn't cover or if the
+  /// read fails for any reason — never let device-id resolution itself
+  /// block login.
+  static Future<String> _readPlatformDeviceId() async {
+    try {
+      final plugin = DeviceInfoPlugin();
+      if (Platform.isAndroid) {
+        final info = await plugin.androidInfo;
+        if (info.id.isNotEmpty) return 'android_${info.id}';
+      } else if (Platform.isIOS) {
+        final info = await plugin.iosInfo;
+        final vendorId = info.identifierForVendor;
+        if (vendorId != null && vendorId.isNotEmpty) return 'ios_$vendorId';
+      }
+    } catch (e) {
+      log('[DeviceSession] platform device id read failed, falling back to random: $e');
+    }
+    return const Uuid().v4();
   }
 
   /// Must be called right after a Firebase Auth sign-in succeeds
@@ -58,15 +101,31 @@ class DeviceSessionService {
   /// out — the caller must stop and surface [DeviceSessionResult.message],
   /// not proceed to load the profile or navigate in.
   static Future<DeviceSessionResult> authorize({required String fcmToken}) async {
+    // TEMPORARY [DEVICESESSION-PERF] - timing instrumentation to find out how
+    // much of successful-login time this one call accounts for (it never
+    // runs on a rejected login, only a successful one - see the doc comment
+    // above). Remove once the login-speed investigation is done.
+    final overallSw = Stopwatch()..start();
     final user = auth.FirebaseAuth.instance.currentUser;
     if (user == null) {
       return const DeviceSessionResult.denied('Not signed in.', null);
     }
 
     try {
+      final tokenSw = Stopwatch()..start();
       final idToken = await user.getIdToken();
-      final deviceId = await getDeviceId();
+      log('[DEVICESESSION-PERF] getIdToken — ${tokenSw.elapsedMilliseconds}ms');
 
+      final deviceIdSw = Stopwatch()..start();
+      final deviceId = await getDeviceId();
+      log('[DEVICESESSION-PERF] getDeviceId — ${deviceIdSw.elapsedMilliseconds}ms');
+      // TEMPORARY [DEVICESESSION-DEBUG] - remove alongside the logging in
+      // getDeviceId()/checkActive(). This is the baseline id claimed at
+      // login - compare it against whatever checkActive() logs hours later
+      // for the same account/device to see if it ever changes.
+      log('[DEVICESESSION-DEBUG] authorize() logging in with device_id=$deviceId');
+
+      final httpSw = Stopwatch()..start();
       final resp = await http
           .post(
             Uri.parse('$_kApiBase/api/auth/device-session/authorize'),
@@ -78,6 +137,8 @@ class DeviceSessionService {
             body: jsonEncode({'device_id': deviceId, 'fcm_token': fcmToken}),
           )
           .timeout(const Duration(seconds: 20));
+      log('[DEVICESESSION-PERF] HTTP POST device-session/authorize — '
+          '${httpSw.elapsedMilliseconds}ms (status=${resp.statusCode})');
 
       final body = jsonDecode(resp.body) as Map<String, dynamic>;
 
@@ -103,6 +164,8 @@ class DeviceSessionService {
     } catch (e) {
       log('[DeviceSession] authorize error: $e');
       return const DeviceSessionResult.allowed();
+    } finally {
+      log('[DEVICESESSION-PERF] authorize() TOTAL — ${overallSw.elapsedMilliseconds}ms');
     }
   }
 
@@ -222,6 +285,11 @@ class DeviceSessionService {
 
       final body = jsonDecode(resp.body) as Map<String, dynamic>;
       final active = body['active'] != false;
+      // TEMPORARY [DEVICESESSION-DEBUG] - remove alongside the getDeviceId()
+      // logging above once root-caused. Pairs the id THIS call sent with
+      // the server's verdict, so a false "inactive" can be matched against
+      // whether getDeviceId() just minted a fresh id a moment earlier.
+      log('[DEVICESESSION-DEBUG] checkActive() sent device_id=$deviceId -> server active=$active (session_version=${body['session_version']})');
       _lastCheckAt = now;
       _lastCheckActive = active;
       return active;

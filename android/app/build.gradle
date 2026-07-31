@@ -23,17 +23,27 @@ if (flutterVersionName == null) {
     flutterVersionName = '1.0'
 }
 
+// Google Maps + signing credentials live in local.properties (gitignored),
+// not hardcoded here — they used to be literals in this file and in
+// AndroidManifest.xml, which meant they sat in git history.
+def googleMapsApiKey = localProperties.getProperty('GOOGLE_MAPS_API_KEY', '')
+def releaseStoreFile = localProperties.getProperty('RELEASE_STORE_FILE')
+def releaseStorePassword = localProperties.getProperty('RELEASE_STORE_PASSWORD')
+def releaseKeyAlias = localProperties.getProperty('RELEASE_KEY_ALIAS')
+def releaseKeyPassword = localProperties.getProperty('RELEASE_KEY_PASSWORD')
+
 android {
     namespace 'com.emart.customer'
-    compileSdkVersion 34
+    compileSdkVersion 35
 
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_8
-        targetCompatibility JavaVersion.VERSION_1_8
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+        coreLibraryDesugaringEnabled true
     }
 
     kotlinOptions {
-        jvmTarget = '1.8'
+        jvmTarget = '17'
     }
 
     sourceSets {
@@ -42,10 +52,10 @@ android {
 
     signingConfigs {
         release {
-            keyAlias 'quickdashcustomer'
-            keyPassword 'quickdashcustomer'
-            storeFile file('../../quickdashcustomer.jks')
-            storePassword 'quickdashcustomer'
+            keyAlias releaseKeyAlias
+            keyPassword releaseKeyPassword
+            storeFile releaseStoreFile != null ? file(releaseStoreFile) : null
+            storePassword releaseStorePassword
         }
     }
 
@@ -53,9 +63,10 @@ android {
         applicationId "com.quickdash.customer"
         minSdkVersion 26
         multiDexEnabled = true
-        targetSdkVersion 34
+        targetSdkVersion 35
         versionCode flutterVersionCode.toInteger()
         versionName flutterVersionName
+        manifestPlaceholders = [googleMapsApiKey: googleMapsApiKey]
     }
 
     flavorDimensions "env"
@@ -96,4 +107,5 @@ dependencies {
     implementation 'androidx.multidex:multidex:2.0.1'
     implementation 'io.card:android-sdk:5.+'
     implementation 'com.google.android.gms:play-services-mlkit-barcode-scanning:16.1.4'
+    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'
 }

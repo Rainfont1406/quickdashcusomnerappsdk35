@@ -3,11 +3,13 @@ import 'dart:convert';
 import 'dart:developer';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/main.dart';
+import 'package:emartconsumer/services/device_session_service.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/ui/chat_screen/chat_screen.dart';
 import 'package:emartconsumer/ui/container/ContainerScreen.dart';
 import 'package:emartconsumer/ui/dineInScreen/my_booking_screen.dart';
 import 'package:emartconsumer/ui/orderDetailsScreen/OrderDetailsScreen.dart';
+import 'package:emartconsumer/ui/billPayRequest/BillPayRequestScreen.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
@@ -41,19 +43,43 @@ class NotificationService {
       const AndroidInitializationSettings initializationSettingsAndroid = AndroidInitializationSettings('@mipmap/ic_launcher');
       var iosInitializationSettings = const DarwinInitializationSettings();
       final InitializationSettings initializationSettings = InitializationSettings(android: initializationSettingsAndroid, iOS: iosInitializationSettings);
-      await flutterLocalNotificationsPlugin.initialize(initializationSettings, onDidReceiveNotificationResponse: (payload) {});
+      await flutterLocalNotificationsPlugin.initialize(initializationSettings,
+          onDidReceiveNotificationResponse: (response) {
+        final payload = response.payload;
+        if (payload == null || payload.isEmpty) return;
+        try {
+          _handleNotificationTap(Map<String, dynamic>.from(jsonDecode(payload)));
+        } catch (e) {
+          log('Failed to handle local notification tap: $e');
+        }
+      });
       setupInteractedMessage();
     }
   }
 
   Future<void> setupInteractedMessage() async {
+    // App was cold-started (fully terminated, not just backgrounded) by
+    // tapping this notification — onMessageOpenedApp below never fires in
+    // that case (it only covers background→foreground taps), so without
+    // this the app launched straight to Home and the tap's data (e.g. which
+    // Bill Pay request to open) was silently discarded. Data-only, same
+    // routing as onMessageOpenedApp/onDidReceiveNotificationResponse.
     RemoteMessage? initialMessage = await FirebaseMessaging.instance.getInitialMessage();
     if (initialMessage != null) {
       FirebaseMessaging.onBackgroundMessage((message) => firebaseMessageBackgroundHandle(message));
+      if (initialMessage.data['type'] == 'force_logout') {
+        DeviceSessionService.handleSessionInvalidated(navigatorKey.currentContext);
+      } else {
+        _handleNotificationTap(initialMessage.data);
+      }
     }
 
     FirebaseMessaging.onMessage.listen((RemoteMessage message) {
       log("::::::::::::onMessage:::::::::::::::::");
+      if (message.data['type'] == 'force_logout') {
+        DeviceSessionService.handleSessionInvalidated(navigatorKey.currentContext);
+        return;
+      }
       if (message.notification != null) {
         log(message.notification.toString());
         display(message);
@@ -62,57 +88,74 @@ class NotificationService {
     FirebaseMessaging.onMessageOpenedApp.listen((RemoteMessage message) {
       log("::::::::::::MessageOpenedApp:::::::::::::::::");
       print(message);
+      if (message.data['type'] == 'force_logout') {
+        DeviceSessionService.handleSessionInvalidated(navigatorKey.currentContext);
+        return;
+      }
       if (message.notification != null) {
-        // display(message);
-
         log(message.data.toString());
-        String orderId = message.data['orderId'];
-        if (message.data['type'] == 'vendor_order') {
-          push(navigatorKey.currentContext!, OrderDetailsScreen(orderId: orderId));
-        } else if (message.data['type'] == 'vendor_chat' || message.data['type'] == 'cab_parcel_chat') {
-          push(
-              navigatorKey.currentContext!,
-              ChatScreens(
-                orderId: orderId,
-                customerId: message.data['customerId'],
-                customerName: message.data['customerName'],
-                customerProfileImage: message.data['customerProfileImage'],
-                restaurantId: message.data['restaurantId'],
-                restaurantName: message.data['restaurantName'],
-                restaurantProfileImage: message.data['restaurantProfileImage'],
-                token: message.data['token'],
-                chatType: message.data['chatType'],
-                type: message.data['type'],
-              ));
-        } else if (message.data['type'] == 'dine_in') {
-          pushReplacement(
-              navigatorKey.currentContext!,
-              ContainerScreen(
-                user: MyAppState.currentUser,
-                drawerSelection: DrawerSelection.MyBooking,
-                appBarTitle: 'Dine-In Bookings'.tr(),
-                currentWidget: MyBookingScreen(),
-              ));
-        } else {
-          /// receive message through inbox
-          push(
-              navigatorKey.currentContext!,
-              ChatScreens(
-                orderId: orderId,
-                customerId: message.data['customerId'],
-                customerName: message.data['customerName'],
-                customerProfileImage: message.data['customerProfileImage'],
-                restaurantId: message.data['restaurantId'],
-                restaurantName: message.data['restaurantName'],
-                restaurantProfileImage: message.data['restaurantProfileImage'],
-                token: message.data['token'],
-                chatType: message.data['chatType'],
-              ));
-        }
+        _handleNotificationTap(message.data);
       }
     });
     log("::::::::::::Permission authorized:::::::::::::::::");
     await FirebaseMessaging.instance.subscribeToTopic("eMart_customer");
+  }
+
+  // Shared routing for a tapped notification — used both when the OS-level
+  // FCM notification is tapped (background/terminated app, via
+  // onMessageOpenedApp) and when our own locally-shown notification is
+  // tapped (app was in foreground, via onDidReceiveNotificationResponse).
+  // Previously only the former was wired up, so tapping a foreground
+  // Bill Pay / order notification silently did nothing.
+  void _handleNotificationTap(Map<String, dynamic> data) {
+    final context = navigatorKey.currentContext;
+    if (context == null) return;
+    final String orderId = data['orderId']?.toString() ?? '';
+    final String? type = data['type']?.toString();
+    if (type == 'vendor_order') {
+      push(context, OrderDetailsScreen(orderId: orderId));
+    } else if (type == 'vendor_bill_pay_request') {
+      push(context, BillPayRequestScreen(orderId: orderId));
+    } else if (type == 'vendor_chat' || type == 'cab_parcel_chat') {
+      push(
+          context,
+          ChatScreens(
+            orderId: orderId,
+            customerId: data['customerId'],
+            customerName: data['customerName'],
+            customerProfileImage: data['customerProfileImage'],
+            restaurantId: data['restaurantId'],
+            restaurantName: data['restaurantName'],
+            restaurantProfileImage: data['restaurantProfileImage'],
+            token: data['token'],
+            chatType: data['chatType'],
+            type: type,
+          ));
+    } else if (type == 'dine_in') {
+      pushReplacement(
+          context,
+          ContainerScreen(
+            user: MyAppState.currentUser,
+            drawerSelection: DrawerSelection.MyBooking,
+            appBarTitle: 'Dine-In Bookings'.tr(),
+            currentWidget: MyBookingScreen(),
+          ));
+    } else {
+      /// receive message through inbox
+      push(
+          context,
+          ChatScreens(
+            orderId: orderId,
+            customerId: data['customerId'],
+            customerName: data['customerName'],
+            customerProfileImage: data['customerProfileImage'],
+            restaurantId: data['restaurantId'],
+            restaurantName: data['restaurantName'],
+            restaurantProfileImage: data['restaurantProfileImage'],
+            token: data['token'],
+            chatType: data['chatType'],
+          ));
+    }
   }
 
   static getToken() async {

@@ -4,6 +4,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 
+import '../story_cache_manager.dart' show StoryImageCacheManager;
 import '../utils.dart';
 import '../controller/story_controller.dart';
 
@@ -23,12 +24,18 @@ class ImageLoader {
   /// Load image from disk cache first, if not found then load from network.
   /// `onComplete` is called when [imageBytes] become available.
   void loadImage(VoidCallback onComplete) {
+    // TEMPORARY [STORY-PERF] - timing instrumentation for the story-loading
+    // investigation. Remove once done.
+    final sw = Stopwatch()..start();
+    debugPrint('[STORY-PERF][IMG] START — $url');
+
     if (frames != null) {
       state = LoadState.success;
+      debugPrint('[STORY-PERF][IMG] already-cached-in-memory — $url');
       onComplete();
     }
 
-    final fileStream = DefaultCacheManager().getFileStream(url,
+    final fileStream = StoryImageCacheManager.instance.getFileStream(url,
         headers: requestHeaders as Map<String, String>?);
 
     fileStream.listen(
@@ -47,14 +54,17 @@ class ImageLoader {
 
         ui.instantiateImageCodec(imageBytes).then((codec) {
           frames = codec;
+          debugPrint('[STORY-PERF][IMG] DECODE-COMPLETE — ${sw.elapsedMilliseconds}ms — $url');
           onComplete();
         }, onError: (error) {
           state = LoadState.failure;
+          debugPrint('[STORY-PERF][IMG] DECODE-ERROR — ${sw.elapsedMilliseconds}ms — $url — $error');
           onComplete();
         });
       },
       onError: (error) {
         state = LoadState.failure;
+        debugPrint('[STORY-PERF][IMG] FETCH-ERROR — ${sw.elapsedMilliseconds}ms — $url — $error');
         onComplete();
       },
     );
@@ -113,6 +123,7 @@ class StoryImageState extends State<StoryImage> {
   ui.Image? currentFrame;
 
   Timer? _timer;
+  Timer? _errorTimer; // auto-advances after a delay when image load fails
 
   StreamSubscription<PlaybackState>? _streamSubscription;
 
@@ -123,11 +134,17 @@ class StoryImageState extends State<StoryImage> {
     if (widget.controller != null) {
       _streamSubscription =
           widget.controller!.playbackNotifier.listen((playbackState) {
-        // for the case of gifs we need to pause/play
         if (widget.imageLoader.frames == null) {
+          // Image still loading — re-pause if the parent plays prematurely
+          // (e.g. isActive flip while cache-fetch is in progress) so the
+          // StoryView progress bar doesn't advance before the image is ready.
+          if (playbackState == PlaybackState.play) {
+            widget.controller!.pause();
+          }
           return;
         }
 
+        // GIF playback control.
         if (playbackState == PlaybackState.pause) {
           _timer?.cancel();
         } else {
@@ -144,8 +161,12 @@ class StoryImageState extends State<StoryImage> {
           widget.controller?.play();
           forward();
         } else {
-          // refresh to show error
           setState(() {});
+          // Auto-advance after 6 s so a network failure never traps the user
+          // on a broken story slot forever.
+          _errorTimer = Timer(const Duration(seconds: 6), () {
+            if (mounted) widget.controller?.next();
+          });
         }
       }
     });
@@ -154,6 +175,7 @@ class StoryImageState extends State<StoryImage> {
   @override
   void dispose() {
     _timer?.cancel();
+    _errorTimer?.cancel();
     _streamSubscription?.cancel();
 
     super.dispose();

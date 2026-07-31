@@ -1,3 +1,4 @@
+﻿import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
@@ -11,8 +12,12 @@ import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/model/offer_model.dart';
 import 'package:emartconsumer/model/story_model.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/behavior/behavior_counters.dart';
+import 'package:emartconsumer/services/behavior/behavior_event_types.dart';
+import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
+import 'package:emartconsumer/services/perf_diagnostic_file_service.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/theme/responsive.dart';
@@ -39,6 +44,7 @@ import 'package:emartconsumer/widget/story_view/controller/story_controller.dart
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:geocoding/geocoding.dart';
+import 'package:flutter_google_maps_webservices/places.dart' show Component;
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:google_maps_place_picker_mb/google_maps_place_picker.dart';
@@ -47,11 +53,77 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:video_thumbnail/video_thumbnail.dart';
-import 'package:path_provider/path_provider.dart';
+import 'package:visibility_detector/visibility_detector.dart';
+
 import 'dart:async';
-import 'dart:io';
+
 import 'dart:ui' as ui;
+
+// ── TEMPORARY HOME-SCREEN PERF LOGGING ──────────────────────────────────────
+// Instrumentation only, no behavior change. Wraps an awaited operation with
+// start/end/elapsed logging. Remove once the startup bottleneck is found.
+Future<T> _timedStep<T>(String label, Future<T> Function() op) async {
+  final sw = Stopwatch()..start();
+  debugPrint('[HOME-PERF] $label START at ${DateTime.now().toIso8601String()}');
+  try {
+    final result = await op();
+    sw.stop();
+    debugPrint('[HOME-PERF] $label END — elapsed ${sw.elapsedMilliseconds}ms');
+    return result;
+  } catch (e) {
+    sw.stop();
+    debugPrint('[HOME-PERF] $label FAILED after ${sw.elapsedMilliseconds}ms — $e');
+    rethrow;
+  }
+}
+
+// TEMPORARY image-load perf logging — same idea as _timedStep, but for
+// network images, which don't have a single awaitable Future we can wrap
+// (CachedNetworkImage manages its own request lifecycle internally). Keyed
+// by "label|url" so a widget rebuild re-showing the same URL doesn't
+// double-log a start with no matching end.
+final Map<String, Stopwatch> _imageLoadStopwatches = {};
+
+void _logImageLoadStart(String label, String url, {required String section}) {
+  if (url.isEmpty) return;
+  // Tag BEFORE anything else — this is what lets the network-layer log
+  // (perf_diagnostic_file_service.dart) compute real queue-wait time and
+  // show which Home-screen section this URL belongs to. Must happen even on
+  // a widget rebuild (unlike the stopwatch below) since tagImageRequest()
+  // itself is idempotent (putIfAbsent) and cheap.
+  tagImageRequest(url, section: section, trigger: 'widget-build');
+  final key = '$label|$url';
+  if (_imageLoadStopwatches.containsKey(key)) return;
+  _imageLoadStopwatches[key] = Stopwatch()..start();
+  debugPrint('[HOME-PERF][IMG][$section] $label START — $url');
+}
+
+void _logImageLoadEnd(String label, String url, {String? error}) {
+  if (url.isEmpty) return;
+  final key = '$label|$url';
+  final sw = _imageLoadStopwatches.remove(key);
+  if (sw == null) return;
+  sw.stop();
+  final section = sectionLabelFor(url);
+  if (error != null) {
+    debugPrint(
+        '[HOME-PERF][IMG][$section] $label FAILED after ${sw.elapsedMilliseconds}ms — $url — $error');
+  } else {
+    // This fires when imageBuilder receives a resolved ImageProvider, i.e.
+    // decode is done — but the frame it's drawn into hasn't necessarily been
+    // painted yet. Schedule a post-frame callback to see how much (if any)
+    // extra time that takes.
+    debugPrint(
+        '[HOME-PERF][IMG][$section] $label DECODE-COMPLETE — elapsed ${sw.elapsedMilliseconds}ms — $url');
+    final decodeElapsed = sw.elapsedMilliseconds;
+    final paintSw = Stopwatch()..start();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      debugPrint(
+          '[HOME-PERF][IMG][$section] $label PAINTED — +${paintSw.elapsedMilliseconds}ms after decode, '
+          'total ${decodeElapsed + paintSw.elapsedMilliseconds}ms — $url');
+    });
+  }
+}
 
 class HomeScreen extends StatefulWidget {
   final User? user;
@@ -87,7 +159,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final fireStoreUtils = FireStoreUtils();
 
   // Nullable: deliberately unassigned until just after the skeleton is
-  // dismissed — see _startProductsFetchIfNeeded(). The whole-catalog query
+  // dismissed â€” see _startProductsFetchIfNeeded(). The whole-catalog query
   // it triggers is too big to fire during the critical loading window.
   Future<List<ProductModel>>? productsFuture;
   bool _productsFetchStarted = false;
@@ -104,27 +176,29 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   List<ProductModel> recommendedProducts = [];
   bool islocationGet = false;
 
-  // Manual restaurant-feed sort chosen by the user — 'offer' | 'nearest' |
+  // Manual restaurant-feed sort chosen by the user â€” 'offer' | 'nearest' |
   // 'rating', or null for the default recommended order. Re-sorts the
   // already-loaded `vendors` list in place (no new Firestore fetch); ties
   // fall through to the same recommended priority order used by default.
   String? _manualSortMode;
 
-  // Restaurant-card offer badge text, keyed by vendor id — computed once per
+  // Restaurant-card offer badge text, keyed by vendor id â€” computed once per
   // _sortRestaurants() pass (same normal/special offer evaluation used for
   // ranking, so the badge can never contradict why a restaurant is ranked
-  // where it is). Never a merged normal+special number — just the single
-  // bigger real offer's own amount, "Up to ₹X off", no minimum stated.
+  // where it is). Never a merged normal+special number â€” just the single
+  // bigger real offer's own amount, "Up to â‚¹X off", no minimum stated.
   Map<String, String> _offerBadgeByVendorId = {};
 
   // Global coupon-style ("normal") offers used by the feed-ranking algorithm
-  // below. Includes vendor-specific and global (storeId null/empty) coupons —
+  // below. Includes vendor-specific and global (storeId null/empty) coupons â€”
   // same eligibility rule CartScreen uses at checkout. Refreshed once per
   // getData() call by _loadNormalOffersForRanking().
   List<OfferModel> _normalOffersForRanking = [];
 
   void _loadNormalOffersForRanking() {
-    fireStoreUtils.getAllCoupons().then((value) {
+    _timedStep('_loadNormalOffersForRanking -> getAllCoupons',
+            () => fireStoreUtils.getAllCoupons())
+        .then((value) {
       _normalOffersForRanking = value;
       _sortRestaurants();
       if (mounted) setState(() {});
@@ -134,11 +208,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   bool _isPercentageOfferType(String? type) =>
       type == 'Percentage' || type == 'Percent' || type == 'percentage';
 
-  // Best "normal" (coupon-style) offer for [vendor] — OfferModel has no
+  // Best "normal" (coupon-style) offer for [vendor] â€” OfferModel has no
   // section field, so these apply to both Delivery and Dineaway alike.
   // There's no live cart while browsing the feed, so each offer's own
   // applicableAmount is used as the comparison order amount for converting
-  // a percentage offer into a monetary saving — this also means the
+  // a percentage offer into a monetary saving â€” this also means the
   // "satisfies minimum order amount" validity rule is met by construction.
   ({double amount, double percent}) _bestNormalOffer(VendorModel vendor) {
     double bestAmount = 0;
@@ -153,7 +227,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       if (!appliesToVendor) continue;
       if (offer.isEnableOffer != true) continue;
       // Private coupons (isPublic == false) need a manual code the browsing
-      // customer doesn't have — they're excluded from the cart's tap-to-
+      // customer doesn't have â€” they're excluded from the cart's tap-to-
       // apply offers sheet too, so they must not influence ranking or what
       // gets advertised on the card.
       if (offer.isPublic == false) continue;
@@ -166,7 +240,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
       final amount = isPercent ? (minAmt * raw / 100) : raw;
       final percent = isPercent ? raw : 0.0;
-      // Rank by effective rate (discount ÷ minimum spend), not raw amount —
+      // Rank by effective rate (discount Ã· minimum spend), not raw amount â€”
       // a big-looking flat discount that needs a huge minimum order isn't
       // actually a better deal than a small discount with a low minimum.
       // Percentage offers reduce to their own percent value (the minimum
@@ -185,7 +259,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   // Best section-specific special offer for [vendor]. [orderType] is
-  // "Delivery" or "Takeaway" — matching Timeslot.orderType's convention
+  // "Delivery" or "Takeaway" â€” matching Timeslot.orderType's convention
   // (same as CartScreen's special-discount evaluation).
   ({double amount, double percent}) _bestSpecialOffer(
       VendorModel vendor, String orderType) {
@@ -226,7 +300,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
         final amount = isPercent ? (minAmt * raw / 100) : raw;
         final percent = isPercent ? raw : 0.0;
-        // Same effective-rate ranking as _bestNormalOffer — see comment there.
+        // Same effective-rate ranking as _bestNormalOffer â€” see comment there.
         final rate = isPercent
             ? (raw / 100)
             : (minAmt > 0 ? raw / minAmt : double.infinity);
@@ -244,7 +318,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   /// BY AK
   /// Restaurant feed ranking. Priority order: OPEN status, eligibility,
   /// effective discount, effective offer percentage, rating, distance, then
-  /// CLOSED status — i.e. OPEN+eligible, OPEN+non-eligible, CLOSED+eligible,
+  /// CLOSED status â€” i.e. OPEN+eligible, OPEN+non-eligible, CLOSED+eligible,
   /// CLOSED+non-eligible, each sub-group ordered by discount/percent/
   /// rating/distance. Re-evaluated per current screen's order type
   /// (Delivery vs Dineaway), since thresholds and special-offer matching
@@ -276,17 +350,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
       // Card badge: never the merged normal+special sum above (that number
       // can correspond to no real, single order size when the two offers
-      // have different minimums) — just the single bigger real offer,
-      // shown as its own genuine "Up to ₹X off" ceiling.
+      // have different minimums) â€” just the single bigger real offer,
+      // shown as its own genuine "Up to â‚¹X off" ceiling.
       final bool normalWins = normal.amount >= special.amount;
       final double featuredAmount = normalWins ? normal.amount : special.amount;
       final double featuredPercent = normalWins ? normal.percent : special.percent;
 
       if (featuredAmount > 0) {
-        // Whichever framing looks more compelling: a small ₹ amount reads
-        // better as a percentage ("Up to 20% off" > "Up to ₹18 off"), while
-        // a large amount reads better as a flat figure ("Up to ₹250 off" >
-        // "Up to 12% off") — only applies when the winning offer is
+        // Whichever framing looks more compelling: a small â‚¹ amount reads
+        // better as a percentage ("Up to 20% off" > "Up to â‚¹18 off"), while
+        // a large amount reads better as a flat figure ("Up to â‚¹250 off" >
+        // "Up to 12% off") â€” only applies when the winning offer is
         // actually percentage-type (featuredPercent > 0); flat-type offers
         // have no percentage to fall back to. No decimals either way.
         final bool showAsPercent = featuredPercent > 0 && featuredAmount < 100;
@@ -318,10 +392,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }).toList();
 
     ranked.sort((a, b) {
-      // 1. OPEN before CLOSED — absolute priority, regardless of everything else.
+      // 1. OPEN before CLOSED â€” absolute priority, regardless of everything else.
       if (a.isOpen != b.isOpen) return a.isOpen ? -1 : 1;
 
-      // Manual user-selected sort (Offer / Nearest / Rating), if active —
+      // Manual user-selected sort (Offer / Nearest / Rating), if active â€”
       // takes priority within the open/closed group. If values tie, fall
       // through to the same recommended priority order used by default.
       if (_manualSortMode == 'offer' &&
@@ -356,8 +430,25 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   void _tryHideSkeleton() {
-    if (isLoading && _bannerReady && _firstVendorReceived && mounted) {
+    // Decoupled from _bannerReady: the restaurant list is the primary
+    // content and shouldn't wait on the above-the-fold banner/categories/
+    // stories row. CategoryView and the top banner both already render as
+    // zero/reserved-height when their list is still empty (see build()), so
+    // they simply pop in a moment later once getBanner() resolves — no
+    // broken layout, no jump.
+    if (isLoading && _firstVendorReceived && mounted) {
       setState(() => isLoading = false);
+      if (!_skeletonHiddenLogged) {
+        _skeletonHiddenLogged = true;
+        // Skeleton hidden == first restaurant list rendered == Home
+        // interactive, in one event: this app has no separate "list visible
+        // but not yet interactive" state, the skeleton is swapped directly
+        // for the live, scrollable list.
+        debugPrint(
+            '[HOME-PERF] MILESTONE: skeleton hidden / restaurant list rendered / Home interactive — '
+            '${_homeInitStopwatch.elapsedMilliseconds}ms since initState '
+            '(bannerReady=$_bannerReady, firstVendorReceived=$_firstVendorReceived)');
+      }
     }
   }
 
@@ -378,13 +469,30 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   // Precaches a list of network image URLs concurrently. Individual failures
   // are swallowed; a 5-second hard timeout prevents the skeleton from blocking
   // forever when images are slow or unavailable.
-  Future<void> _precacheBatch(List<String> urls) async {
+  //
+  // TEMPORARY diagnostic note: uses CachedNetworkImageProvider with
+  // perfDiagnosticCacheManager instead of a plain NetworkImage specifically
+  // so this path is visible to the network-layer instrumentation — a plain
+  // precacheImage(NetworkImage(url)) uses a completely different HTTP path
+  // that our FileService-based logging can't see at all, which was a real,
+  // confirmed blind spot (see perf_diagnostic_file_service.dart's header).
+  Future<void> _precacheBatch(List<String> urls, {required String section}) async {
     if (!mounted || urls.isEmpty) return;
-    final futures = urls
-        .where((u) => u.isNotEmpty)
-        .map((url) =>
-            precacheImage(NetworkImage(url), context).catchError((_) {}))
-        .toList();
+    final futures = urls.where((u) => u.isNotEmpty).map((url) {
+      tagImageRequest(url, section: section, trigger: 'precacheImage');
+      debugPrint('[HOME-PERF][IMG][$section] precacheImage START — $url');
+      final sw = Stopwatch()..start();
+      return precacheImage(
+        CachedNetworkImageProvider(url, cacheManager: perfDiagnosticCacheManager),
+        context,
+      ).then((_) {
+        debugPrint(
+            '[HOME-PERF][IMG][$section] precacheImage DONE — elapsed ${sw.elapsedMilliseconds}ms — $url');
+      }).catchError((Object e) {
+        debugPrint(
+            '[HOME-PERF][IMG][$section] precacheImage FAILED after ${sw.elapsedMilliseconds}ms — $url — $e');
+      });
+    }).toList();
     if (futures.isEmpty) return;
     await Future.wait(futures).timeout(
       const Duration(seconds: 5),
@@ -392,17 +500,41 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
-  // Called on the first vendor batch: precaches vendor card images then signals
-  // the skeleton to hide. Separated from the stream listener so it can await.
+  // Called on the first vendor batch: signals the skeleton to hide as soon as
+  // data is ready. Deliberately does NOT precache the whole vendor list — an
+  // earlier version blindly fetched the first 8 vendors' photos regardless of
+  // scroll position (a root cause of the concurrent-image-request pileup
+  // measured during the startup investigation). _RestaurantCardImage/
+  // _MenuCarousel load their own image once the card is actually
+  // scroll-visible (VisibilityDetector gating), and that's the only trigger
+  // for every card except the first couple below.
+  //
+  // CONFIRMED ON-DEVICE (2026-07-15): with no eager precache at all, the
+  // VisibilityDetector on the FIRST restaurant card (which is genuinely
+  // on-screen without any scrolling — verified with the user holding the
+  // screen still) still took ~26s to fire onVisibilityChanged, well after
+  // Story/TopBanner had already loaded — a real responsiveness gap in the
+  // package/framework's visibility polling under heavy concurrent image
+  // decode load that wasn't pinned down further. Since these first cards are
+  // confirmed always-visible content (same tier as Story/TopBanner per the
+  // requested priority order), they get the same small-capped-precache
+  // treatment as TopBanner instead of waiting on that signal.
   Future<void> _precacheVendorsAndShow() async {
-    final images = vendors
-        .take(8)
-        .where((v) => v.photo.isNotEmpty)
-        .map((v) => v.photo)
-        .toList();
-    await _precacheBatch(images);
+    debugPrint(
+        '[HOME-PERF] _precacheVendorsAndShow — ${_homeInitStopwatch.elapsedMilliseconds}ms since initState');
     if (!mounted) return;
     _firstVendorReceived = true;
+    debugPrint(
+        '[HOME-PERF] MILESTONE: _firstVendorReceived=true — ${_homeInitStopwatch.elapsedMilliseconds}ms since initState (bannerReady=$_bannerReady)');
+    const int restaurantListPrecacheCount = 2; // confirmed always-visible cards only
+    _precacheBatch(
+      vendors
+          .take(restaurantListPrecacheCount)
+          .map((v) => v.photo.toString())
+          .where((p) => p.isNotEmpty && p != 'null')
+          .toList(),
+      section: 'RestaurantList',
+    );
     _tryHideSkeleton();
     // Now that the page is visible, it's safe to start the whole-catalog
     // product fetch without it competing for bandwidth with first paint.
@@ -411,30 +543,43 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   // Starts the (large, unscoped) product catalog fetch used for card menu
   // previews, and wires up processing of its result. Only fires once per
-  // getData() cycle — see the reset in getData() — and only after the
+  // getData() cycle â€” see the reset in getData() â€” and only after the
   // skeleton has already been dismissed.
   void _startProductsFetchIfNeeded() {
     if (_productsFetchStarted) return;
     _productsFetchStarted = true;
+    debugPrint(
+        '[HOME-PERF] _startProductsFetchIfNeeded — fired after skeleton dismissal, '
+        '${_homeInitStopwatch.elapsedMilliseconds}ms since initState (does not block interactivity)');
     final future = (selctedOrderTypeValue == "Takeaway".tr() ||
             selctedOrderTypeValue == "Dineaway".tr())
-        ? fireStoreUtils.getAllTakeAWayProducts()
-        : fireStoreUtils.getAllDelevryProducts();
+        ? _timedStep('_startProductsFetchIfNeeded -> getAllTakeAWayProducts',
+            () => fireStoreUtils.getAllTakeAWayProducts())
+        : _timedStep('_startProductsFetchIfNeeded -> getAllDelevryProducts',
+            () => fireStoreUtils.getAllDelevryProducts());
     productsFuture = future;
     future.then(_handleProducts);
   }
 
   String? name = "";
 
-  String? selctedOrderTypeValue = "Delivery".tr();
+  // Defaults to Dineaway, not Delivery: Delivery is currently gated behind
+  // isDeliveryActiveNotifier and shows a "Coming Soon" block, so a fresh
+  // Delivery default was the first thing every new/returning user saw.
+  String? selctedOrderTypeValue = "Dineaway".tr();
 
   bool isLoading = true;
   // Skeleton is hidden only when both banner data AND the first vendor batch
   // have arrived. Setting either flag early (via stream or banner completion)
-  // is safe — _tryHideSkeleton checks both before acting.
+  // is safe â€” _tryHideSkeleton checks both before acting.
   bool _bannerReady = false;
   bool _firstVendorReceived = false;
   bool _precachingVendors = false;
+
+  // TEMPORARY perf instrumentation state.
+  final Stopwatch _homeInitStopwatch = Stopwatch();
+  bool _firstStreamEventLogged = false;
+  bool _skeletonHiddenLogged = false;
 
   getLocationData() async {
     try {
@@ -464,6 +609,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
+    _homeInitStopwatch.start();
+    debugPrint(
+        '[HOME-PERF] HomeScreen.initState START at ${DateTime.now().toIso8601String()}');
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      debugPrint(
+          '[HOME-PERF] MILESTONE: first frame rendered (skeleton) — ${_homeInitStopwatch.elapsedMilliseconds}ms since initState');
+    });
     WidgetsBinding.instance.addObserver(this);
     print("AK DEBUG: HomeScreen initState");
     // The live listener itself lives in ContainerScreen (one listener for the
@@ -472,6 +624,20 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     deliveryOffMessageNotifier.addListener(_onDeliveryGateChanged);
     getLocationData();
     getBanner();
+    _loadStories();
+    _loadViewedToday();
+    // Recommendation Configuration (2026-07-22, moved here 2026-07-23) -
+    // one read, once, fired from Home rather than app startup, so it never
+    // competes with the onboarding/splash screen's own blocking Firestore
+    // calls for the network channel. RecommendationConfig.current already
+    // holds production-identical defaults synchronously, so nothing waits
+    // on this - by the time a customer opens a restaurant page (always
+    // after Home), this has had plenty of time to resolve in the
+    // background. Safe to call more than once (e.g. Home revisited) -
+    // FireStoreUtils.loadRecommendationConfig() only ever fetches once and
+    // every later call just returns the same in-flight/completed future.
+    // ignore: unawaited_futures
+    FireStoreUtils.loadRecommendationConfig();
   }
 
   void _onDeliveryGateChanged() {
@@ -487,59 +653,95 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   List<VendorCategoryModel> vendorCategoryModel = [];
 
   getBanner() async {
-    await fireStoreUtils.getCuisines().then((value) {
-      vendorCategoryModel = value;
-    });
-    await fireStoreUtils.getHomeTopBanner().then((value) {
-      setState(() {
-        bannerTopHome = value;
-        isHomeBannerLoading = false;
-      });
-    });
-    await FireStoreUtils.firestore
-        .collection(Setting)
-        .doc('story')
-        .get()
-        .then((value) {
-      setState(() {
-        storyEnable = value.data()?['isEnabled'] ?? false;
-      });
-    });
-    // Precache category and top-banner images so they are painted before the
-    // skeleton disappears. A 5-second timeout (inside _precacheBatch) ensures
-    // we never block indefinitely on a slow network.
+    final bannerStopwatch = Stopwatch()..start();
+    debugPrint(
+        '[HOME-PERF] getBanner START — ${_homeInitStopwatch.elapsedMilliseconds}ms since initState');
+    // These three reads are independent of each other (categories, top
+    // banner, story-enabled flag) — run them concurrently instead of
+    // sequentially. Measured at ~2.2s sequential (roughly the sum of all
+    // three); concurrently it should take about as long as the slowest one.
+    await Future.wait([
+      _timedStep('getBanner -> getCuisines', () => fireStoreUtils.getCuisines())
+          .then((value) {
+        vendorCategoryModel = value;
+        // Shared globally so SearchScreen's Product Category search tier
+        // can reuse this same fetch instead of querying again itself.
+        allProductCategoriesList
+          ..clear()
+          ..addAll(value);
+        // O(1) companion lookup (2026-07-21) - rebuilt in lockstep, same
+        // source, so it's never stale relative to the list above.
+        productCategoryById
+          ..clear()
+          ..addEntries(value.where((c) => (c.id ?? '').isNotEmpty).map((c) => MapEntry(c.id!, c)));
+      }),
+      _timedStep(
+              'getBanner -> getHomeTopBanner', () => fireStoreUtils.getHomeTopBanner())
+          .then((value) {
+        setState(() {
+          bannerTopHome = value;
+          isHomeBannerLoading = false;
+        });
+      }),
+      _timedStep(
+              'getBanner -> story setting doc get',
+              () => FireStoreUtils.firestore.collection(Setting).doc('story').get())
+          .then((value) {
+        setState(() {
+          storyEnable = value.data()?['isEnabled'] ?? false;
+        });
+      }),
+    ]);
+    debugPrint(
+        '[HOME-PERF] getBanner TOTAL (3 parallel calls above): ${bannerStopwatch.elapsedMilliseconds}ms');
+    // Warm the image cache for top-banner images in the background — not
+    // awaited, so slow images can no longer hold up the skeleton dismissal.
+    // Each image still shows its own placeholder until it individually loads.
+    //
+    // Category icons are intentionally NOT precached here. Categories are a
+    // lowest-priority, supporting section (not even shown in DineAway) and
+    // CONFIRMED ON-DEVICE (2026-07-15) that any eager batch here — even a
+    // capped one — still jumps ahead of Story/TopBanner/MiddleBanner/
+    // NewArrival/RestaurantList in the shared image-download queue simply by
+    // firing first. CategoryView (below) is a horizontal ListView.builder
+    // with a small cacheExtent look-ahead, so it already requests only the
+    // icons that are visible (+ ~1-2 items buffer) purely from being built —
+    // exactly like New Arrivals/Restaurant List, with no precache needed.
     if (mounted) {
-      await _precacheBatch([
-        ...vendorCategoryModel
-            .where((c) => (c.photo ?? '').isNotEmpty)
-            .map((c) => c.photo!),
-        ...bannerTopHome
+      _precacheBatch(
+        bannerTopHome
             .where((b) => (b.photo ?? '').isNotEmpty)
-            .map((b) => b.photo!),
-      ]);
+            .map((b) => b.photo!)
+            .toList(),
+        section: 'TopBanner',
+      );
     }
     // Categories + top banner + story flag are everything visible at first
-    // paint — signal and try to dismiss skeleton without waiting on the
+    // paint â€” signal and try to dismiss skeleton without waiting on the
     // middle banner, which is below the fold.
     _bannerReady = true;
+    debugPrint(
+        '[HOME-PERF] MILESTONE: _bannerReady=true — ${_homeInitStopwatch.elapsedMilliseconds}ms since initState (firstVendorReceived=$_firstVendorReceived)');
     _tryHideSkeleton();
 
-    // Middle banner renders after "New Arrivals" — load it independently so
+    // Middle banner renders after "New Arrivals" â€” load it independently so
     // it never delays the skeleton.
     _loadMiddleBanner();
   }
 
   void _loadMiddleBanner() {
-    fireStoreUtils.getHomeMiddleBanner().then((value) {
+    // No precache here: the middle banner renders below the fold (after
+    // "New Arrivals"), so eagerly fetching it the moment the data resolves
+    // would request images the user hasn't scrolled to yet. Its own
+    // NetworkImageWidget loads normally once it's actually built/visible.
+    _timedStep('_loadMiddleBanner -> getHomeMiddleBanner',
+            () => fireStoreUtils.getHomeMiddleBanner())
+        .then((value) {
       if (!mounted) return;
       setState(() {
         bannerMiddleHome = value;
         isHomeBannerMiddleLoading = false;
       });
-      _precacheBatch(value
-          .where((b) => (b.photo ?? '').isNotEmpty)
-          .map((b) => b.photo!)
-          .toList());
     });
   }
 
@@ -551,7 +753,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
     return Scaffold(
       backgroundColor:
-      isDarkMode(context) ? AppThemeData.surfaceDark : AppThemeData.surface,
+      isDarkMode(context) ? AppThemeData.surfaceDark : const Color(0xFFF1F2F7),
       body: isLoading == true
           ? HomeSkeletonLoader(orderType: selctedOrderTypeValue ?? 'Delivery')
           : Padding(
@@ -562,9 +764,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             : Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // ═══════════════════════════════════════════════════
-            // HEADER SECTION — CHANGED
-            // ═══════════════════════════════════════════════════
+            // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+            // HEADER SECTION â€” CHANGED
+            // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
             Column(
               mainAxisAlignment: MainAxisAlignment.start,
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -576,12 +778,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     children: [
                       const SizedBox(height: 10),
 
-                      // ── Top Row: Hamburger | Greeting+Location | Cart ──
+                      // â”€â”€ Top Row: Hamburger | Greeting+Location | Cart â”€â”€
                       Row(
                         crossAxisAlignment:
                         CrossAxisAlignment.center,
                         children: [
-                          // ── Hamburger button ──────────────────
+                          // â”€â”€ Hamburger button â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                           InkWell(
                             onTap: () =>
                                 widget.onOpenDrawer?.call(),
@@ -600,14 +802,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                           ),
                           const SizedBox(width: 12),
 
-                          // ── Greeting + Location ───────────────
+                          // â”€â”€ Greeting + Location â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                           Expanded(
                             child: Column(
                               crossAxisAlignment:
                               CrossAxisAlignment.start,
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                // "Hello, Rahul 👋" or "Login"
+                                // "Hello, Rahul ðŸ‘‹" or "Login"
                                 MyAppState.currentUser == null
                                     ? InkWell(
                                   onTap: () =>
@@ -646,7 +848,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                 ),
                                 const SizedBox(height: 2),
 
-                                // 📍 Address + chevron
+                                // ðŸ“ Address + chevron
                                 InkWell(
                                   onTap: () async {
                                     if (MyAppState.currentUser !=
@@ -767,12 +969,20 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                                       true,
                                                       resizeToAvoidBottomInset:
                                                       false,
+                                                      // Hard filter: only
+                                                      // Indian results are
+                                                      // returned at all.
+                                                      autocompleteComponents: [
+                                                        Component(
+                                                            Component.country,
+                                                            'in'),
+                                                      ],
                                                     ),
                                               ),
                                             );
                                           }
                                         } catch (e) {
-                                          // GPS failed — do not set a
+                                          // GPS failed â€” do not set a
                                           // hardcoded location; the user
                                           // must pick their address manually.
                                           await hideProgress();
@@ -829,7 +1039,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
                           const SizedBox(width: 8),
 
-                          // ── Cart icon in circle with badge ────
+                          // â”€â”€ Cart icon in circle with badge â”€â”€â”€â”€
                           InkWell(
                             onTap: () {
                               if (MyAppState.currentUser == null) {
@@ -927,40 +1137,71 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         ],
                       ),
 
-                      const SizedBox(height: 12),
+                      const SizedBox(height: 14),
 
-                      // ── Search bar with mic icon ──────────────
+                      // Search bar
                       InkWell(
                         onTap: () =>
                             push(context, const SearchScreen()),
+                        borderRadius: BorderRadius.circular(16),
                         child: Container(
-                          height: 48,
+                          height: 54,
                           decoration: BoxDecoration(
                             color: isDarkMode(context)
                                 ? AppThemeData.grey800
-                                : AppThemeData.grey100,
-                            borderRadius:
-                            BorderRadius.circular(12),
+                                : Colors.white,
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(
+                              color: isDarkMode(context)
+                                  ? AppThemeData.grey700
+                                  : AppThemeData.primary500
+                                      .withValues(alpha: 0.18),
+                              width: 1.5,
+                            ),
+                            boxShadow: isDarkMode(context)
+                                ? null
+                                : [
+                                    BoxShadow(
+                                      color: AppThemeData.primary500
+                                          .withValues(alpha: 0.07),
+                                      blurRadius: 18,
+                                      offset: const Offset(0, 4),
+                                    ),
+                                    BoxShadow(
+                                      color: Colors.black
+                                          .withValues(alpha: 0.04),
+                                      blurRadius: 6,
+                                      offset: const Offset(0, 2),
+                                    ),
+                                  ],
                           ),
                           child: Row(
                             children: [
-                              const SizedBox(width: 14),
-                              Icon(
-                                Icons.search,
-                                color: isDarkMode(context)
-                                    ? AppThemeData.grey400
-                                    : AppThemeData.grey500,
-                                size: 20,
+                              const SizedBox(width: 12),
+                              Container(
+                                width: 32,
+                                height: 32,
+                                decoration: BoxDecoration(
+                                  color: isDarkMode(context)
+                                      ? AppThemeData.grey700
+                                      : const Color(0xFFEDE8FF),
+                                  borderRadius:
+                                      BorderRadius.circular(8),
+                                ),
+                                child: Icon(
+                                  Icons.search_rounded,
+                                  color: AppThemeData.primary500,
+                                  size: 18,
+                                ),
                               ),
                               const SizedBox(width: 10),
                               Expanded(
                                 child: Text(
-                                  "Search dishes, restaurants, meals..."
+                                  'Search dishes, restaurants, meals...'
                                       .tr(),
                                   style: TextStyle(
                                     fontSize: 14,
-                                    fontFamily:
-                                    AppThemeData.regular,
+                                    fontFamily: AppThemeData.regular,
                                     color: isDarkMode(context)
                                         ? AppThemeData.grey400
                                         : AppThemeData.grey500,
@@ -971,7 +1212,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                 Icons.mic_none_rounded,
                                 color: isDarkMode(context)
                                     ? AppThemeData.grey400
-                                    : AppThemeData.grey500,
+                                    : AppThemeData.primary500,
                                 size: 20,
                               ),
                               const SizedBox(width: 14),
@@ -986,9 +1227,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 ),
               ],
             ),
-            // ═══════════════════════════════════════════════════
+            // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
             // END HEADER SECTION
-            // ═══════════════════════════════════════════════════
+            // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
             Expanded(
               child: RefreshIndicator(
@@ -1033,17 +1274,22 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                           const SizedBox(height: 10),
                           StoryView(
                             storyList: storyList,
-                            orderType:
-                            selctedOrderTypeValue ??
-                                "Delivery".tr(),
+                            orderType: selctedOrderTypeValue ?? "Delivery".tr(),
                             vendors: vendors,
                             deliveryProductsByVendor: _deliveryProductsByVendor,
+                            viewedIds: _viewedTodayIds,
+                            onViewRecorded: (id) {
+                              if (!mounted) return;
+                              setState(() { _viewedTodayIds = {..._viewedTodayIds, id}; });
+                              _saveViewedId(id);
+                              _filterStories();
+                            },
                           ),
                         ],
                       )
                           : const SizedBox(),
                     SizedBox(
-                      height: storyList.isEmpty ? 0 : 20,
+                      height: storyList.isEmpty ? 0 : 8,
                     ),
                     if (selctedOrderTypeValue == "Delivery") ...[
                       Padding(
@@ -1055,10 +1301,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       const SizedBox(height: 10),
                       CategoryView(vendorCategoryList: vendorCategoryModel),
                     ],
-                    const SizedBox(height: 32),
+                    const SizedBox(height: 12),
                     bannerTopHome.isEmpty
                         ? const SizedBox()
-                        : BannerView(bannerList: bannerTopHome),
+                        : BannerView(bannerList: bannerTopHome, sectionLabel: 'TopBanner'),
 
                     /// BY AK
                     if (isDelivery && lstNearByFood.isNotEmpty)
@@ -1123,7 +1369,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     const SizedBox(height: 32),
                     bannerMiddleHome.isEmpty
                         ? const SizedBox()
-                        : BannerView(bannerList: bannerMiddleHome),
+                        : BannerView(bannerList: bannerMiddleHome, sectionLabel: 'MiddleBanner'),
                     Padding(
                       padding: const EdgeInsets.symmetric(
                           horizontal: 16),
@@ -1194,7 +1440,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
-                  // ── List view toggle ────────────────────────────────
+                  // â”€â”€ List view toggle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                   _FabIconButton(
                     isActive: isListView,
                     isDark: isDarkMode(context),
@@ -1213,7 +1459,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       ),
                     ),
                   ),
-                  // ── Map view toggle ─────────────────────────────────
+                  // â”€â”€ Map view toggle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                   _FabIconButton(
                     isActive: !isListView,
                     isDark: isDarkMode(context),
@@ -1232,7 +1478,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       ),
                     ),
                   ),
-                  // ── QR Scanner — slides in/out with AnimatedSize ────
+                  // â”€â”€ QR Scanner â€” slides in/out with AnimatedSize â”€â”€â”€â”€
                   AnimatedSize(
                     duration: const Duration(milliseconds: 220),
                     curve: Curves.easeInOut,
@@ -1263,17 +1509,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                           )
                         : const SizedBox.shrink(),
                   ),
-                  // ── Divider + delivery type selector ────────────────
+                  // â”€â”€ Divider + delivery type selector â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                   _FabDivider(isDark: isDarkMode(context)),
                   DeliveryTypeSelector(
                     selectedValue: selctedOrderTypeValue!,
                     isDarkMode: isDarkMode(context),
                     onValueChanged: (String newValue) async {
                       // Switching Delivery/Dineaway changes special-offer
-                      // matching, eligibility thresholds, and ranking — show
+                      // matching, eligibility thresholds, and ranking â€” show
                       // the skeleton immediately so stale results from the
                       // old section aren't visible while the new section's
                       // data loads, same pattern as _onLocationChanged().
+                      final previousOrderType = currentOrderTypeGlobal;
                       setState(() {
                         selctedOrderTypeValue = newValue;
                         currentOrderTypeGlobal = newValue;
@@ -1282,6 +1529,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         _precachingVendors = false;
                         saveFoodTypeValue();
                       });
+                      // High-level navigation only — this is the single
+                      // user-driven mutation site for currentOrderTypeGlobal
+                      // (not getFoodType()'s cold-start restore, which isn't
+                      // a user action).
+                      BehaviorTracker.track(kEvtNavOrderModeSwitched,
+                          {'from': previousOrderType, 'to': newValue});
                       getData();
                     },
                   ),
@@ -1329,7 +1582,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
-  // Manual sort chips for the "Restaurants Around You" feed — re-sorts the
+  // Manual sort chips for the "Restaurants Around You" feed â€” re-sorts the
   // already-loaded `vendors` list in place (_sortRestaurants), no new fetch.
   Widget _restaurantSortBar() {
     return Row(
@@ -1406,15 +1659,23 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Future<void> _onRefresh() async {
     // Pull-to-refresh: keep isLoading = false (no skeleton during refresh).
     // Reset story state so they re-fetch from Firestore.
+    FireStoreUtils.clearStoryCache();
     _storiesLoaded = false;
     allStories.clear();
     storyList.clear();
-    // Banners, coupons, categories: await so the indicator stays visible
-    // while the most prominent content reloads. _bannerReady / _firstVendorReceived
-    // don't need to be reset because isLoading stays false, so _tryHideSkeleton
-    // is already a no-op.
-    await getBanner();
-    // Restaurants arrive via stream — fire-and-forget; UI updates live.
+    // Reload viewed IDs from SharedPreferences immediately so grey rings
+    // persist across refresh without waiting for the Firestore round-trip.
+    final sp = await SharedPreferences.getInstance();
+    _viewedTodayIds = (sp.getStringList(_viewedTodayKey) ?? []).toSet();
+    // Banners, coupons, categories, and stories: await so the indicator stays
+    // visible while the most prominent content reloads. _bannerReady /
+    // _firstVendorReceived don't need to be reset because isLoading stays
+    // false, so _tryHideSkeleton is already a no-op.
+    final bannerFuture = getBanner();
+    final storiesFuture = _loadStories();
+    await bannerFuture;
+    await storiesFuture;
+    // Restaurants arrive via stream â€” fire-and-forget; UI updates live.
     getData();
   }
 
@@ -1456,53 +1717,101 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   getFoodType() async {
-    SharedPreferences sp = await SharedPreferences.getInstance();
+    SharedPreferences sp = await _timedStep(
+        'getFoodType -> SharedPreferences.getInstance', () => SharedPreferences.getInstance());
     if (mounted) {
       setState(() {
         String? savedFoodType = sp.getString("foodType");
         List<String> validOptions = ['Delivery'.tr(), 'Dineaway'.tr()];
-        selctedOrderTypeValue = (savedFoodType == null ||
+        // No saved preference (new user, or nothing persisted yet) falls
+        // back to Dineaway, not Delivery — see selctedOrderTypeValue's
+        // field-level comment for why.
+        final bool hadNoSavedPreference = savedFoodType == null ||
             savedFoodType == "" ||
-            !validOptions.contains(savedFoodType))
-            ? "Delivery".tr()
-            : savedFoodType;
+            !validOptions.contains(savedFoodType);
+        selctedOrderTypeValue =
+            hadNoSavedPreference ? "Dineaway".tr() : savedFoodType;
         currentOrderTypeGlobal = selctedOrderTypeValue!;
+        if (hadNoSavedPreference) {
+          // Persist immediately — CartScreen/ProductDetailsScreen/
+          // newVendorProductsScreen all read "foodType" from SharedPreferences
+          // independently and default to "Delivery" when it's unset. Without
+          // this, a fresh install shows Dineaway here (in-memory default) but
+          // Cart falls back to Delivery the first time it's opened, since
+          // saveFoodTypeValue() otherwise only runs when the user manually
+          // taps the DeliveryTypeSelector.
+          saveFoodTypeValue();
+        }
       });
     }
-    // The actual product-catalog fetch is started later, by
-    // _startProductsFetchIfNeeded() — see _precacheVendorsAndShow().
   }
 
   List<StoryModel> storyList = [];
   List<StoryModel> allStories = [];
   bool _storiesLoaded = false;
+  Set<String> _viewedTodayIds = {};
+
+  static String get _viewedTodayKey =>
+      'viewed_stories_${DateFormat('yyyy-MM-dd').format(DateTime.now())}';
+
+  Future<void> _loadViewedToday() async {
+    final sp = await _timedStep(
+        '_loadViewedToday -> SharedPreferences.getInstance', () => SharedPreferences.getInstance());
+    final ids = sp.getStringList(_viewedTodayKey) ?? [];
+    if (mounted) {
+      setState(() => _viewedTodayIds = ids.toSet());
+      _filterStories();
+    }
+  }
+
+  Future<void> _saveViewedId(String id) async {
+    final sp = await SharedPreferences.getInstance();
+    final current = sp.getStringList(_viewedTodayKey) ?? [];
+    if (!current.contains(id)) {
+      current.add(id);
+      sp.setStringList(_viewedTodayKey, current);
+    }
+  }
+
+  // Server-confirmed set of vendor IDs within the active section's
+  // nearByRadius of the user's current location - null until the first
+  // response lands, meaning "unknown, don't filter on distance yet".
+  Set<String>? _nearbyVendorIds;
+  String? _nearbyVendorIdsRequestKey;
 
   Map<String, List<ProductModel>> _productsByVendor = {};
 
   // All of each vendor's published, delivery-eligible products (unlike
-  // _productsByVendor above, not capped to the first 20 app-wide) — the
+  // _productsByVendor above, not capped to the first 20 app-wide) â€” the
   // pool AllStore/NewArrival's delivery menu carousels rank/select from.
   Map<String, List<ProductModel>> _deliveryProductsByVendor = {};
 
   void _filterStories() {
-    print('\n🎬 ===== STORY FILTERING START =====');
-    print('📊 Total stories to filter: ${allStories.length}');
-    print('📦 Total vendors available: ${vendors.length}');
-    print('🔄 Current order type: $selctedOrderTypeValue');
+    print('\nðŸŽ¬ ===== STORY FILTERING START =====');
+    print('ðŸ“Š Total stories to filter: ${allStories.length}');
+    print('ðŸ“¦ Total vendors available: ${vendors.length}');
+    print('ðŸ”„ Current order type: $selctedOrderTypeValue');
 
     storyList.clear();
     Set<String> addedStoryIDs = {};
+    Set<String> candidateVendorIds = {};
 
     allStories.forEach((element1) {
       if (!element1.approved) {
         print(
-            '\n📍 Skipping story (not approved) for vendorID: ${element1.vendorID}');
+            '\nðŸ“ Skipping story (not approved) for vendorID: ${element1.vendorID}');
         return;
       }
 
       if (element1.isExpired) {
         print(
-            '\n📍 Skipping story (expired) for vendorID: ${element1.vendorID}');
+            '\nðŸ“ Skipping story (expired) for vendorID: ${element1.vendorID}');
+        return;
+      }
+
+      if (element1.isMediaFailed) {
+        print(
+            '\nðŸ“ Skipping story (Bunny transcode failed) for vendorID: ${element1.vendorID}');
         return;
       }
 
@@ -1511,9 +1820,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         if (element1.vendorID == element.id) {
           vendorFound = true;
 
-          if (!element.isAcceptingOrders) {
+          // Dineaway/Takeaway shows stories regardless of vendor open status.
+          if (selctedOrderTypeValue == "Delivery".tr() && !element.isAcceptingOrders) {
             print(
-                '\n📍 Skipping story (vendor offline) for vendor: ${element.title}');
+                '\nðŸ“ Skipping story (vendor offline) for vendor: ${element.title}');
             return;
           }
 
@@ -1528,6 +1838,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               element1.takeaway) {
             if (element1.hasVideo || element1.hasImage) {
               shouldAdd = true;
+            }
+          }
+
+          if (shouldAdd && element1.vendorID != null && element1.vendorID!.isNotEmpty) {
+            candidateVendorIds.add(element1.vendorID!);
+
+            // Radius filtering is server-confirmed (see _refreshNearbyVendorIds).
+            // Until the first response lands, _nearbyVendorIds is null and
+            // nothing is excluded on distance yet.
+            if (_nearbyVendorIds != null &&
+                !_nearbyVendorIds!.contains(element1.vendorID)) {
+              shouldAdd = false;
             }
           }
 
@@ -1561,16 +1883,167 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
       if (!vendorFound) {
         print(
-            '\n⚠️ Story with vendorID ${element1.vendorID} has no matching vendor in the list!');
+            '\nâš ï¸ Story with vendorID ${element1.vendorID} has no matching vendor in the list!');
       }
     });
 
-    print('\n📋 Final filtered story count: ${storyList.length}');
-    print('🎬 ===== STORY FILTERING END =====\n');
+    // â”€â”€ Sort storyList â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    final bool _sfIsDineaway = selctedOrderTypeValue == "Dineaway".tr() ||
+        selctedOrderTypeValue == "Takeaway".tr();
+    final String _sfOrderType = _sfIsDineaway ? "Takeaway" : "Delivery";
+    final Map<String, VendorModel> _sfVendorById = {
+      for (final v in vendors) v.id: v
+    };
+    final double _sfUserLat =
+        MyAppState.selectedPosotion.location?.latitude ?? 0;
+    final double _sfUserLng =
+        MyAppState.selectedPosotion.location?.longitude ?? 0;
+    final bool _sfHasLocation = MyAppState.selectedPosotion.location != null;
+
+    storyList.sort((a, b) {
+      final bool aViewed = _viewedTodayIds.contains(a.storyID);
+      final bool bViewed = _viewedTodayIds.contains(b.storyID);
+
+      // 1. Unviewed before viewed
+      if (aViewed != bViewed) return aViewed ? 1 : -1;
+
+      // 2. Lowest viewCount first
+      if (a.viewCount != b.viewCount) return a.viewCount.compareTo(b.viewCount);
+
+      final VendorModel? aV = _sfVendorById[a.vendorID];
+      final VendorModel? bV = _sfVendorById[b.vendorID];
+
+      if (aV != null && bV != null) {
+        // 3. Highest effective discount (normal + special, section-aware)
+        final aN = _bestNormalOffer(aV);
+        final aS = _bestSpecialOffer(aV, _sfOrderType);
+        final aDiscount = aN.amount + aS.amount;
+        final bN = _bestNormalOffer(bV);
+        final bS = _bestSpecialOffer(bV, _sfOrderType);
+        final bDiscount = bN.amount + bS.amount;
+        if (aDiscount != bDiscount) return bDiscount.compareTo(aDiscount);
+
+        // 4. Better rating
+        final double aRating =
+            aV.reviewsCount > 0 ? aV.reviewsSum / aV.reviewsCount : 0.0;
+        final double bRating =
+            bV.reviewsCount > 0 ? bV.reviewsSum / bV.reviewsCount : 0.0;
+        if (aRating != bRating) return bRating.compareTo(aRating);
+
+        // 5. Nearest restaurant
+        if (_sfHasLocation) {
+          final double aDist = Geolocator.distanceBetween(
+              _sfUserLat, _sfUserLng, aV.latitude, aV.longitude);
+          final double bDist = Geolocator.distanceBetween(
+              _sfUserLat, _sfUserLng, bV.latitude, bV.longitude);
+          if (aDist != bDist) return aDist.compareTo(bDist);
+        }
+      }
+
+      return 0;
+    });
+    // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    print('\nðŸ“‹ Final filtered story count: ${storyList.length}');
+    print('ðŸŽ¬ ===== STORY FILTERING END =====\n');
     setState(() {});
+
+    _refreshNearbyVendorIds(candidateVendorIds);
+  }
+
+  /// Loads stories + today's viewed-story ids. Fired at startup alongside
+  /// getBanner() (priority: Top Banner, then Story) rather than nested inside
+  /// the getAllStores() vendor-stream listener — that used to make Story wait
+  /// on the restaurant list's first Firestore round trip before even starting
+  /// its own fetch, which is why it visibly loaded last. Idempotent/safe to
+  /// call more than once (e.g. pull-to-refresh) via the _storiesLoaded guard.
+  Future<void> _loadStories() async {
+    if (_storiesLoaded) return;
+    final storiesStopwatch = Stopwatch()..start();
+    debugPrint(
+        '[HOME-PERF] Future.wait([getStory, _loadViewedTodayIds]) START — '
+        '${_homeInitStopwatch.elapsedMilliseconds}ms since initState');
+    await Future.wait([
+      _timedStep('getData -> getStory', () => FireStoreUtils().getStory())
+          .then((value) { allStories = value; }),
+      _timedStep('getData -> _loadViewedTodayIds', () => _loadViewedTodayIds()),
+    ]);
+    debugPrint(
+        '[HOME-PERF] Future.wait([getStory, _loadViewedTodayIds]) END — elapsed '
+        '${storiesStopwatch.elapsedMilliseconds}ms');
+    if (!mounted) return;
+    _storiesLoaded = true;
+    _filterStories();
+  }
+
+  /// Fetches today's story view records for the current user and populates
+  /// [_viewedTodayIds] so the sort puts unviewed stories first.
+  Future<void> _loadViewedTodayIds() async {
+    final userID = MyAppState.currentUser?.userID;
+    if (userID == null || userID.isEmpty) return;
+    final now = DateTime.now();
+    final dateKey =
+        '${now.year}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}';
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection('story_views')
+          .where('userID', isEqualTo: userID)
+          .where('dateKey', isEqualTo: dateKey)
+          .get();
+      final fromFirestore = snap.docs
+          .map((d) => (d.data()['storyID'] as String?) ?? '')
+          .where((id) => id.isNotEmpty)
+          .toSet();
+      // Merge with whatever SharedPreferences already loaded — don't wipe local cache.
+      _viewedTodayIds = {..._viewedTodayIds, ...fromFirestore};
+    } catch (_) {
+      // Non-fatal — sort degrades to viewCount/discount/rating/distance order.
+    }
+  }
+
+  /// Asks the server which of [candidateVendorIds] are within radius of the
+  /// user's current location, then re-runs _filterStories() once a fresh
+  /// answer lands so the list tightens from "everything" to "in range"
+  /// rather than blocking story display on this network round trip.
+  /// De-duped per (location, candidate set) so it doesn't re-fire on every
+  /// vendor-stream tick.
+  Future<void> _refreshNearbyVendorIds(Set<String> candidateVendorIds) async {
+    if (candidateVendorIds.isEmpty) return;
+    if (MyAppState.selectedPosotion.location == null) return;
+
+    final double lat = MyAppState.selectedPosotion.location!.latitude;
+    final double lng = MyAppState.selectedPosotion.location!.longitude;
+
+    final List<String> sortedIds = candidateVendorIds.toList()..sort();
+    final String requestKey =
+        '${lat.toStringAsFixed(3)}_${lng.toStringAsFixed(3)}_${sortedIds.join(',')}';
+    if (requestKey == _nearbyVendorIdsRequestKey) return;
+    _nearbyVendorIdsRequestKey = requestKey;
+
+    // Background/stories-only — does not gate the skeleton or interactivity.
+    final Set<String>? result = await _timedStep(
+        '_refreshNearbyVendorIds -> getNearbyVendorIds (background, stories only)',
+        () => FireStoreUtils().getNearbyVendorIds(
+              lat: lat,
+              lng: lng,
+              vendorIds: sortedIds,
+            ));
+
+    // Treat an empty result the same as a null/failed response â€” a server that
+    // returns zero matching vendors is almost certainly a data issue (vendors
+    // without lat/lng, wrong radius) rather than a genuine "no nearby vendors".
+    // Keeping _nearbyVendorIds null means stories stay visible rather than all
+    // disappearing silently.
+    if (result == null || result.isEmpty || !mounted) return;
+
+    _nearbyVendorIds = result;
+    _filterStories();
   }
 
   Future<void> getData() async {
+    final getDataStopwatch = Stopwatch()..start();
+    debugPrint(
+        '[HOME-PERF] getData START — ${_homeInitStopwatch.elapsedMilliseconds}ms since initState');
     print("AK DEBUG: getData called");
     // Cancel any previous subscription so stale Firestore events from an old
     // location cannot fire after a new location has been selected.
@@ -1587,7 +2060,20 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       name = toBeginningOfSentenceCase(widget.user!.firstName);
     }
 
+    // getAllStores() is a Stream (geoflutterfire radius query), not a single
+    // awaited call — the actual Firestore round trip happens after
+    // .listen() below and is measured by the "first vendor stream event"
+    // milestone log inside the listener, not by this function returning.
+    final vendorStreamStopwatch = Stopwatch()..start();
     _vendorSub = lstAllRestaurant!.listen((event) {
+      if (!_firstStreamEventLogged) {
+        _firstStreamEventLogged = true;
+        debugPrint(
+            '[HOME-PERF] MILESTONE: first vendor stream event (getAllStores) — '
+            '${vendorStreamStopwatch.elapsedMilliseconds}ms after subscribing, '
+            '${_homeInitStopwatch.elapsedMilliseconds}ms since initState, '
+            '${event.length} vendors');
+      }
       print("AK DEBUG: Firestore vendors = ${event.length}");
 
       popularRestaurantLst.clear();
@@ -1603,17 +2089,33 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       allstoreList.addAll(vendors);
 
       // Only processes if the fetch has already been started (it deliberately
-      // hasn't been, on the very first batch — see _startProductsFetchIfNeeded).
+      // hasn't been, on the very first batch â€” see _startProductsFetchIfNeeded).
       productsFuture?.then(_handleProducts);
 
       popularRestaurantLst.addAll(event);
       newArrivalRestaurantList.addAll(event);
 
-      newArrivalRestaurantList.sort(
-            (a, b) => (b.createdAt ?? Timestamp.now())
+      newArrivalRestaurantList.sort((a, b) {
+        // 1. Open before closed.
+        final aOpen = a.isAcceptingOrders;
+        final bOpen = b.isAcceptingOrders;
+        if (aOpen != bOpen) return aOpen ? -1 : 1;
+        // 2. Newest registered first within each group.
+        final timeCmp = (b.createdAt ?? Timestamp.now())
             .toDate()
-            .compareTo((a.createdAt ?? Timestamp.now()).toDate()),
-      );
+            .compareTo((a.createdAt ?? Timestamp.now()).toDate());
+        if (timeCmp != 0) return timeCmp;
+        // 3. Closest distance as tiebreaker.
+        final loc = MyAppState.selectedPosotion.location;
+        if (loc != null) {
+          final aDist = Geolocator.distanceBetween(
+              loc.latitude, loc.longitude, a.latitude, a.longitude);
+          final bDist = Geolocator.distanceBetween(
+              loc.latitude, loc.longitude, b.latitude, b.longitude);
+          return aDist.compareTo(bDist);
+        }
+        return 0;
+      });
 
       List<VendorModel> temp5 = popularRestaurantLst
           .where((element) =>
@@ -1694,24 +2196,25 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         setState(() {});
       }
 
+      // Stories are now loaded independently (see _loadStories(), fired
+      // alongside getBanner() at startup) rather than here — this just picks
+      // up any change to the vendor list (e.g. viewed-today status) once
+      // stories have already arrived.
       if (_storiesLoaded && allStories.isNotEmpty) {
         _filterStories();
       }
-
-      if (!_storiesLoaded) {
-        FireStoreUtils().getStory().then((value) {
-          allStories = value;
-          _storiesLoaded = true;
-          _filterStories();
-        });
-      }
     });
+    debugPrint(
+        '[HOME-PERF] getData TOTAL (function return, NOT first vendor data): '
+        '${getDataStopwatch.elapsedMilliseconds}ms — this only covers synchronous '
+        'setup + opening the stream subscription; see the "first vendor stream event" '
+        'milestone for when data actually arrives.');
   }
 
   // Processes the whole-catalog product fetch's result into the per-vendor
   // lookup maps the card menu carousels read from. Called once the fetch
   // resolves, and again on every later vendor-stream event so live updates
-  // (new vendor, order-type toggle) stay reflected — uses `vendors` (the
+  // (new vendor, order-type toggle) stay reflected â€” uses `vendors` (the
   // current list) rather than a stream-event snapshot, since this can run
   // well after the event that originally triggered the fetch.
   void _handleProducts(List<ProductModel> value) {
@@ -1752,17 +2255,21 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final StoryController controller = StoryController();
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // StoryView
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class StoryView extends StatefulWidget {
   final List<StoryModel> storyList;
   final String orderType;
-  // Vendors are already loaded by HomeScreen's getData() — every story here
+  // Vendors are already loaded by HomeScreen's getData() â€” every story here
   // was already matched to one of these by _filterStories(), so looking
   // vendors up here instead of re-fetching by ID is always safe.
   final List<VendorModel> vendors;
   final Map<String, List<ProductModel>> deliveryProductsByVendor;
+  final Set<String> viewedIds;
+  // Called when a view is committed to Firestore so the ring colour updates
+  // immediately without waiting for a full reload.
+  final void Function(String storyID)? onViewRecorded;
 
   const StoryView({
     super.key,
@@ -1770,6 +2277,8 @@ class StoryView extends StatefulWidget {
     required this.orderType,
     required this.vendors,
     required this.deliveryProductsByVendor,
+    this.viewedIds = const {},
+    this.onViewRecorded,
   });
 
   @override
@@ -1779,39 +2288,194 @@ class StoryView extends StatefulWidget {
 class _StoryViewState extends State<StoryView> {
   late ScrollController _scrollController;
 
-  final Map<String, String?> _thumbnailCache = {};
-
   @override
   void initState() {
     super.initState();
     _scrollController = ScrollController();
   }
 
-  Future<String?> _generateVideoThumbnail(String videoUrl) async {
-    if (_thumbnailCache.containsKey(videoUrl)) {
-      return _thumbnailCache[videoUrl];
-    }
-    try {
-      final tempDir = await getTemporaryDirectory();
-      final thumbnailPath = await VideoThumbnail.thumbnailFile(
-        video: videoUrl,
-        thumbnailPath: tempDir.path,
-        imageFormat: ImageFormat.PNG,
-        timeMs: 1000,
-        quality: 75,
-      );
-      if (thumbnailPath != null) {
-        final file = File(thumbnailPath);
-        if (await file.exists()) {
-          _thumbnailCache[videoUrl] = thumbnailPath;
-          return thumbnailPath;
-        }
-      }
-    } catch (e) {
-      print('❌ Error generating video thumbnail: $e');
-    }
-    _thumbnailCache[videoUrl] = null;
-    return null;
+  // Stories published within the last 6 hours get a "NEW" badge.
+  bool _isNewStory(StoryModel s) {
+    if (s.createdAt == null) return false;
+    return DateTime.now().difference(s.createdAt!.toDate()) <
+        const Duration(hours: 6);
+  }
+
+  Widget _buildCircleItem(
+      StoryModel story, int index, Map<String, VendorModel> vendorsById) {
+    final vendor = vendorsById[story.vendorID?.toString() ?? ''];
+    if (vendor == null) return const SizedBox(width: 66);
+
+    final bool isViewed = widget.viewedIds.contains(story.storyID ?? '');
+    final bool isVideo = story.hasVideo;
+    final bool isNew = _isNewStory(story) && !isViewed;
+    final bool dark = isDarkMode(context);
+
+    return GestureDetector(
+      onTap: () => Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => MoreStories(
+            storyList: widget.storyList,
+            index: index,
+            orderType: widget.orderType,
+            onViewRecorded: widget.onViewRecorded,
+          ),
+        ),
+      ),
+      child: SizedBox(
+        width: 66,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              width: 64,
+              height: 64,
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  // Outer gradient ring (unviewed) or grey ring (viewed).
+                  // Padding creates the ring width; the inner white Container
+                  // creates the visible gap between the ring and the logo.
+                  Container(
+                    width: 64,
+                    height: 64,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      gradient: isViewed
+                          ? null
+                          : const LinearGradient(
+                              colors: [
+                                Color(0xFFE23744),
+                                Color(0xFFF06B2A),
+                                Color(0xFFF5A623),
+                              ],
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                            ),
+                      color: isViewed ? const Color(0xFFC8C8CC) : null,
+                    ),
+                    padding: const EdgeInsets.all(2.5),
+                    child: Container(
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: dark
+                            ? AppThemeData.darkBgSecondary
+                            : Colors.white,
+                      ),
+                      padding: const EdgeInsets.all(2.0),
+                      child: ClipOval(
+                        child: vendor.photo.toString().isNotEmpty
+                            ? Builder(builder: (_) {
+                                final url = vendor.photo.toString();
+                                _logImageLoadStart('storyCircle', url, section: 'Story');
+                                return NetworkImageWidget(
+                                  imageUrl: url,
+                                  width: double.infinity,
+                                  height: double.infinity,
+                                  fit: BoxFit.cover,
+                                  cacheManager: perfDiagnosticCacheManager,
+                                  onLoaded: () =>
+                                      _logImageLoadEnd('storyCircle', url),
+                                  onError: (e) => _logImageLoadEnd(
+                                      'storyCircle', url, error: e.toString()),
+                                );
+                              })
+                            : Container(
+                                color: AppThemeData.primary500,
+                                child: Center(
+                                  child: Text(
+                                    vendor.title.toString().isNotEmpty
+                                        ? vendor.title
+                                            .toString()[0]
+                                            .toUpperCase()
+                                        : '?',
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 18,
+                                      fontFamily: AppThemeData.bold,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                      ),
+                    ),
+                  ),
+
+                  // Video play badge â€” bottom-right corner of circle
+                  if (isVideo)
+                    Positioned(
+                      bottom: 0,
+                      right: 0,
+                      child: Container(
+                        width: 20,
+                        height: 20,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: AppThemeData.primary500,
+                          border: Border.all(
+                            color: dark
+                                ? AppThemeData.darkBgSecondary
+                                : Colors.white,
+                            width: 1.5,
+                          ),
+                        ),
+                        child: const Center(
+                          child: Icon(Icons.play_arrow_rounded,
+                              color: Colors.white, size: 11),
+                        ),
+                      ),
+                    ),
+
+                  // NEW badge â€” bottom-left, only for fresh unviewed stories
+                  if (isNew)
+                    Positioned(
+                      bottom: 0,
+                      left: 0,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 4, vertical: 1.5),
+                        decoration: BoxDecoration(
+                          color: AppThemeData.primary500,
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(
+                            color: dark
+                                ? AppThemeData.darkBgSecondary
+                                : Colors.white,
+                            width: 1.5,
+                          ),
+                        ),
+                        child: const Text(
+                          'NEW',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 6.5,
+                            fontFamily: AppThemeData.bold,
+                            letterSpacing: 0.4,
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 5),
+            Text(
+              vendor.title.toString(),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 10,
+                fontFamily: AppThemeData.semiBold,
+                color: dark
+                    ? AppThemeData.darkTextPrimary
+                    : AppThemeData.neutral900,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   @override
@@ -1822,494 +2486,29 @@ class _StoryViewState extends State<StoryView> {
 
   @override
   Widget build(BuildContext context) {
-    final double _sw = MediaQuery.of(context).size.width;
-    final double _storyH = (_sw * 0.40).clamp(130.0, 180.0);
-    final double _storyExt = (_sw * 0.34).clamp(110.0, 155.0);
-    final double _videoH = (_sw * 0.50).clamp(155.0, 220.0);
-    final double _videoExt = (_sw * 0.40).clamp(130.0, 190.0);
-    // Built once per build() (not per item) and reused for every story card
-    // below — vendors are already in memory, no per-card Firestore reads.
     final Map<String, VendorModel> vendorsById = {
       for (final v in widget.vendors) v.id: v
     };
-    if (widget.orderType == "Delivery".tr()) {
-      return SizedBox(
-        height: _storyH,
-        child: ListView.builder(
-          controller: _scrollController,
-          physics: const ClampingScrollPhysics(),
-          scrollDirection: Axis.horizontal,
-          padding: EdgeInsets.zero,
-          itemCount: widget.storyList.length,
-          addAutomaticKeepAlives: false,
-          addRepaintBoundaries: true,
-          itemExtent: _storyExt,
-          itemBuilder: (context, index) =>
-              _buildStoryItem(widget.storyList[index], index, vendorsById),
-        ),
-      );
-    }
-
     return SizedBox(
-      height: _videoH,
+      height: 90,
       child: ListView.builder(
-        shrinkWrap: true,
+        controller: _scrollController,
         physics: const ClampingScrollPhysics(),
-        itemCount: widget.storyList.length,
         scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        itemCount: widget.storyList.length,
         addAutomaticKeepAlives: false,
         addRepaintBoundaries: true,
-        itemExtent: _videoExt,
-        itemBuilder: (context, index) {
-          StoryModel storyModel = widget.storyList[index];
-
-          String thumbnailUrl = '';
-          bool needsThumbnailGeneration = false;
-          String? videoUrlForThumbnail;
-          final bool isVideo = storyModel.hasVideo;
-
-          if (widget.orderType == "Dineaway".tr() ||
-              widget.orderType == "Takeaway".tr()) {
-            if (storyModel.hasVideo &&
-                storyModel.videoThumbnail != null &&
-                storyModel.videoThumbnail!.isNotEmpty) {
-              thumbnailUrl = storyModel.videoThumbnail.toString();
-            } else if (storyModel.videoThumbnail != null &&
-                storyModel.videoThumbnail!.isNotEmpty) {
-              thumbnailUrl = storyModel.videoThumbnail.toString();
-            } else if (storyModel.hasVideo &&
-                storyModel.videoUrl.isNotEmpty) {
-              needsThumbnailGeneration = true;
-              videoUrlForThumbnail = storyModel.videoUrl[0].toString();
-            } else if (storyModel.hasImage &&
-                storyModel.imageUrl.isNotEmpty) {
-              thumbnailUrl = storyModel.imageUrl[0].toString();
-            }
-          }
-
-          return Padding(
-            padding: const EdgeInsets.only(right: 10),
-            child: GestureDetector(
-              onTap: () {
-                Navigator.of(context).push(MaterialPageRoute(
-                    builder: (context) => MoreStories(
-                          storyList: widget.storyList,
-                          index: index,
-                          orderType: widget.orderType,
-                        )));
-              },
-              child: Container(
-                width: _videoExt - 10,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(18),
-                  border: Border.all(
-                    color: isVideo
-                        ? AppThemeData.primary500.withValues(alpha: 0.7)
-                        : AppThemeData.neutral200,
-                    width: isVideo ? 2.5 : 1,
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.14),
-                      blurRadius: 16,
-                      offset: const Offset(0, 5),
-                    ),
-                  ],
-                ),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(16),
-                  child: Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      // Thumbnail
-                      needsThumbnailGeneration &&
-                              videoUrlForThumbnail != null
-                          ? FutureBuilder<String?>(
-                              future: _generateVideoThumbnail(
-                                  videoUrlForThumbnail),
-                              builder: (context, snapshot) {
-                                if (snapshot.connectionState ==
-                                    ConnectionState.waiting) {
-                                  return _StoryShimmer();
-                                } else if (snapshot.hasData &&
-                                    snapshot.data != null) {
-                                  return Image.file(
-                                    File(snapshot.data!),
-                                    fit: BoxFit.cover,
-                                  );
-                                } else {
-                                  return Container(
-                                      color: const Color(0xFF1A1A2E));
-                                }
-                              },
-                            )
-                          : thumbnailUrl.isNotEmpty
-                              ? NetworkImageWidget(
-                                  imageUrl: thumbnailUrl,
-                                  fit: BoxFit.cover,
-                                )
-                              : Container(color: const Color(0xFF1A1A2E)),
-
-                      // Gradient scrim
-                      DecoratedBox(
-                        decoration: BoxDecoration(
-                          gradient: LinearGradient(
-                            begin: Alignment.topCenter,
-                            end: Alignment.bottomCenter,
-                            colors: [
-                              Colors.transparent,
-                              Colors.black.withValues(alpha: 0.75),
-                            ],
-                            stops: const [0.4, 1.0],
-                          ),
-                        ),
-                      ),
-
-                      // Video play indicator (top-right)
-                      if (isVideo)
-                        Positioned(
-                          top: 8,
-                          right: 8,
-                          child: Container(
-                            width: 28,
-                            height: 28,
-                            decoration: BoxDecoration(
-                              color: Colors.black.withValues(alpha: 0.55),
-                              shape: BoxShape.circle,
-                              border: Border.all(
-                                  color: Colors.white.withValues(alpha: 0.6),
-                                  width: 1.5),
-                            ),
-                            child: const Icon(Icons.play_arrow_rounded,
-                                color: Colors.white, size: 16),
-                          ),
-                        ),
-
-                      // Vendor info overlay at bottom — looked up from the
-                      // already-loaded vendor list, no per-card fetch.
-                      if (vendorsById[storyModel.vendorID.toString()] != null)
-                        Positioned(
-                          left: 8,
-                          right: 8,
-                          bottom: 8,
-                          child: Builder(builder: (context) {
-                            final VendorModel vm =
-                                vendorsById[storyModel.vendorID.toString()]!;
-                            return Row(
-                              crossAxisAlignment:
-                                  CrossAxisAlignment.center,
-                              children: [
-                                Container(
-                                  decoration: BoxDecoration(
-                                    shape: BoxShape.circle,
-                                    border: Border.all(
-                                        color: Colors.white, width: 1.5),
-                                  ),
-                                  child: ClipOval(
-                                    child: NetworkImageWidget(
-                                      imageUrl: vm.photo.toString(),
-                                      width: 26,
-                                      height: 26,
-                                      fit: BoxFit.cover,
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(width: 5),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      Text(
-                                        vm.title.toString(),
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: const TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 11,
-                                          fontFamily: AppThemeData.semiBold,
-                                          shadows: [
-                                            Shadow(
-                                                color: Colors.black45,
-                                                blurRadius: 4)
-                                          ],
-                                        ),
-                                      ),
-                                      Row(
-                                        children: [
-                                          const Icon(Icons.star_rounded,
-                                              color: Color(0xFFFBBC05),
-                                              size: 10),
-                                          const SizedBox(width: 2),
-                                          Text(
-                                            calculateReview(
-                                                reviewCount: vm.reviewsCount
-                                                    .toString(),
-                                                reviewSum: vm.reviewsSum
-                                                    .toStringAsFixed(0)),
-                                            style: TextStyle(
-                                              color: Colors.white
-                                                  .withValues(alpha: 0.85),
-                                              fontSize: 9,
-                                              fontFamily:
-                                                  AppThemeData.medium,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ],
-                            );
-                          }),
-                        ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          );
-        },
+        itemExtent: 66,
+        itemBuilder: (context, index) => _buildCircleItem(
+          widget.storyList[index],
+          index,
+          vendorsById,
+        ),
       ),
     );
   }
 
-  Widget _buildStoryItem(StoryModel storyModel, int originalIndex,
-      Map<String, VendorModel> vendorsById) {
-    final double _sw = MediaQuery.of(context).size.width;
-    final double _cardW = (_sw * 0.34).clamp(110.0, 155.0) - 10;
-    final double _imgH = (_cardW * 0.80).clamp(85.0, 124.0);
-
-    String thumbnailUrl = '';
-    if (storyModel.hasImage && storyModel.imageUrl.isNotEmpty) {
-      thumbnailUrl = storyModel.imageUrl[0].toString();
-    } else if (storyModel.videoThumbnail != null &&
-        storyModel.videoThumbnail!.isNotEmpty) {
-      thumbnailUrl = storyModel.videoThumbnail.toString();
-    }
-
-    final dark = isDarkMode(context);
-
-    // Both lookups are synchronous — the vendor is already in memory (every
-    // story here was matched to one by _filterStories()), and so is its
-    // delivery product list (_deliveryProductsByVendor), so no per-card
-    // Firestore reads are needed here anymore.
-    final VendorModel? vendorModel =
-        vendorsById[storyModel.vendorID.toString()];
-    if (vendorModel == null) {
-      return const SizedBox();
-    }
-    double rating = 0.0;
-    if (vendorModel.reviewsCount > 0) {
-      rating = (vendorModel.reviewsSum / vendorModel.reviewsCount);
-    }
-    final List<ProductModel> vendorProducts =
-        widget.deliveryProductsByVendor[vendorModel.id] ?? [];
-    double highestDiscountPercent = 0.0;
-    bool hasDiscount = false;
-    for (var product in vendorProducts) {
-      if (product.disPrice != null &&
-          product.disPrice != "" &&
-          product.disPrice != "0") {
-        try {
-          double originalPrice = double.parse(product.price);
-          double discountedPrice = double.parse(product.disPrice ?? "0");
-          if (originalPrice > discountedPrice && originalPrice > 0) {
-            double discountPercent =
-                ((originalPrice - discountedPrice) / originalPrice) * 100;
-            if (discountPercent > highestDiscountPercent) {
-              highestDiscountPercent = discountPercent;
-              hasDiscount = true;
-            }
-          }
-        } catch (e) {}
-      }
-    }
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 5),
-      child: Builder(
-        builder: (context) {
-          {
-            return GestureDetector(
-                  onTap: () {
-                    if (widget.orderType == "Delivery".tr() &&
-                        storyModel.hasImage) {
-                      push(context,
-                          NewVendorProductsScreen(vendorModel: vendorModel));
-                    } else {
-                      Navigator.of(context).push(MaterialPageRoute(
-                          builder: (context) => MoreStories(
-                                storyList: widget.storyList,
-                                index: originalIndex,
-                                orderType: widget.orderType,
-                              )));
-                    }
-                  },
-                  child: Container(
-                    width: _cardW,
-                    clipBehavior: Clip.antiAlias,
-                    decoration: BoxDecoration(
-                      color: dark
-                          ? AppThemeData.darkBgSecondary
-                          : Colors.white,
-                      borderRadius: BorderRadius.circular(16),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withValues(alpha: 0.09),
-                          blurRadius: 14,
-                          offset: const Offset(0, 4),
-                        ),
-                        BoxShadow(
-                          color: Colors.black.withValues(alpha: 0.04),
-                          blurRadius: 4,
-                          offset: const Offset(0, 1),
-                        ),
-                      ],
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        // Image area with overlays
-                        Stack(
-                          children: [
-                            ClipRRect(
-                              borderRadius: const BorderRadius.only(
-                                topLeft: Radius.circular(16),
-                                topRight: Radius.circular(16),
-                              ),
-                              child: SizedBox(
-                                width: double.infinity,
-                                height: _imgH,
-                                child: thumbnailUrl.isNotEmpty
-                                    ? NetworkImageWidget(
-                                        imageUrl: thumbnailUrl,
-                                        fit: BoxFit.cover)
-                                    : Container(
-                                        color: dark
-                                            ? const Color(0xFF2A2A3E)
-                                            : const Color(0xFFE8ECF0)),
-                              ),
-                            ),
-                            // Bottom image gradient
-                            Positioned(
-                              left: 0,
-                              right: 0,
-                              bottom: 0,
-                              height: 40,
-                              child: DecoratedBox(
-                                decoration: BoxDecoration(
-                                  borderRadius: const BorderRadius.only(
-                                    topLeft: Radius.circular(16),
-                                    topRight: Radius.circular(16),
-                                  ),
-                                  gradient: LinearGradient(
-                                    begin: Alignment.topCenter,
-                                    end: Alignment.bottomCenter,
-                                    colors: [
-                                      Colors.transparent,
-                                      Colors.black.withValues(alpha: 0.32),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                            ),
-                            // Discount badge
-                            if (hasDiscount && highestDiscountPercent > 0)
-                              Positioned(
-                                top: 7,
-                                left: 7,
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 7, vertical: 3),
-                                  decoration: BoxDecoration(
-                                    gradient: const LinearGradient(
-                                      colors: [
-                                        AppThemeData.accent500,
-                                        AppThemeData.accent600,
-                                      ],
-                                      begin: Alignment.topLeft,
-                                      end: Alignment.bottomRight,
-                                    ),
-                                    borderRadius: BorderRadius.circular(8),
-                                    boxShadow: [
-                                      BoxShadow(
-                                        color: AppThemeData.accent500
-                                            .withValues(alpha: 0.35),
-                                        blurRadius: 6,
-                                        offset: const Offset(0, 2),
-                                      ),
-                                    ],
-                                  ),
-                                  child: Text(
-                                    "${highestDiscountPercent.toStringAsFixed(0)}% OFF",
-                                    style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 9,
-                                      fontFamily: AppThemeData.bold,
-                                    ),
-                                  ),
-                                ),
-                              ),
-                          ],
-                        ),
-                        // Info area
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(8, 7, 8, 8),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              if (rating > 0) ...[
-                                Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    const Icon(Icons.star_rounded,
-                                        color: Color(0xFFFBBC05), size: 12),
-                                    const SizedBox(width: 2),
-                                    Text(
-                                      rating.toStringAsFixed(1),
-                                      style: TextStyle(
-                                        color: dark
-                                            ? AppThemeData.darkTextSecondary
-                                            : AppThemeData.neutral600,
-                                        fontSize: 10,
-                                        fontFamily: AppThemeData.semiBold,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                const SizedBox(height: 4),
-                              ],
-                              Text(
-                                vendorModel.title.toString(),
-                                textAlign: TextAlign.start,
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  height: 1.25,
-                                  color: dark
-                                      ? AppThemeData.darkTextPrimary
-                                      : AppThemeData.neutral900,
-                                  fontFamily: AppThemeData.semiBold,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                );
-          }
-        },
-      ),
-    );
-  }
 }
 
 class _StoryShimmer extends StatefulWidget {
@@ -2361,20 +2560,26 @@ class _StoryShimmerState extends State<_StoryShimmer>
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Auto-sliding restaurant image carousel
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class _RestaurantCardImage extends StatefulWidget {
   final VendorModel vendorModel;
   final double height;
   final BorderRadius borderRadius;
   final bool showDots;
+  // TEMPORARY diagnostic: which Home-screen section this instance belongs
+  // to ("RestaurantList" for the main list, "NewArrival" for that carousel)
+  // — this widget class is shared between both, so the label has to come
+  // from the call site, not be inferred.
+  final String sectionLabel;
 
   const _RestaurantCardImage({
     required this.vendorModel,
     required this.height,
     required this.borderRadius,
     this.showDots = true,
+    required this.sectionLabel,
   });
 
   @override
@@ -2385,11 +2590,29 @@ class _RestaurantCardImageState extends State<_RestaurantCardImage> {
   late PageController _pageController;
   Timer? _timer;
   int _currentPage = 0;
+  // Progressive/viewport-based loading: this card's parent list (AllStore)
+  // uses shrinkWrap, which forces Flutter to build every card up front
+  // regardless of scroll position — without this gate, every card's image
+  // fires its network request immediately, which is what caused the
+  // 10-concurrent-request pileup measured during the startup investigation.
+  // Latches true the first time the card is even 1px visible and never goes
+  // back to false, so a card is never reloaded/flickered by scrolling away
+  // and back.
+  bool _isVisible = false;
+  final Key _visibilityKey = UniqueKey();
+  // Auto-slide must not advance to the next photo while the current one is
+  // still loading — on a slow connection that stacks a fresh, expensive
+  // request on top of one already in flight every 3 seconds, compounding
+  // the exact contention problem this whole investigation started from.
+  // "Settled" means loaded OR errored (an error still counts, so a
+  // permanently-failing image doesn't stall the carousel forever) — only
+  // genuinely still-in-flight pages block the advance.
+  final Set<int> _settledPages = {};
 
   List<String> get _images {
     // photos[0] = logo (same as photo field), photos[1..n] = card gallery images.
     // Skip index 0 so only the actual card images appear in the carousel.
-    // Entries may be a legacy URL string or a {original, cover} map — always
+    // Entries may be a legacy URL string or a {original, cover} map â€” always
     // resolve through coverPhotoUrl() so the carousel shows the 16:9 cover.
     final allPhotos = widget.vendorModel.photos
         .map((e) => VendorModel.coverPhotoUrl(e))
@@ -2406,10 +2629,21 @@ class _RestaurantCardImageState extends State<_RestaurantCardImage> {
   void initState() {
     super.initState();
     _pageController = PageController();
+    // Auto-slide timer is started once the card is actually visible (see
+    // _onBecomeVisible) — starting it here would fire animateToPage() before
+    // this card's PageView has ever been built (it's still behind the
+    // shimmer placeholder), which throws since the controller isn't
+    // attached to any scroll position yet.
+  }
+
+  void _startAutoSlideIfNeeded() {
     final imgs = _images;
-    if (imgs.length > 1) {
+    if (imgs.length > 1 && _timer == null) {
       _timer = Timer.periodic(const Duration(seconds: 3), (_) {
         if (!mounted) return;
+        // Skip this tick (don't advance) while the current photo is still
+        // loading — the next tick will re-check once it settles.
+        if (!_settledPages.contains(_currentPage)) return;
         final next = (_currentPage + 1) % imgs.length;
         _pageController.animateToPage(
           next,
@@ -2417,6 +2651,13 @@ class _RestaurantCardImageState extends State<_RestaurantCardImage> {
           curve: Curves.easeInOut,
         );
       });
+    }
+  }
+
+  void _onBecomeVisible(VisibilityInfo info) {
+    if (info.visibleFraction > 0 && !_isVisible && mounted) {
+      setState(() => _isVisible = true);
+      _startAutoSlideIfNeeded();
     }
   }
 
@@ -2430,6 +2671,23 @@ class _RestaurantCardImageState extends State<_RestaurantCardImage> {
   @override
   Widget build(BuildContext context) {
     final imgs = _images;
+    if (!_isVisible) {
+      return VisibilityDetector(
+        key: _visibilityKey,
+        onVisibilityChanged: _onBecomeVisible,
+        child: ClipRRect(
+          borderRadius: widget.borderRadius,
+          child: _StoryShimmer(
+            width: double.infinity,
+            height: widget.height,
+            borderRadius: 0,
+          ),
+        ),
+      );
+    }
+    if (imgs.length == 1) {
+      _logImageLoadStart('vendorCard', imgs[0], section: widget.sectionLabel);
+    }
     return Stack(
       children: [
         ClipRRect(
@@ -2440,17 +2698,33 @@ class _RestaurantCardImageState extends State<_RestaurantCardImage> {
                   fit: BoxFit.cover,
                   height: widget.height,
                   width: double.infinity,
+                  cacheManager: perfDiagnosticCacheManager,
+                  onLoaded: () => _logImageLoadEnd('vendorCard', imgs[0]),
+                  onError: (e) =>
+                      _logImageLoadEnd('vendorCard', imgs[0], error: e.toString()),
                 )
               : PageView.builder(
                   controller: _pageController,
                   itemCount: imgs.length,
                   onPageChanged: (i) => setState(() => _currentPage = i),
-                  itemBuilder: (_, i) => NetworkImageWidget(
-                    imageUrl: imgs[i],
-                    fit: BoxFit.cover,
-                    height: widget.height,
-                    width: double.infinity,
-                  ),
+                  itemBuilder: (_, i) {
+                    _logImageLoadStart('vendorCard', imgs[i], section: widget.sectionLabel);
+                    return NetworkImageWidget(
+                      imageUrl: imgs[i],
+                      fit: BoxFit.cover,
+                      height: widget.height,
+                      width: double.infinity,
+                      cacheManager: perfDiagnosticCacheManager,
+                      onLoaded: () {
+                        _settledPages.add(i);
+                        _logImageLoadEnd('vendorCard', imgs[i]);
+                      },
+                      onError: (e) {
+                        _settledPages.add(i);
+                        _logImageLoadEnd('vendorCard', imgs[i], error: e.toString());
+                      },
+                    );
+                  },
                 ),
         ),
         if (widget.showDots && imgs.length > 1)
@@ -2480,24 +2754,25 @@ class _RestaurantCardImageState extends State<_RestaurantCardImage> {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Delivery-mode menu carousel — replaces the restaurant photo with up to 5 of
-// the vendor's own menu items (image, name, price), ranked by rolling 30-day
-// sales with a sales → best-discount → lowest-price fallback chain.
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Delivery-mode menu carousel â€” replaces the restaurant photo with up to 5 of
+// the vendor's own menu items (image, name, price), ranked by rolling 90-day
+// (3-month) sales with a sales â†’ best-discount â†’ lowest-price fallback chain.
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class _MenuCarousel extends StatefulWidget {
   final VendorModel vendorModel;
-  final List<ProductModel> products;
   final double height;
   final BorderRadius borderRadius;
   final bool showDots;
+  // TEMPORARY diagnostic: see _RestaurantCardImage.sectionLabel.
+  final String sectionLabel;
 
   const _MenuCarousel({
     required this.vendorModel,
-    required this.products,
     required this.height,
     required this.borderRadius,
     this.showDots = true,
+    required this.sectionLabel,
   });
 
   @override
@@ -2506,25 +2781,16 @@ class _MenuCarousel extends StatefulWidget {
 
 class _MenuCarouselState extends State<_MenuCarousel> {
   late PageController _pageController;
-  late Future<List<ProductModel>> _rankedFuture;
   int _currentPage = 0;
+  // Same progressive/viewport-based loading gate as _RestaurantCardImage —
+  // see that class's field comment for why.
+  bool _isVisible = false;
+  final Key _visibilityKey = UniqueKey();
 
   @override
   void initState() {
     super.initState();
     _pageController = PageController();
-    _rankedFuture =
-        FireStoreUtils.getCarouselProducts(widget.vendorModel.id, widget.products);
-  }
-
-  @override
-  void didUpdateWidget(covariant _MenuCarousel oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.vendorModel.id != widget.vendorModel.id ||
-        oldWidget.products != widget.products) {
-      _rankedFuture =
-          FireStoreUtils.getCarouselProducts(widget.vendorModel.id, widget.products);
-    }
   }
 
   @override
@@ -2533,54 +2799,25 @@ class _MenuCarouselState extends State<_MenuCarousel> {
     super.dispose();
   }
 
-  bool _hasVariants(ProductModel p) {
-    final hasNewAttrs = p.productAttributes.isNotEmpty &&
-        p.productAttributes.any((c) => c.options.any((o) => o.enabled));
-    final hasLegacyVariants = p.itemAttributes != null &&
-        (p.itemAttributes!.attributes?.isNotEmpty ?? false) &&
-        (p.itemAttributes!.variants?.isNotEmpty ?? false);
-    return hasNewAttrs || hasLegacyVariants;
+  String _priceLabelFromMap(String price, String? disPrice) {
+    final double? dis = double.tryParse(disPrice ?? '0');
+    final double? orig = double.tryParse(price);
+    if (dis != null && dis > 0 && orig != null && dis < orig) {
+      return amountShow(amount: disPrice!);
+    }
+    return amountShow(amount: price);
   }
 
-  double? _startingPrice(ProductModel p) {
-    final List<double> prices = [];
-    for (final cfg in p.productAttributes) {
-      for (final o in cfg.options) {
-        if (o.enabled && o.effectivePrice > 0) prices.add(o.effectivePrice);
-      }
-    }
-    final variants = p.itemAttributes?.variants;
-    if (variants != null) {
-      for (final v in variants) {
-        final vp = double.tryParse(v.variant_price ?? '');
-        if (vp != null && vp > 0) prices.add(vp);
-      }
-    }
-    if (prices.isEmpty) return null;
-    return prices.reduce((a, b) => a < b ? a : b);
-  }
-
-  String _priceLabel(ProductModel p) {
-    if (_hasVariants(p)) {
-      final starting = _startingPrice(p);
-      if (starting != null) {
-        return '${'Starting'.tr()} ${amountShow(amount: starting.toStringAsFixed(2))}';
-      }
-    }
-    final disPrice = double.tryParse(p.disPrice ?? '0') ?? 0;
-    final price = double.tryParse(p.price) ?? 0;
-    if (disPrice > 0 && disPrice < price) {
-      return amountShow(amount: p.disPrice!);
-    }
-    return amountShow(amount: p.price);
-  }
-
-  Widget _menuTile(ProductModel p) {
+  Widget _menuTileFromMap(Map<String, dynamic> item) {
+    final String photo = item['photo'] as String? ?? '';
+    final String name = item['name'] as String? ?? '';
+    final String price = item['price'] as String? ?? '';
+    final String? disPrice = item['disPrice'] as String?;
     return Stack(
       fit: StackFit.expand,
       children: [
         NetworkImageWidget(
-          imageUrl: p.photo.isNotEmpty && p.photo != 'null' ? p.photo : '',
+          imageUrl: photo.isNotEmpty && photo != 'null' ? photo : '',
           fit: BoxFit.cover,
           height: widget.height,
           width: double.infinity,
@@ -2603,7 +2840,7 @@ class _MenuCarouselState extends State<_MenuCarousel> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  p.name,
+                  name,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
@@ -2614,7 +2851,7 @@ class _MenuCarouselState extends State<_MenuCarousel> {
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  _priceLabel(p),
+                  _priceLabelFromMap(price, disPrice),
                   style: TextStyle(
                     color: Colors.white.withValues(alpha: 0.9),
                     fontSize: 12,
@@ -2635,62 +2872,75 @@ class _MenuCarouselState extends State<_MenuCarousel> {
       height: widget.height,
       borderRadius: widget.borderRadius,
       showDots: widget.showDots,
+      sectionLabel: widget.sectionLabel,
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    if (widget.products.isEmpty) return _fallbackToRestaurantPhoto();
-    return FutureBuilder<List<ProductModel>>(
-      future: _rankedFuture,
-      builder: (context, snapshot) {
-        final items = snapshot.data ?? widget.products.take(5).toList();
-        if (items.isEmpty) return _fallbackToRestaurantPhoto();
-        return Stack(
-          children: [
-            ClipRRect(
-              borderRadius: widget.borderRadius,
-              child: items.length == 1
-                  ? _menuTile(items[0])
-                  : PageView.builder(
-                      controller: _pageController,
-                      itemCount: items.length,
-                      onPageChanged: (i) => setState(() => _currentPage = i),
-                      itemBuilder: (_, i) => _menuTile(items[i]),
-                    ),
-            ),
-            if (widget.showDots && items.length > 1)
-              Positioned(
-                bottom: 8,
-                left: 0,
-                right: 0,
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: List.generate(items.length, (i) {
-                    final active = i == _currentPage;
-                    return AnimatedContainer(
-                      duration: const Duration(milliseconds: 250),
-                      margin: const EdgeInsets.symmetric(horizontal: 3),
-                      width: active ? 18 : 6,
-                      height: 6,
-                      decoration: BoxDecoration(
-                        color: active ? Colors.white : Colors.white.withValues(alpha: 0.55),
-                        borderRadius: BorderRadius.circular(3),
-                      ),
-                    );
-                  }),
+    final items = widget.vendorModel.topProducts;
+    if (items == null || items.isEmpty) return _fallbackToRestaurantPhoto();
+    if (!_isVisible) {
+      return VisibilityDetector(
+        key: _visibilityKey,
+        onVisibilityChanged: (info) {
+          if (info.visibleFraction > 0 && !_isVisible && mounted) {
+            setState(() => _isVisible = true);
+          }
+        },
+        child: ClipRRect(
+          borderRadius: widget.borderRadius,
+          child: _StoryShimmer(
+            width: double.infinity,
+            height: widget.height,
+            borderRadius: 0,
+          ),
+        ),
+      );
+    }
+    return Stack(
+      children: [
+        ClipRRect(
+          borderRadius: widget.borderRadius,
+          child: items.length == 1
+              ? _menuTileFromMap(items[0])
+              : PageView.builder(
+                  controller: _pageController,
+                  itemCount: items.length,
+                  onPageChanged: (i) => setState(() => _currentPage = i),
+                  itemBuilder: (_, i) => _menuTileFromMap(items[i]),
                 ),
-              ),
-          ],
-        );
-      },
+        ),
+        if (widget.showDots && items.length > 1)
+          Positioned(
+            bottom: 8,
+            left: 0,
+            right: 0,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: List.generate(items.length, (i) {
+                final active = i == _currentPage;
+                return AnimatedContainer(
+                  duration: const Duration(milliseconds: 250),
+                  margin: const EdgeInsets.symmetric(horizontal: 3),
+                  width: active ? 18 : 6,
+                  height: 6,
+                  decoration: BoxDecoration(
+                    color: active ? Colors.white : Colors.white.withValues(alpha: 0.55),
+                    borderRadius: BorderRadius.circular(3),
+                  ),
+                );
+              }),
+            ),
+          ),
+      ],
     );
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // AllStore
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class AllStore extends StatelessWidget {
   final List<VendorModel> allStoreList;
   final Map<String, String> offerBadges;
@@ -2722,26 +2972,29 @@ class AllStore extends StatelessWidget {
           reviewSum: vendorModel.reviewsSum.toString(),
         );
         final int listLen = allStoreList.length >= 10 ? 10 : allStoreList.length;
+        final bool dark = isDarkMode(context);
 
         return Padding(
           key: ValueKey(vendorModel.id),
           padding: EdgeInsets.only(bottom: index == listLen - 1 ? 90 : 24),
           child: InkWell(
-            onTap: () =>
-                push(context, NewVendorProductsScreen(vendorModel: vendorModel)),
+            onTap: () {
+              BehaviorTracker.setNextEntrySource('Home');
+              push(context, NewVendorProductsScreen(vendorModel: vendorModel));
+            },
             borderRadius: BorderRadius.circular(24),
             child: Container(
               decoration: BoxDecoration(
-                color: const Color(0xFFFAFAFC),
+                color: dark ? const Color(0xFF1E1E1E) : Colors.white,
                 borderRadius: BorderRadius.circular(24),
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.09),
+                    color: Colors.black.withValues(alpha: dark ? 0.30 : 0.11),
                     blurRadius: 28,
                     offset: const Offset(0, 10),
                   ),
                   BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.04),
+                    color: Colors.black.withValues(alpha: 0.05),
                     blurRadius: 6,
                     offset: const Offset(0, 2),
                   ),
@@ -2750,7 +3003,7 @@ class AllStore extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // ── Cinematic image area ─────────────────────────────────
+                  // â”€â”€ Cinematic image area â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                   Stack(
                     children: [
                       SizedBox(
@@ -2759,12 +3012,12 @@ class AllStore extends StatelessWidget {
                         child: isDelivery
                             ? _MenuCarousel(
                                 vendorModel: vendorModel,
-                                products: productsByVendor[vendorModel.id] ?? [],
                                 height: Responsive.height(24, context),
                                 borderRadius: const BorderRadius.only(
                                   topLeft: Radius.circular(24),
                                   topRight: Radius.circular(24),
                                 ),
+                                sectionLabel: 'RestaurantList',
                               )
                             : _RestaurantCardImage(
                                 vendorModel: vendorModel,
@@ -2773,6 +3026,7 @@ class AllStore extends StatelessWidget {
                                   topLeft: Radius.circular(24),
                                   topRight: Radius.circular(24),
                                 ),
+                                sectionLabel: 'RestaurantList',
                               ),
                       ),
                       // Cinematic bottom gradient
@@ -2886,9 +3140,9 @@ class AllStore extends StatelessWidget {
                         ),
                     ],
                   ),
-                  // ── Info section ─────────────────────────────────────────
+                  // â”€â”€ Info section â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                   Padding(
-                    padding: const EdgeInsets.fromLTRB(18, 14, 18, 16),
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
@@ -2908,10 +3162,10 @@ class AllStore extends StatelessWidget {
                               child: Text(
                                 vendorModel.title.toString(),
                                 maxLines: 1,
-                                style: const TextStyle(
+                                style: TextStyle(
                                   fontSize: 18,
                                   fontFamily: AppThemeData.bold,
-                                  color: Color(0xFF111111),
+                                  color: dark ? Colors.white : const Color(0xFF111111),
                                   overflow: TextOverflow.ellipsis,
                                   letterSpacing: -0.3,
                                 ),
@@ -2919,22 +3173,15 @@ class AllStore extends StatelessWidget {
                             ),
                           ],
                         ),
-                        const SizedBox(height: 8),
-                        Container(
-                          width: 28,
-                          height: 3,
-                          decoration: BoxDecoration(
-                            color: AppThemeData.primary500,
-                            borderRadius: BorderRadius.circular(2),
-                          ),
-                        ),
-                        const SizedBox(height: 12),
+                        const SizedBox(height: 6),
                         Container(
                           width: double.infinity,
                           padding: const EdgeInsets.symmetric(
-                              horizontal: 10, vertical: 8),
+                              horizontal: 10, vertical: 7),
                           decoration: BoxDecoration(
-                            color: const Color(0xFFF1F1F5),
+                            color: dark
+                                ? Colors.white.withValues(alpha: 0.08)
+                                : const Color(0xFFEDE8FF),
                             borderRadius: BorderRadius.circular(14),
                           ),
                           child: Row(
@@ -2998,9 +3245,9 @@ class AllStore extends StatelessWidget {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // NewArrival
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class NewArrival extends StatelessWidget {
   final List<VendorModel> newArrivalRestaurantList;
   final bool isDelivery;
@@ -3037,6 +3284,7 @@ class NewArrival extends StatelessWidget {
             padding: const EdgeInsets.only(right: 12),
             child: InkWell(
               onTap: () {
+                BehaviorTracker.setNextEntrySource('Home');
                 push(context,
                     NewVendorProductsScreen(vendorModel: vendorModel));
               },
@@ -3048,7 +3296,7 @@ class NewArrival extends StatelessWidget {
                   borderRadius: BorderRadius.circular(16),
                   boxShadow: [
                     BoxShadow(
-                      color: const Color(0x14000000),
+                      color: const Color(0x1A000000),
                       blurRadius: 20,
                       offset: const Offset(0, 4),
                     ),
@@ -3065,13 +3313,13 @@ class NewArrival extends StatelessWidget {
                           child: isDelivery
                               ? _MenuCarousel(
                                   vendorModel: vendorModel,
-                                  products: productsByVendor[vendorModel.id] ?? [],
                                   height: Responsive.height(14, context),
                                   borderRadius: const BorderRadius.only(
                                     topLeft: Radius.circular(16),
                                     topRight: Radius.circular(16),
                                   ),
                                   showDots: false,
+                                  sectionLabel: 'NewArrival',
                                 )
                               : _RestaurantCardImage(
                                   vendorModel: vendorModel,
@@ -3081,6 +3329,7 @@ class NewArrival extends StatelessWidget {
                                     topRight: Radius.circular(16),
                                   ),
                                   showDots: false,
+                                  sectionLabel: 'NewArrival',
                                 ),
                         ),
                         if (!open)
@@ -3241,9 +3490,9 @@ class NewArrival extends StatelessWidget {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // TopSellingView
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class TopSellingView extends StatelessWidget {
   final List<VendorModel> vendors;
   final List<ProductModel> lstNearByFood;
@@ -3276,7 +3525,7 @@ class TopSellingView extends StatelessWidget {
         addAutomaticKeepAlives: false,
         // false: the card's own Clip.antiAliasWithSaveLayer is the compositing
         // boundary; a second RepaintBoundary per item causes BackdropFilter
-        // to blur across layer boundaries → blurred/ghosted text.
+        // to blur across layer boundaries â†’ blurred/ghosted text.
         addRepaintBoundaries: false,
         itemBuilder: (context, index) {
           VendorModel? popularNearFoodVendorModel;
@@ -3366,7 +3615,7 @@ class TopSellingView extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    // ── Image + discount badge ───────────────────────────
+                    // â”€â”€ Image + discount badge â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                     SizedBox(
                       height: _imgH,
                       width: double.infinity,
@@ -3424,7 +3673,7 @@ class TopSellingView extends StatelessWidget {
                         ],
                       ),
                     ),
-                    // ── Body ─────────────────────────────────────────────
+                    // â”€â”€ Body â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                     SizedBox(
                       height: _bodyH,
                       child: Padding(
@@ -3474,7 +3723,7 @@ class TopSellingView extends StatelessWidget {
                                   crossAxisAlignment: CrossAxisAlignment.baseline,
                                   textBaseline: TextBaseline.alphabetic,
                                   children: [
-                                    // Main price — never shrinks
+                                    // Main price â€” never shrinks
                                     Text(
                                       amountShow(
                                         amount: productCommissionPrice(
@@ -3494,7 +3743,7 @@ class TopSellingView extends StatelessWidget {
                                     ),
                                     if (hasDiscount) ...[
                                       const SizedBox(width: 5),
-                                      // Strikethrough — shrinks when space is tight
+                                      // Strikethrough â€” shrinks when space is tight
                                       Flexible(
                                         child: Text(
                                           amountShow(
@@ -3562,9 +3811,9 @@ class TopSellingView extends StatelessWidget {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 /// RecommendForYouView
-/// ─────────────────────────────────────────────────────────────────────────────
+/// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // class RecommendForYouView extends StatefulWidget {
 //   final List<VendorModel> vendors;
 //   final List<ProductModel> recommendedProducts;
@@ -3991,7 +4240,7 @@ class _RecommendForYouViewState
               addAutomaticKeepAlives: false,
               // false: card's own antiAliasWithSaveLayer is the compositing
               // boundary; a per-item RepaintBoundary causes BackdropFilter
-              // to bleed blur into adjacent layers → blurred/ghosted text.
+              // to bleed blur into adjacent layers â†’ blurred/ghosted text.
               addRepaintBoundaries: false,
               itemBuilder: (context, index) => _buildProductItem(row1[index]),
             ),
@@ -4046,6 +4295,7 @@ class _RecommendForYouViewState
 
     return InkWell(
       onTap: () {
+        BehaviorTracker.setNextEntrySource('Recommendation');
         push(context, NewVendorProductsScreen(vendorModel: vendorModel!));
       },
       borderRadius: BorderRadius.circular(14),
@@ -4071,7 +4321,7 @@ class _RecommendForYouViewState
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
-            // ── Image + badges ───────────────────────────────────────
+            // â”€â”€ Image + badges â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
             SizedBox(
               height: _imgH,
               width: double.infinity,
@@ -4155,7 +4405,7 @@ class _RecommendForYouViewState
                 ],
               ),
             ),
-            // ── Body — fixed 55 px (140 - 85), no flex ambiguity ─────
+            // â”€â”€ Body â€” fixed 55 px (140 - 85), no flex ambiguity â”€â”€â”€â”€â”€
             SizedBox(
               height: 55,
               child: Padding(
@@ -4178,7 +4428,7 @@ class _RecommendForYouViewState
                             : const Color(0xFF1A1A1A),
                       ),
                     ),
-                    // Price row — baseline-aligned, main price never shrinks
+                    // Price row â€” baseline-aligned, main price never shrinks
                     Row(
                       crossAxisAlignment: CrossAxisAlignment.baseline,
                       textBaseline: TextBaseline.alphabetic,
@@ -4236,7 +4486,7 @@ class _RecommendForYouViewState
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // CategoryView
 
 class CategoryView extends StatelessWidget {
@@ -4256,8 +4506,16 @@ class CategoryView extends StatelessWidget {
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: 16),
         itemCount: vendorCategoryList.length,
+        // Each item is ~92px wide (72 icon + 20 padding); ~180px caps the
+        // build-ahead (and therefore image-request-ahead) window to roughly
+        // 2 items past the visible edge instead of ListView's default ~250px
+        // (~2.7 items) — categories are the lowest-priority section, so this
+        // buffer is kept deliberately tight.
+        cacheExtent: 180,
         itemBuilder: (context, index) {
           final vendorCategoryModel = vendorCategoryList[index];
+          final categoryUrl = vendorCategoryModel.photo.toString();
+          _logImageLoadStart('categoryIcon', categoryUrl, section: 'Category');
           return Padding(
             padding: const EdgeInsets.only(right: 20),
             child: GestureDetector(
@@ -4276,8 +4534,15 @@ class CategoryView extends StatelessWidget {
                     width: 72,
                     height: 72,
                     child: NetworkImageWidget(
-                      imageUrl: vendorCategoryModel.photo.toString(),
+                      imageUrl: categoryUrl,
                       fit: BoxFit.contain,
+                      // TEMPORARY diagnostic: shares the same instrumented
+                      // cache manager as Story/Banner/NewArrival/
+                      // RestaurantList so network-layer logs can verify
+                      // Category requests never queue ahead of them.
+                      cacheManager: perfDiagnosticCacheManager,
+                      onLoaded: () => _logImageLoadEnd('categoryIcon', categoryUrl),
+                      onError: (e) => _logImageLoadEnd('categoryIcon', categoryUrl, error: e.toString()),
                     ),
                   ),
                   const SizedBox(height: 8),
@@ -4308,13 +4573,16 @@ class CategoryView extends StatelessWidget {
 
 
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // BannerView
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 class BannerView extends StatefulWidget {
   final List<BannerModel> bannerList;
+  // TEMPORARY diagnostic: this widget is used for both the top banner and
+  // the middle banner — the label has to come from the call site.
+  final String sectionLabel;
 
-  const BannerView({super.key, required this.bannerList});
+  const BannerView({super.key, required this.bannerList, required this.sectionLabel});
 
   @override
   State<BannerView> createState() => _BannerViewState();
@@ -4324,6 +4592,39 @@ class _BannerViewState extends State<BannerView> {
   late final PageController _pageController;
   int _currentPage = 0;
   Timer? _autoScrollTimer;
+  // Same fix as _RestaurantCardImage's carousel — don't advance to the next
+  // banner while the current one is still loading. "Settled" = loaded OR
+  // errored, so a permanently-failing banner doesn't stall this forever.
+  final Set<int> _settledPages = {};
+
+  // Load-order fix (2026-07-20): viewportFraction 0.92 + padEnds:false means
+  // the NEXT banner is always partially peeking on screen from the very
+  // first frame, so PageView.builder's itemBuilder fires for BOTH the
+  // current page and that peeking neighbor immediately - two concurrent
+  // network requests with no ordering between them. Whichever response
+  // happened to come back first would paint first, which is exactly what
+  // looked like "banner 2 loading before banner 1". Only page 0 starts
+  // unlocked; every other index's image is deliberately held behind a
+  // shimmer for a short delay so the current page's request always gets a
+  // head start - unless the customer swipes there first, in which case it
+  // unlocks immediately (see onPageChanged below), so a fast swipe never
+  // waits out the delay.
+  final Set<int> _unlockedIndices = {0};
+
+  // Banner Analytics (Phase 2, 2026-07-24, collection-only) - fired once
+  // per bannerId the first time it's actually unlocked/rendered for this
+  // widget instance (not on every rebuild), guarded by this set. Keyed by
+  // bannerId, not index, so a rebuild that reorders bannerList can't
+  // double-fire for the same banner under a new index.
+  final Set<String> _impressedBannerIds = {};
+
+  void _scheduleUnlock(int index) {
+    if (_unlockedIndices.contains(index)) return;
+    Future.delayed(const Duration(milliseconds: 350), () {
+      if (!mounted) return;
+      setState(() => _unlockedIndices.add(index));
+    });
+  }
 
   @override
   void initState() {
@@ -4335,6 +4636,7 @@ class _BannerViewState extends State<BannerView> {
   void _startAutoScroll() {
     _autoScrollTimer = Timer.periodic(const Duration(seconds: 4), (_) {
       if (!mounted || widget.bannerList.length <= 1) return;
+      if (!_settledPages.contains(_currentPage)) return;
       final int next = (_currentPage + 1) % widget.bannerList.length;
       _pageController.animateToPage(
         next,
@@ -4367,12 +4669,76 @@ class _BannerViewState extends State<BannerView> {
             onPageChanged: (value) {
               setState(() {
                 _currentPage = value;
+                // A fast swipe shouldn't wait out _scheduleUnlock's delay -
+                // whatever page the customer actually lands on unlocks
+                // immediately, exactly like it would have before this fix.
+                _unlockedIndices.add(value);
               });
             },
             itemBuilder: (BuildContext context, int index) {
               final BannerModel bannerModel = widget.bannerList[index];
+              final bannerUrl = bannerModel.photo.toString();
+              if (!_unlockedIndices.contains(index)) {
+                _scheduleUnlock(index);
+                return Padding(
+                  padding: const EdgeInsets.only(left: 12, right: 8),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(20),
+                    child: _StoryShimmer(
+                      width: double.infinity,
+                      height: (MediaQuery.of(context).size.width * 0.44)
+                          .clamp(140.0, 210.0),
+                      borderRadius: 0,
+                    ),
+                  ),
+                );
+              }
+              _logImageLoadStart('banner', bannerUrl, section: widget.sectionLabel);
+              // Banner impression (Phase 2, 2026-07-24, collection-only) -
+              // fired once per bannerId per widget instance, the first time
+              // it's actually unlocked/rendered (not on every rebuild of an
+              // already-shown page).
+              final String _bannerId = (bannerModel.id ?? '').toString();
+              if (_bannerId.isNotEmpty && _impressedBannerIds.add(_bannerId)) {
+                BehaviorTracker.track(kEvtBannerImpression, {
+                  'bannerId': _bannerId,
+                  'position': (bannerModel.position ?? '').toString(),
+                  'slot': widget.sectionLabel,
+                });
+              }
               return InkWell(
                 onTap: () async {
+                  // Banner click (Phase 2, 2026-07-24, collection-only) -
+                  // fired for EVERY redirect type, including external_link,
+                  // before any of the existing redirect branching below (so
+                  // a failed/aborted redirect still counts as a click).
+                  // localClickCount is this DEVICE's own running total for
+                  // (banner, device) via BehaviorCounters - ==1 means a
+                  // genuinely new clicker from this doc's perspective, see
+                  // BehaviorTracker._addBannerAnalyticsWrites for how it's
+                  // used to derive uniqueClickCount with zero Firestore reads.
+                  if (_bannerId.isNotEmpty) {
+                    final localClickCount =
+                        await BehaviorCounters.increment('banner_click', _bannerId);
+                    BehaviorTracker.track(kEvtBannerClicked, {
+                      'bannerId': _bannerId,
+                      'position': (bannerModel.position ?? '').toString(),
+                      'slot': widget.sectionLabel,
+                      'redirectType': (bannerModel.redirect_type ?? '').toString(),
+                      'localClickCount': localClickCount,
+                    });
+                    // Order attribution only makes sense for redirects that
+                    // can actually lead to an in-app order - an
+                    // external_link click leaves the app entirely, so it's
+                    // deliberately excluded from setNextEntrySource/
+                    // setNextBannerClick below (no restaurant session or
+                    // order will ever follow it inside this app).
+                    if (bannerModel.redirect_type == "store" ||
+                        bannerModel.redirect_type == "product") {
+                      BehaviorTracker.setNextEntrySource('Banner');
+                      BehaviorTracker.setNextBannerClick(_bannerId);
+                    }
+                  }
                   if (bannerModel.redirect_type == "store") {
                     ShowToastDialog.showLoader("Please wait");
                     VendorModel? vendorModel =
@@ -4404,7 +4770,7 @@ class _BannerViewState extends State<BannerView> {
                 },
                 borderRadius: BorderRadius.circular(20),
                 child: Padding(
-                  padding: EdgeInsets.only(left: index == 0 ? 12 : 0, right: 12),
+                  padding: const EdgeInsets.only(left: 12, right: 8),
                   child: DecoratedBox(
                     decoration: BoxDecoration(
                       borderRadius: BorderRadius.circular(20),
@@ -4427,8 +4793,17 @@ class _BannerViewState extends State<BannerView> {
                         fit: StackFit.expand,
                         children: [
                           NetworkImageWidget(
-                            imageUrl: bannerModel.photo.toString(),
+                            imageUrl: bannerUrl,
                             fit: BoxFit.cover,
+                            cacheManager: perfDiagnosticCacheManager,
+                            onLoaded: () {
+                              _settledPages.add(index);
+                              _logImageLoadEnd('banner', bannerUrl);
+                            },
+                            onError: (e) {
+                              _settledPages.add(index);
+                              _logImageLoadEnd('banner', bannerUrl, error: e.toString());
+                            },
                           ),
                           // Subtle depth gradient
                           Positioned(
@@ -4486,9 +4861,9 @@ class _BannerViewState extends State<BannerView> {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// FAB helpers — shared between list/map and QR buttons
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// FAB helpers â€” shared between list/map and QR buttons
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class _FabIconButton extends StatelessWidget {
   final VoidCallback onTap;

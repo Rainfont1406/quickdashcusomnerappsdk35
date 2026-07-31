@@ -4,6 +4,7 @@ import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/model/VendorCategoryModel.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/dineInScreen/dine_in_restaurant_details_screen.dart';
@@ -215,6 +216,7 @@ class _CategoryDetailsScreenState extends State<CategoryDetailsScreen>
     final isDark = isDarkMode(context);
     return GestureDetector(
       onTap: () {
+        BehaviorTracker.setNextEntrySource('Category');
         if (widget.isDineIn) {
           push(context,
               DineInRestaurantDetailsScreen(vendorModel: vendorModel));

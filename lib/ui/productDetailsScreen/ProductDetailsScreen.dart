@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:cached_network_image/cached_network_image.dart';
@@ -17,6 +18,9 @@ import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/model/variant_info.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/Indicator.dart';
+import 'package:emartconsumer/services/behavior/behavior_counters.dart';
+import 'package:emartconsumer/services/behavior/behavior_event_types.dart';
+import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
@@ -72,6 +76,26 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
   bool isOpen = false;
 
   String? selectedOrderType;
+
+  // Interest-duration signal, same pattern as the restaurant screens: a
+  // single bounded Timer per screen visit, fired once, cancelled on
+  // dispose() if left early - never a repeating/continuous timer. This
+  // screen had no dispose() override before this addition.
+  Timer? _dwellTimer;
+
+  // Restaurant-visit session state (2026-07-24 fix) - this screen can be
+  // reached DIRECTLY (Home's "Popular near you", Favourites), bypassing
+  // NewVendorProductsScreen entirely, which previously meant its
+  // product_viewed/product_added_to_cart events carried no restaurant-
+  // session context at all and could never influence any
+  // restaurantEngagement doc's productViewCount/addToCartCount. This makes
+  // the screen a first-class session entry point, same mechanism
+  // NewVendorProductsScreen already uses.
+  String _restaurantSessionId = '';
+  String _sessionEntrySource = 'Direct';
+  String _sessionSearchKeyword = '';
+  String _sessionSearchType = '';
+  DateTime? _sessionStartedAt;
 
   statusCheck() {
     final now = DateTime.now();
@@ -142,7 +166,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
     // productQnt = widget.productModel.quantity;
 
     print(widget.productModel.price);
-    
+
     getAddOnsData();
     statusCheck();
     loadOrderType();
@@ -177,6 +201,69 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
     }
     getData();
     _initAttributeSelections();
+
+    // Reuse an already-active session for this exact vendor if one exists
+    // (the "more from this store" chain: ProductDetailsScreen ->
+    // ProductDetailsScreen) so one continuous visit produces one
+    // restaurantEngagement doc, not several orphaned ones. Otherwise this
+    // screen is itself the visit's entry point - mint a fresh session.
+    _sessionStartedAt = DateTime.now();
+    final existingSession =
+        BehaviorTracker.recentRestaurantSessionFor(widget.vendorModel.id);
+    if (existingSession != null) {
+      _restaurantSessionId = existingSession.sessionId;
+      _sessionEntrySource = existingSession.entrySource;
+      _sessionSearchKeyword = existingSession.searchKeyword;
+      _sessionSearchType = existingSession.searchType;
+      _sessionStartedAt = existingSession.startedAt;
+    } else {
+      final session =
+          BehaviorTracker.startRestaurantSession(widget.vendorModel.id);
+      _restaurantSessionId = session.sessionId;
+      _sessionEntrySource = session.entrySource;
+      _sessionSearchKeyword = session.searchKeyword;
+      _sessionSearchType = session.searchType;
+    }
+
+    // ignore: unawaited_futures
+    _trackProductViewed();
+    _dwellTimer = Timer(const Duration(seconds: kDwellThresholdSeconds), () {
+      BehaviorTracker.track(kEvtProductInterest, {
+        'productId': widget.productModel.id,
+        'vendorId': widget.vendorModel.id,
+      });
+    });
+  }
+
+  Future<void> _trackProductViewed() async {
+    final viewCount =
+        await BehaviorCounters.increment('product_view', widget.productModel.id);
+    BehaviorTracker.track(kEvtProductViewed, {
+      'productId': widget.productModel.id,
+      'vendorId': widget.vendorModel.id,
+      'categoryId': widget.productModel.categoryID,
+      'viewCount': viewCount,
+      // Cuisine preference signal (2026-07-27) - vendor object already in
+      // memory here, no new Firestore read. See BehaviorTracker's
+      // kEvtProductViewed case for the weighting.
+      'cuisineIds': widget.vendorModel.cuisineIds,
+    });
+    BehaviorTracker.bumpSessionProductView(_restaurantSessionId,
+        categoryId: widget.productModel.categoryID);
+  }
+
+  @override
+  void dispose() {
+    _dwellTimer?.cancel();
+    BehaviorTracker.endRestaurantSession(
+      _restaurantSessionId,
+      vendorId: widget.vendorModel.id,
+      entrySource: _sessionEntrySource,
+      searchKeyword: _sessionSearchKeyword,
+      searchType: _sessionSearchType,
+      startedAt: _sessionStartedAt ?? DateTime.now(),
+    );
+    super.dispose();
   }
 
   void loadOrderType() async {
@@ -417,7 +504,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
 
     return Scaffold(
       backgroundColor:
-          isDarkMode(context) ? AppThemeData.surfaceDark : AppThemeData.surface,
+          isDarkMode(context) ? AppThemeData.surfaceDark : const Color(0xFFF2F0F8),
       body: SingleChildScrollView(
         child: Column(children: [
           Stack(children: [
@@ -558,7 +645,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
           Container(
             padding: const EdgeInsets.only(top: 12),
             decoration: BoxDecoration(
-              color: isDarkMode(context) ? AppThemeData.surfaceDark : AppThemeData.surface,
+              color: isDarkMode(context) ? AppThemeData.surfaceDark : Colors.white,
               borderRadius: const BorderRadius.only(
                 topLeft: Radius.circular(24),
                 topRight: Radius.circular(24),
@@ -862,10 +949,15 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                         decoration: ShapeDecoration(
                                           color: isDarkMode(context)
                                               ? AppThemeData.grey900
-                                              : AppThemeData.grey50,
+                                              : AppThemeData.grey100,
                                           shape: RoundedRectangleBorder(
                                             borderRadius:
                                                 BorderRadius.circular(200),
+                                            side: isDarkMode(context)
+                                                ? BorderSide.none
+                                                : const BorderSide(
+                                                    color: Color(0xFFE5E1FF),
+                                                    width: 1),
                                           ),
                                         ),
                                         child: Row(
@@ -1238,12 +1330,17 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                                     decoration: ShapeDecoration(
                                                       color: isDarkMode(context)
                                                           ? AppThemeData.grey900
-                                                          : AppThemeData.grey50,
+                                                          : AppThemeData.grey100,
                                                       shape:
                                                           RoundedRectangleBorder(
                                                         borderRadius:
                                                             BorderRadius
                                                                 .circular(200),
+                                                        side: isDarkMode(context)
+                                                            ? BorderSide.none
+                                                            : const BorderSide(
+                                                                color: Color(0xFFE5E1FF),
+                                                                width: 1),
                                                       ),
                                                     ),
                                                     child: Row(
@@ -1462,8 +1559,14 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                 decoration: BoxDecoration(
                                   color: isDarkMode(context)
                                       ? AppThemeData.grey900
-                                      : AppThemeData.grey50,
+                                      : Colors.white,
                                   borderRadius: BorderRadius.circular(12),
+                                  border: isDarkMode(context)
+                                      ? null
+                                      : Border.all(
+                                          color: const Color(0xFFE5E1FF),
+                                          width: 1,
+                                        ),
                                   boxShadow: [
                                     BoxShadow(
                                       color: Color(0x0A000000),
@@ -1550,6 +1653,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                       color: Colors.transparent,
                                       child: InkWell(
                                         onTap: () async {
+                                          BehaviorTracker.setNextEntrySource('ProductDetails');
                                           push(
                                             context,
                                             NewVendorProductsScreen(vendorModel: widget.vendorModel),
@@ -1679,8 +1783,14 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                           decoration: BoxDecoration(
                             color: isDarkMode(context)
                                 ? AppThemeData.grey900
-                                : AppThemeData.grey50,
+                                : Colors.white,
                             borderRadius: BorderRadius.circular(16),
+                            border: isDarkMode(context)
+                                ? null
+                                : Border.all(
+                                    color: const Color(0xFFE5E1FF),
+                                    width: 1,
+                                  ),
                             boxShadow: [
                               BoxShadow(
                                 color: Color(0x0A000000),
@@ -1944,7 +2054,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                 decoration: BoxDecoration(
                                   color: isDarkMode(context)
                                       ? AppThemeData.grey900
-                                      : AppThemeData.grey50,
+                                      : AppThemeData.grey100,
                                   borderRadius: BorderRadius.circular(16),
                                   boxShadow: [
                                     BoxShadow(
@@ -2225,7 +2335,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                 decoration: BoxDecoration(
                                   color: isDarkMode(context)
                                       ? AppThemeData.grey900
-                                      : AppThemeData.grey50,
+                                      : AppThemeData.grey100,
                                   borderRadius: BorderRadius.circular(16),
                                   boxShadow: [
                                     BoxShadow(
@@ -2253,12 +2363,12 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                               decoration: BoxDecoration(
                                                 color: isDarkMode(context)
                                                     ? AppThemeData.grey800
-                                                    : AppThemeData.grey50,
+                                                    : Colors.white,
                                                 borderRadius: BorderRadius.circular(12),
                                                 border: Border.all(
                                                   color: lstAddAddonsCustom[index].isCheck
                                                       ? AppThemeData.primary500.withOpacity(0.3)
-                                                      : Colors.transparent,
+                                                      : const Color(0xFFE8E4FF),
                                                   width: 1.5,
                                                 ),
                                               ),
@@ -2495,7 +2605,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                             decoration: BoxDecoration(
                               color: isDarkMode(context)
                                   ? AppThemeData.grey900
-                                  : AppThemeData.grey50,
+                                  : AppThemeData.grey100,
                               borderRadius: BorderRadius.circular(16),
                               boxShadow: [
                                 BoxShadow(
@@ -2732,7 +2842,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                               decoration: ShapeDecoration(
                                                 color: isDarkMode(context)
                                                     ? AppThemeData.grey900
-                                                    : AppThemeData.grey50,
+                                                    : AppThemeData.grey100,
                                                 shape: RoundedRectangleBorder(
                                                   borderRadius:
                                                       BorderRadius.circular(16),
@@ -2987,7 +3097,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                             decoration: ShapeDecoration(
                                               color: isDarkMode(context)
                                                   ? AppThemeData.grey900
-                                                  : AppThemeData.grey50,
+                                                  : AppThemeData.grey100,
                                               shape: RoundedRectangleBorder(
                                                 borderRadius:
                                                     BorderRadius.circular(16),
@@ -3155,7 +3265,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                   decoration: ShapeDecoration(
                                     color: isDarkMode(context)
                                         ? AppThemeData.grey900
-                                        : AppThemeData.grey50,
+                                        : AppThemeData.grey100,
                                     shape: RoundedRectangleBorder(
                                       borderRadius: BorderRadius.circular(16),
                                     ),
@@ -3297,7 +3407,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                   decoration: ShapeDecoration(
                                     color: isDarkMode(context)
                                         ? AppThemeData.grey900
-                                        : AppThemeData.grey50,
+                                        : AppThemeData.grey100,
                                     shape: RoundedRectangleBorder(
                                       borderRadius: BorderRadius.circular(16),
                                     ),
@@ -3875,6 +3985,35 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
         }
       }
     }
+    BehaviorTracker.track(kEvtProductAddedToCart, {
+      'productId': productModel.id,
+      'vendorId': productModel.vendorID,
+      'quantity': productQnt,
+      'categoryId': productModel.categoryID,
+      // Cuisine preference signal (2026-07-27) - vendor object already in
+      // memory here, no new Firestore read. Feeds cuisineInteractionCounts
+      // alongside categoryId above - see BehaviorTracker's
+      // kEvtProductAddedToCart case for the weighting.
+      'cuisineIds': widget.vendorModel.cuisineIds,
+      // Veg/Non-Veg preference signal (2026-07-25) - see
+      // newVendorProductsScreen.dart's identical call site for why this is
+      // captured at add-to-cart rather than order completion.
+      'isVeg': productModel.veg,
+      'isNonVeg': productModel.nonveg,
+    });
+    // Combo metadata cache (2026-07-24) - see
+    // BehaviorTracker.rememberComboMetadata's own doc comment. A no-op for
+    // every non-combo product (the vast majority).
+    if (productModel.isCombo) {
+      BehaviorTracker.rememberComboMetadata(
+        productModel.id,
+        comboProductIds:
+            productModel.comboProducts.map((c) => c.productId).toList(),
+        comboCategoryIds: productModel.comboCategoryIds,
+        price: productModel.price,
+      );
+    }
+    BehaviorTracker.bumpSessionAddToCart(_restaurantSessionId);
     updatePrice();
   }
 
@@ -4001,6 +4140,13 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
             category_id: productModel.categoryID,
             variant_info: productModel.variant_info));
       }
+      BehaviorTracker.track(kEvtProductQuantityChanged, {
+        'productId': productModel.id,
+        'vendorId': productModel.vendorID,
+        'categoryId': productModel.categoryID,
+        'direction': 'dec',
+        'newQuantity': productQnt,
+      });
     } else {
       cartDatabase.removeProduct(productModel.id +
           "~" +
@@ -4015,6 +4161,11 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                   .variant_id
                   .toString()
               : ""));
+      BehaviorTracker.track(kEvtProductRemovedFromCart, {
+        'productId': productModel.id,
+        'vendorId': productModel.vendorID,
+        'categoryId': productModel.categoryID,
+      });
       setState(() {
         productQnt = 0;
       });

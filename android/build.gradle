@@ -17,6 +17,46 @@ subprojects {
             force 'pl.droidsonroids.gif:android-gif-drawable:1.2.25'
         }
     }
+
+    // Some older/unmaintained plugins (e.g. flutter_paypal_native) don't declare
+    // a namespace in their own build.gradle, which AGP 8+ requires. Backfill it
+    // from the plugin's AndroidManifest.xml package attribute instead of patching
+    // the plugin itself, since pub cache is not something we control/version.
+    // Skip ':app' — evaluationDependsOn(':app') above already fully evaluates it
+    // by this point, so Gradle would reject registering afterEvaluate on it.
+    if (project.name != 'app') {
+        afterEvaluate { project ->
+            if (project.hasProperty('android')) {
+                def androidExtension = project.android
+                if (androidExtension.namespace == null) {
+                    def manifestFile = project.file('src/main/AndroidManifest.xml')
+                    if (manifestFile.exists()) {
+                        def manifest = new XmlSlurper().parse(manifestFile)
+                        def packageName = manifest.@package.text()
+                        if (packageName) {
+                            androidExtension.namespace = packageName
+                        }
+                    }
+                }
+            }
+
+            // Plugin modules vary in whether they pin Java/Kotlin compile targets
+            // explicitly, and when they don't, Kotlin's auto-toolchain detection vs.
+            // AGP's own defaults disagree on which JDK version to target, failing the
+            // build ("Inconsistent JVM-target compatibility"). Force every subproject
+            // to Java 17 (matching the JDK actually installed) on both sides instead
+            // of patching each plugin's build.gradle individually. Kotlin tasks are
+            // matched by task name (not the KotlinCompile class) since the Kotlin
+            // Gradle plugin isn't on the root project's own classpath.
+            if (project.hasProperty('android')) {
+                project.android.compileOptions.sourceCompatibility = JavaVersion.VERSION_17
+                project.android.compileOptions.targetCompatibility = JavaVersion.VERSION_17
+            }
+            project.tasks.matching { it.name.startsWith('compile') && it.name.endsWith('Kotlin') }.configureEach { task ->
+                task.kotlinOptions.jvmTarget = "17"
+            }
+        }
+    }
 }
 
 tasks.register("clean", Delete) {

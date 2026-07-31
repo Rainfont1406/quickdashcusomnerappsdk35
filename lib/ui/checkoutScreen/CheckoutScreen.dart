@@ -5,6 +5,8 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/main.dart';
+import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
+import 'package:emartconsumer/services/device_session_service.dart';
 import 'package:emartconsumer/model/AddressModel.dart';
 import 'package:emartconsumer/model/OrderModel.dart';
 import 'package:emartconsumer/model/ProductModel.dart';
@@ -37,6 +39,9 @@ class CheckoutScreen extends StatefulWidget {
   final Timestamp? scheduleTime;
   final AddressModel? address;
   final String? orderType; // "Takeaway" | "Dining" | "Bill Pay" — null for delivery
+  // Links a Bill Pay accept order back to the original vendor request doc
+  // for Cloud Function reconciliation — see PaymentScreen.billPayRequestId.
+  final String? billPayRequestId;
 
   const CheckoutScreen({
     Key? key,
@@ -61,6 +66,7 @@ class CheckoutScreen extends StatefulWidget {
     this.scheduleTime,
     this.address,
     this.orderType,
+    this.billPayRequestId,
   }) : super(key: key);
 
   @override
@@ -855,6 +861,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
   Future<void> _placeOrder() async {
     if (widget.products.isEmpty) return;
+    // TEMPORARY [ORDER-PERF] - timing instrumentation for the loading-speed
+    // investigation. Remove once done.
+    final placeOrderSw = Stopwatch()..start();
+    debugPrint('[ORDER-PERF] CheckoutScreen._placeOrder START');
+    if (!await DeviceSessionService.enforceActive(context)) return;
 
     final List<CartProduct> tempProducts = List.from(widget.products);
 
@@ -919,6 +930,78 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       }
       // ────────────────────────────────────────────────────────────────────
 
+      // Combo Purchase Learning (2026-07-24) - only non-null for line
+      // items whose catalog product was flagged isCombo at add-to-cart
+      // time (see BehaviorTracker.rememberComboMetadata). Zero extra reads:
+      // this is a lookup into an in-memory/persisted cache, never a
+      // catalog re-fetch. Empty list for an order with no combo items -
+      // the common case.
+      final comboLineItems = tempProducts
+          .map((item) {
+            final combo =
+                BehaviorTracker.comboMetadataFor(item.id.split('~').first);
+            if (combo == null) return null;
+            return <String, dynamic>{
+              'productId': item.id.split('~').first,
+              'quantity': item.quantity,
+              'price': combo.price,
+              'comboProductIds': combo.comboProductIds,
+              'comboCategoryIds': combo.comboCategoryIds,
+            };
+          })
+          .whereType<Map<String, dynamic>>()
+          .toList();
+
+      // Purchase-analytics snapshot (2026-07-22) - identical shape/purpose
+      // to PaymentScreen's own copy; see that file's doc comment.
+      // Deliberately duplicated rather than shared via a helper on the
+      // OrderModel/screen boundary - both screens build this from
+      // different local state (tempProducts vs tempProduc, widget.total
+      // vs widget.total, etc.), and PurchaseCompletionListener is the
+      // actual single source of truth for what happens with it, which is
+      // what "avoid duplicating analytics logic" was about, not the
+      // handful of fields feeding into the snapshot itself.
+      final analyticsSnapshot = <String, dynamic>{
+        'categoryIds': tempProducts.map((item) => item.category_id ?? '').where((c) => c.isNotEmpty).toSet().toList(),
+        'cuisineIds': vendorModel.cuisineIds,
+        'restaurantId': tempProducts.first.vendorID,
+        'businessTypeId': vendorModel.businessTypeId,
+        'productIds': tempProducts.map((item) => item.id.split('~').first).toSet().toList(),
+        'totalAmount': widget.total,
+        'orderMode': widget.orderType ?? (widget.take_away == true ? 'Takeaway' : 'Delivery'),
+        'paymentMethod': widget.paymentType,
+        'couponCode': widget.couponCode ?? '',
+        'hasSpecialDiscount': widget.specialDiscountMap != null,
+        // Captured NOW, while still fresh - see
+        // BehaviorTracker.recentSearchQueryFor's own doc comment for why
+        // this can't be re-derived later, at completion time.
+        'reachedViaSearchQuery': BehaviorTracker.recentSearchQueryFor(tempProducts.first.vendorID) ?? '',
+        // Restaurant Engagement / Banner Analytics linkage (Phase 2,
+        // 2026-07-24, collection-only) - same "capture now, read later"
+        // reasoning as reachedViaSearchQuery above: restaurantSessionId
+        // lets PurchaseCompletionListener attribute order COMPLETION back
+        // to the exact browsing session that led here (order PLACEMENT
+        // attribution already happens synchronously via
+        // FirebaseHelper.placeOrder); reachedViaBannerId lets it credit a
+        // banner's ordersGenerated/revenueGenerated the same way
+        // reachedViaSearchQuery credits a search.
+        'restaurantSessionId': BehaviorTracker
+                .recentRestaurantSessionFor(tempProducts.first.vendorID)
+                ?.sessionId ??
+            '',
+        // Search-conversion funnel (collection-only, additive field) -
+        // carried through to PurchaseCompletionListener's order_completed
+        // payload, read by _computeSummaryUpdates to bump
+        // behavior_summary.searchConversion.ordered when this order
+        // originated from a Search/Cuisine-attributed restaurant visit.
+        'entrySource': BehaviorTracker
+                .recentRestaurantSessionFor(tempProducts.first.vendorID)
+                ?.entrySource ??
+            '',
+        'reachedViaBannerId': BehaviorTracker.recentBannerClickId() ?? '',
+        'comboLineItems': comboLineItems,
+      };
+
       final OrderModel orderModel = OrderModel(
         id: widget.id,
         address: widget.address,
@@ -944,13 +1027,19 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         adminCommissionType: sectionConstantModel?.adminCommision?.type,
         taxModel: widget.taxModel,
         takeAway: widget.take_away,
+        orderType: widget.orderType,
         deliveryCharge: widget.deliveryCharge,
         specialDiscount: widget.specialDiscountMap,
         scheduleTime: widget.scheduleTime,
+        billPayRequestId: widget.billPayRequestId,
+        analyticsSnapshot: analyticsSnapshot,
       );
 
+      final writeOrderSw = Stopwatch()..start();
       final OrderModel placedOrder =
           await _fireStoreUtils.placeOrder(orderModel);
+      debugPrint('[ORDER-PERF] FireStoreUtils.placeOrder (Firestore write) — '
+          '${writeOrderSw.elapsedMilliseconds}ms (TOTAL so far ${placeOrderSw.elapsedMilliseconds}ms)');
 
       // Decrement product stock — best-effort, never fails the order
       await Future.wait(tempProducts.map((cartProduct) async {

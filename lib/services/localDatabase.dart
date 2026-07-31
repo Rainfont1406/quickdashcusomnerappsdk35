@@ -30,6 +30,15 @@ class CartProducts extends Table {
 
   TextColumn get variant_info => text().nullable()();
 
+  // Restored (2026-07-19) - already present in the generated CartProduct
+  // class (localDatabase.g.dart, written by model.categoryID at insert
+  // time in addProduct/reAddProduct below) but missing from this source
+  // table, a pre-existing drift that would break the next
+  // `build_runner build` (see CLAUDE.md). Nullable to match the existing
+  // generated field's type exactly. Needed by Pairs Well With's cart-
+  // category-saturation check (RecommendationEngine.fillPairsWellWith).
+  TextColumn get category_id => text().nullable()();
+
   @override
   Set<Column> get primaryKey => {id};
 }

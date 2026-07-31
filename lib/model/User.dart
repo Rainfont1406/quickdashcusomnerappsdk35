@@ -69,6 +69,8 @@ class User with ChangeNotifier {
   CarInfo? carInfo;
   List<dynamic>? rentalBookingDate;
   Timestamp? createdAt;
+  // Stored as ISO date string "yyyy-MM-dd"; null when not set.
+  String? dob;
 
   User(
       {this.email = '',
@@ -111,6 +113,7 @@ class User with ChangeNotifier {
       this.carRate = "0",
       this.vendorID = "",
       this.createdAt,
+      this.dob,
       carInfo})
       : lastOnlineTimestamp = lastOnlineTimestamp ?? Timestamp.now(),
         settings = settings ?? UserSettings(),
@@ -183,6 +186,7 @@ class User with ChangeNotifier {
         rentalBookingDate: parsedJson['rentalBookingDate'] ?? [],
         vendorID: parsedJson['vendorID'] ?? '',
         createdAt: parsedJson['createdAt'],
+        dob: parsedJson['dob'],
         orderRequestData: parsedJson.containsKey('orderRequestData') ? OrderModel.fromJson(parsedJson['orderRequestData']) : null);
   }
 
@@ -240,6 +244,7 @@ class User with ChangeNotifier {
         rentalBookingDate: parsedJson['rentalBookingDate'] ?? [],
         vendorID: parsedJson['vendorID'] ?? '',
         createdAt: parsedJson['createdAt'],
+        dob: parsedJson['dob'],
         orderRequestData: parsedJson.containsKey('orderRequestData') ? OrderModel.fromJson(parsedJson['orderRequestData']) : null);
   }
 
@@ -265,6 +270,7 @@ class User with ChangeNotifier {
       'coordinates': coordinates,
       "userBankDetails": userBankDetails.toJson(),
       'createdAt': this.createdAt,
+      'dob': dob,
       'shippingAddress': shippingAddress != null ? shippingAddress!.map((v) => v.toJson()).toList() : null,
     };
     if (role == USER_ROLE_PROVIDER) {
@@ -329,6 +335,7 @@ class User with ChangeNotifier {
       'coordinates': coordinates,
       "userBankDetails": userBankDetails.toJson(),
       'createdAt': this.createdAt,
+      'dob': dob,
     };
     if (role == USER_ROLE_DRIVER) {
       json.addAll({

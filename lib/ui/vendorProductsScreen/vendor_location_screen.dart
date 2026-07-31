@@ -48,7 +48,6 @@ class _VendorLocationScreenState extends State<VendorLocationScreen> {
   Widget build(BuildContext context) {
     final dark = isDarkMode(context);
     final bottomPadding = MediaQuery.of(context).padding.bottom;
-    final topPadding = MediaQuery.of(context).padding.top;
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -96,20 +95,29 @@ class _VendorLocationScreenState extends State<VendorLocationScreen> {
           ),
 
           // ── Back button ──────────────────────────────────────────────────
+          // SafeArea (not a manual MediaQuery.padding.top + fixed offset)
+          // keeps this clear of the status bar/notch on phones where that
+          // inset is taller or shaped differently than usual.
           Positioned(
-            top: topPadding + 8,
-            left: 12,
-            child: GestureDetector(
-              onTap: () => Navigator.pop(context),
-              child: Container(
-                width: 40,
-                height: 40,
-                decoration: BoxDecoration(
-                  color: Colors.black.withOpacity(0.45),
-                  shape: BoxShape.circle,
+            top: 0,
+            left: 0,
+            child: SafeArea(
+              bottom: false,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 8, 0, 0),
+                child: GestureDetector(
+                  onTap: () => Navigator.pop(context),
+                  child: Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      color: Colors.black.withOpacity(0.45),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(Icons.arrow_back_ios_new_rounded,
+                        color: Colors.white, size: 18),
+                  ),
                 ),
-                child: const Icon(Icons.arrow_back_ios_new_rounded,
-                    color: Colors.white, size: 18),
               ),
             ),
           ),

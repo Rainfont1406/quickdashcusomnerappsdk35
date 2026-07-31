@@ -6,6 +6,8 @@ import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/model/offer_model.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/behavior/behavior_event_types.dart';
+import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:flutter/material.dart';
@@ -51,6 +53,12 @@ class _OffersScreenState extends State<OffersScreen> {
         });
       });
       setState(() {});
+      // One event for the whole screen open, not one per card - avoids an
+      // event-volume blowup as the user scrolls the offers list.
+      if (offersList.isNotEmpty) {
+        BehaviorTracker.track(kEvtOfferViewed,
+            {'offerIds': offersList.map((o) => o.offerId ?? '').toList()});
+      }
     });
   }
 
@@ -269,6 +277,7 @@ class _OffersScreenState extends State<OffersScreen> {
                                       children: [
                                         InkWell(
                                           onTap: () {
+                                            BehaviorTracker.setNextEntrySource('Offer');
                                             push(
                                               context,
                                               NewVendorProductsScreen(vendorModel: vendorModel),
@@ -347,6 +356,8 @@ class _OffersScreenState extends State<OffersScreen> {
                             Expanded(
                               child: GestureDetector(
                                 onTap: () {
+                                  BehaviorTracker.track(kEvtOfferClicked,
+                                      {'offerId': offerModel.offerId ?? '', 'offerCode': offerModel.offerCode ?? ''});
                                   showModalBottomSheet(
                                     isScrollControlled: true,
                                     isDismissible: true,

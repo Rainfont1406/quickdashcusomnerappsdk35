@@ -41,7 +41,7 @@ class _HomeSkeletonLoaderState extends State<HomeSkeletonLoader>
         dark ? const Color(0xFF3A3A3A) : const Color(0xFFF8F8F8);
 
     return ColoredBox(
-      color: dark ? AppThemeData.surfaceDark : AppThemeData.surface,
+      color: dark ? AppThemeData.surfaceDark : const Color(0xFFF1F2F7),
       child: AnimatedBuilder(
         animation: _anim,
         builder: (context, _) => _buildBody(context, base, hi, _anim.value, widget.orderType),

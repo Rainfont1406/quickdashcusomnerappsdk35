@@ -239,8 +239,8 @@ class _ReferralScreenState extends State<ReferralScreen> {
 
   Future<void> share() async {
     await Share.share(
-      '${'Hey there, thanks for choosing eMart. Hope you love our product. If you do, share it with your friends using code'.tr()} ${referralModel!.referralCode.toString()} ${'and get'.tr()} ${amountShow(amount: sectionConstantModel!.referralAmount.toString())} ${'when order completed'.tr()}',
-      subject: 'eMart',
+      '${'Hey there! Use my referral code'.tr()} ${referralModel!.referralCode.toString()} ${'on QuickDash and get'.tr()} ${amountShow(amount: sectionConstantModel!.referralAmount.toString())} ${'when your first order is completed!'.tr()}\n\n${'Download QuickDash now:'.tr()}\nhttps://play.google.com/store/apps/details?id=com.quickdash.hadeveloper',
+      subject: 'QuickDash',
     );
   }
 }

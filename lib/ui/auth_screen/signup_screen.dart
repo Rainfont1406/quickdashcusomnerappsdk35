@@ -8,6 +8,7 @@ import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/User.dart';
 import 'package:emartconsumer/model/referral_model.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/device_session_service.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/notification_service.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
@@ -109,8 +110,9 @@ class _SignupScreenState extends State<SignupScreen> {
     final confirmPassword = conformPasswordEditingController.text.trim();
     final emailValidationMessage = validateEmail(email);
 
-    if (fullName.isEmpty) {
-      ShowToastDialog.showToast("Please enter full name".tr);
+    final nameValidationMessage = validateName(fullName);
+    if (fullName.isEmpty || nameValidationMessage != null) {
+      ShowToastDialog.showToast(nameValidationMessage ?? "Please enter full name".tr);
       return false;
     } else if (email.isEmpty || emailValidationMessage != null) {
       ShowToastDialog.showToast(
@@ -143,6 +145,56 @@ class _SignupScreenState extends State<SignupScreen> {
 
   bool _isBusy = false;
 
+  /// Role-scoped duplicate check: a CUSTOMER account must have a unique
+  /// email and unique (phone + countryCode) among other CUSTOMER accounts.
+  /// A vendor/driver already using the same email/phone is NOT a conflict -
+  /// only a second account with role == customer is. Returns a
+  /// user-facing message if a conflict is found, else null.
+  Future<String?> _findExistingCustomerConflict({
+    required String email,
+    required String phoneNumber,
+    required String countryCode,
+  }) async {
+    final normalizedEmail = email.trim().toLowerCase();
+
+    // Email and phone conflict checks are independent — kick off both
+    // Firestore queries immediately (calling .get() starts the request;
+    // Dart doesn't run past this synchronous point until an await), then
+    // await each only where it's needed, instead of the phone query
+    // strictly following the email query's full round trip.
+    final emailFuture = normalizedEmail.isNotEmpty
+        ? FirebaseFirestore.instance
+            .collection(USERS)
+            .where('email', isEqualTo: normalizedEmail)
+            .get()
+        : null;
+    final phoneFuture = FirebaseFirestore.instance
+        .collection(USERS)
+        .where('phoneNumber', isEqualTo: phoneNumber.trim())
+        .get();
+
+    if (emailFuture != null) {
+      final emailSnap = await emailFuture;
+      final emailConflict = emailSnap.docs.any((doc) =>
+          (doc.data()['role'] as String? ?? '') == USER_ROLE_CUSTOMER);
+      if (emailConflict) {
+        return 'This email is already registered. Please log in to continue.';
+      }
+    }
+
+    final phoneSnap = await phoneFuture;
+    final phoneConflict = phoneSnap.docs.any((doc) {
+      final data = doc.data();
+      return (data['role'] as String? ?? '') == USER_ROLE_CUSTOMER &&
+          (data['countryCode'] as String? ?? '') == countryCode;
+    });
+    if (phoneConflict) {
+      return 'This number is already registered. Please log in to continue.';
+    }
+
+    return null;
+  }
+
   signUpWithEmailAndPassword(BuildContext context) async {
     if (_isBusy) return;
     if (referralCodeEditingController.text.trim().isNotEmpty) {
@@ -162,18 +214,60 @@ class _SignupScreenState extends State<SignupScreen> {
     final nameParts = _splitFullName(fullNameEditingController.text.toString());
     try {
       if (type == "mobileNumber") {
+        // Phone uniqueness for signup is already enforced server-side
+        // (OtpVerifyController::verifyAndMint rejects a duplicate
+        // phone+role before this screen is ever reached) - but email is
+        // only collected here, so it still needs its own check.
+        //
+        // The conflict check, FCM token fetch, and referral lookup are all
+        // independent of each other (none needs another's result, only
+        // locally-available text field input) — run them concurrently
+        // instead of paying for each strictly after the previous one
+        // resolves. Explicit <dynamic> because NotificationService.getToken()
+        // has no declared return type.
+        final signupResults = await Future.wait<dynamic>([
+          _findExistingCustomerConflict(
+            email: emailEditingController.text,
+            phoneNumber: phoneNUmberEditingController.text,
+            countryCode: countryCodeEditingController.text,
+          ),
+          NotificationService.getToken(),
+          FireStoreUtils.getReferralUserByCode(referralCodeEditingController.text),
+        ]);
+        final conflict = signupResults[0] as String?;
+        final fcmToken = signupResults[1] as String;
+        final referralUser = signupResults[2] as ReferralModel?;
+
+        if (conflict != null) {
+          ShowToastDialog.showToast(conflict);
+          await auth.FirebaseAuth.instance.signOut();
+          if (mounted) pushAndRemoveUntil(context, const LoginScreen());
+          return;
+        }
+
+        // Registers this device as the account's authorized device the
+        // moment it's created — without this, a brand-new account has no
+        // device_id on file until its first subsequent login, leaving a
+        // window where a second device could complete its own login-time
+        // authorize() with nothing yet to conflict against.
+        final sessionResult = await DeviceSessionService.authorize(fcmToken: fcmToken);
+        if (!sessionResult.allowed) {
+          ShowToastDialog.showToast(sessionResult.message!);
+          await auth.FirebaseAuth.instance.signOut();
+          if (mounted) pushAndRemoveUntil(context, const LoginScreen());
+          return;
+        }
+
         userModel.firstName = nameParts['firstName']!;
         userModel.lastName = nameParts['lastName']!;
         userModel.email = emailEditingController.text.trim().toLowerCase();
         userModel.phoneNumber = phoneNUmberEditingController.text.trim();
         userModel.role = USER_ROLE_CUSTOMER;
-        userModel.fcmToken = await NotificationService.getToken();
+        userModel.fcmToken = fcmToken;
         userModel.active = true;
         userModel.countryCode = countryCodeEditingController.text;
         userModel.createdAt = Timestamp.now();
 
-        final referralUser = await FireStoreUtils.getReferralUserByCode(
-            referralCodeEditingController.text);
         await FireStoreUtils.referralAdd(ReferralModel(
           id: userModel.userID,
           referralBy: referralUser?.id ?? '',
@@ -204,18 +298,19 @@ class _SignupScreenState extends State<SignupScreen> {
         return;
       }
 
-      final phoneSnap = await FirebaseFirestore.instance
-          .collection(USERS)
-          .where('phoneNumber', isEqualTo: phoneNUmberEditingController.text.trim())
-          .get();
-      final phoneConflict = phoneSnap.docs.any((doc) {
-        final data = doc.data();
-        return data['role'] == USER_ROLE_CUSTOMER &&
-            (data['countryCode'] as String? ?? '') == countryCodeEditingController.text;
-      });
-      if (phoneConflict) {
-        ShowToastDialog.showToast(
-            'This number is already registered. Log in to continue.');
+      // Kick off the FCM token fetch immediately — it doesn't depend on the
+      // conflict check, account creation, or anything else below, so let
+      // it run concurrently with all of that instead of waiting until the
+      // exact point it used to be requested.
+      final fcmTokenFuture = NotificationService.getToken();
+
+      final conflict = await _findExistingCustomerConflict(
+        email: emailEditingController.text,
+        phoneNumber: phoneNUmberEditingController.text,
+        countryCode: countryCodeEditingController.text,
+      );
+      if (conflict != null) {
+        ShowToastDialog.showToast(conflict);
         return;
       }
 
@@ -229,19 +324,36 @@ class _SignupScreenState extends State<SignupScreen> {
         return;
       }
 
+      // Same registration-at-signup fix as the mobileNumber branch above —
+      // see its comment for why this can't just wait for the first login.
+      final fcmToken = await fcmTokenFuture;
+      final sessionResult = await DeviceSessionService.authorize(fcmToken: fcmToken);
+      if (!sessionResult.allowed) {
+        ShowToastDialog.showToast(sessionResult.message!);
+        await auth.FirebaseAuth.instance.signOut();
+        if (mounted) pushAndRemoveUntil(context, const LoginScreen());
+        return;
+      }
+
+      // Also independent of everything else here — start both the moment
+      // the account exists instead of waiting until right before each is
+      // needed.
+      final emailVerificationFuture = credential.user!.sendEmailVerification();
+      final referralFuture = FireStoreUtils.getReferralUserByCode(
+          referralCodeEditingController.text);
+
       userModel.userID = credential.user!.uid;
       userModel.firstName = nameParts['firstName']!;
       userModel.lastName = nameParts['lastName']!;
       userModel.email = emailEditingController.text.trim().toLowerCase();
       userModel.phoneNumber = phoneNUmberEditingController.text.trim();
       userModel.role = USER_ROLE_CUSTOMER;
-      userModel.fcmToken = await NotificationService.getToken();
+      userModel.fcmToken = fcmToken;
       userModel.active = true;
       userModel.countryCode = countryCodeEditingController.text;
       userModel.createdAt = Timestamp.now();
 
-      final referralUser = await FireStoreUtils.getReferralUserByCode(
-          referralCodeEditingController.text);
+      final referralUser = await referralFuture;
       await FireStoreUtils.referralAdd(ReferralModel(
         id: FireStoreUtils.getCurrentUid(),
         referralBy: referralUser?.id ?? '',
@@ -251,7 +363,7 @@ class _SignupScreenState extends State<SignupScreen> {
       await FireStoreUtils.updateCurrentUser(userModel);
 
       try {
-        await credential.user!.sendEmailVerification();
+        await emailVerificationFuture;
       } catch (_) {}
 
       if (!mounted) return;
@@ -293,6 +405,16 @@ class _SignupScreenState extends State<SignupScreen> {
       }
     } catch (_) {
       ShowToastDialog.showToast("Something went wrong. Please try again.");
+      // Any exception this late (e.g. the Firestore profile write failing
+      // right after a successful authorize() call) means signup did not
+      // actually complete — leaving a live Auth session with no matching
+      // profile is worse than signing out and letting the user retry
+      // cleanly. There's no way to un-claim the device_id authorize()
+      // already registered server-side from here, but at least the local
+      // session doesn't limp along half-signed-up.
+      if (auth.FirebaseAuth.instance.currentUser != null) {
+        await auth.FirebaseAuth.instance.signOut();
+      }
     } finally {
       ShowToastDialog.closeLoader();
       if (mounted) setState(() => _isBusy = false);
@@ -338,6 +460,7 @@ class _SignupScreenState extends State<SignupScreen> {
           controller: fullNameEditingController,
           hint: 'Enter Full Name'.tr,
           iconPath: 'assets/icons/ic_user.svg',
+          maxLength: 50,
         ),
         const SizedBox(height: 16),
         AuthFieldLabel(text: 'Email Address'.tr),
@@ -347,6 +470,7 @@ class _SignupScreenState extends State<SignupScreen> {
           iconPath: 'assets/icons/ic_mail.svg',
           keyboardType: TextInputType.emailAddress,
           textCapitalization: TextCapitalization.none,
+          maxLength: 254,
         ),
         const SizedBox(height: 16),
         AuthFieldLabel(text: 'Phone Number'.tr),

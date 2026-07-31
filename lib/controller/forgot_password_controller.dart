@@ -6,25 +6,24 @@ import 'package:get/get.dart';
 class ForgotPasswordController extends GetxController {
   Rx<TextEditingController> emailEditingController = TextEditingController().obs;
 
-  forgotPassword() async {
+  Future<bool> forgotPassword() async {
     final email = emailEditingController.value.text.trim();
     if (email.isEmpty) {
       ShowToastDialog.showToast('Please enter your email address.'.tr);
-      return;
+      return false;
     }
     // Basic email format check
     final emailRegex = RegExp(r'^[^@]+@[^@]+\.[^@]+$');
     if (!emailRegex.hasMatch(email)) {
       ShowToastDialog.showToast('Please enter a valid email address.'.tr);
-      return;
+      return false;
     }
     try {
       ShowToastDialog.showLoader("Please wait".tr);
       await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
-      ShowToastDialog.closeLoader();
       ShowToastDialog.showToast(
           'A password reset link has been sent to $email. Please check your inbox.');
-      Get.back();
+      return true;
     } on FirebaseAuthException catch (e) {
       switch (e.code) {
         case 'user-not-found':
@@ -46,8 +45,11 @@ class ForgotPasswordController extends GetxController {
           ShowToastDialog.showToast(
               e.message ?? 'Failed to send reset link. Please try again.');
       }
-    } catch (_) {
+      return false;
+    } catch (e) {
+      debugPrint('ForgotPassword unexpected error: ${e.runtimeType} -> $e');
       ShowToastDialog.showToast('Something went wrong. Please try again.');
+      return false;
     } finally {
       ShowToastDialog.closeLoader();
     }

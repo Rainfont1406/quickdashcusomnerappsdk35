@@ -1,3 +1,4 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/model/Ratingmodel.dart';
@@ -19,20 +20,43 @@ class ReviewListScreen extends StatefulWidget {
 class _ReviewListScreenState extends State<ReviewListScreen> {
   List<RatingModel> ratingList = <RatingModel>[];
   bool isLoading = true;
+  bool _loadingMore = false;
+  bool _hasMore = true;
+  DocumentSnapshot? _lastDoc;
 
   @override
   void initState() {
     super.initState();
-    getAllReview();
+    _loadFirstPage();
   }
 
-  getAllReview() async {
-    await FireStoreUtils.getVendorReviews(widget.vendorId).then((value) {
-      ratingList = value;
-    });
-    setState(() {
-      isLoading = false;
-    });
+  Future<void> _loadFirstPage() async {
+    final (models, lastDoc) = await FireStoreUtils.getVendorReviewsPaginated(widget.vendorId);
+    if (mounted) {
+      setState(() {
+        ratingList = models;
+        _lastDoc = lastDoc;
+        _hasMore = models.length >= 20;
+        isLoading = false;
+      });
+    }
+  }
+
+  Future<void> _loadMore() async {
+    if (_loadingMore || !_hasMore || _lastDoc == null) return;
+    setState(() => _loadingMore = true);
+    final (models, lastDoc) = await FireStoreUtils.getVendorReviewsPaginated(
+      widget.vendorId,
+      lastDoc: _lastDoc,
+    );
+    if (mounted) {
+      setState(() {
+        ratingList.addAll(models);
+        _lastDoc = lastDoc;
+        _hasMore = models.length >= 20;
+        _loadingMore = false;
+      });
+    }
   }
 
   double get _averageRating {
@@ -73,8 +97,33 @@ class _ReviewListScreenState extends State<ReviewListScreen> {
                     Expanded(
                       child: ListView.builder(
                         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                        itemCount: ratingList.length,
-                        itemBuilder: (context, index) => _buildReviewCard(ratingList[index]),
+                        itemCount: ratingList.length + (_hasMore ? 1 : 0),
+                        itemBuilder: (context, index) {
+                          if (index == ratingList.length) {
+                            return Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 16),
+                              child: Center(
+                                child: _loadingMore
+                                    ? const SizedBox(
+                                        width: 24,
+                                        height: 24,
+                                        child: CircularProgressIndicator(strokeWidth: 2),
+                                      )
+                                    : TextButton(
+                                        onPressed: _loadMore,
+                                        child: Text(
+                                          'Load More'.tr(),
+                                          style: const TextStyle(
+                                            color: AppThemeData.primary500,
+                                            fontFamily: AppThemeData.semiBold,
+                                          ),
+                                        ),
+                                      ),
+                              ),
+                            );
+                          }
+                          return _buildReviewCard(ratingList[index]);
+                        },
                       ),
                     ),
                   ],
@@ -200,6 +249,7 @@ class _ReviewListScreenState extends State<ReviewListScreen> {
                     ],
                   ),
                 ),
+                if (ratingModel.createdAt != null)
                 Text(
                   timestampToDateTime(ratingModel.createdAt!),
                   style: TextStyle(

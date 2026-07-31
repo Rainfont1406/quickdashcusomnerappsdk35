@@ -66,12 +66,9 @@ class AppGlobal {
         onTap: () {
           Navigator.pop(context);
         },
-        child: Icon(
-          Icons.arrow_back_ios,
-          color: AppThemeData.primary500,
-        ),
+        child: const Icon(Icons.arrow_back_ios),
       ),
-      title: Text(title, style: TextStyle(color: isDarkMode(context) ? Colors.white : Colors.black)).tr(),
+      title: Text(title).tr(),
     );
   }
 }

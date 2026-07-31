@@ -13,6 +13,8 @@ import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/model/offer_model.dart';
 import 'package:emartconsumer/model/variant_info.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/behavior/behavior_event_types.dart';
+import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/app_dialog.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
@@ -41,7 +43,14 @@ class CartScreen extends StatefulWidget {
   final bool fromStoreSelection;
   final OrderModel? reOrderModel;
 
-  const CartScreen({Key? key, this.fromStoreSelection = false, this.reOrderModel})
+  // Vendor-initiated Bill Pay accept flow: the customer's cart is replaced
+  // wholesale with the vendor's exact bill (no re-pricing, no dialogs) and
+  // locked from further edits. Paying then creates a brand-new, completely
+  // normal order — see billPayRequestId on OrderModel for how it links back
+  // to this original request.
+  final OrderModel? billPayRequestModel;
+
+  const CartScreen({Key? key, this.fromStoreSelection = false, this.reOrderModel, this.billPayRequestModel})
       : super(key: key);
 
   @override
@@ -63,6 +72,12 @@ class _CartScreenState extends State<CartScreen> {
   var percentage, type = 0.0;
   var amount = 0.00;
   late String couponId = '';
+  // Minimum order amount required by the currently-applied coupon (0 = no
+  // minimum). Set whenever a coupon is applied; used every build to detect
+  // the subtotal dropping below it (e.g. an item was removed) so the coupon
+  // gets auto-removed instead of silently staying "applied" with a total the
+  // customer would never actually be charged (server already rejects it).
+  double _appliedCouponMinAmount = 0.0;
   String vendorID = "";
   late List<AddAddonsDemo> lstExtras = [];
   late List<String> commaSepratedAddOns = [];
@@ -90,9 +105,17 @@ class _CartScreenState extends State<CartScreen> {
   double specialDiscount = 0.0;
   double specialDiscountAmount = 0.0;
   String specialType = "";
-  // When a coupon wins a conflict resolution, suppress the auto special discount
-  // so it doesn't re-activate on the next build cycle.
-  bool _suppressSpecialDiscountForCoupon = false;
+
+  // Resolved-after-conflict-rules amounts that `grandtotal` is actually
+  // computed from (see the combined-discount-ceiling block in build()) — the
+  // Place Order button must read these, not the raw coupon/special-discount
+  // fields above, so the order it creates always matches what the customer
+  // was actually charged. Fields (not build()-local) because the button's
+  // onPressed closure is constructed textually earlier in build() than the
+  // block that resolves them; being fields, the closure reads them fresh at
+  // tap-time from whichever build() last ran, same as `grandtotal` itself.
+  double effectiveDiscountVal = 0.0;
+  double effectiveSpecialDiscountAmount = 0.0;
 
   Timestamp? scheduleTime;
   bool specialDiscountEnable = false;
@@ -123,6 +146,14 @@ class _CartScreenState extends State<CartScreen> {
   // Re-order flow: true while background validation + cart population is in progress
   bool _reOrderPending = false;
   bool _reOrderStarted = false;
+
+  // Bill Pay accept flow: true while the vendor's exact bill is being
+  // dropped into the (cleared) cart. No re-pricing, no validation — see
+  // _populateFromBillPay().
+  bool _billPayPending = false;
+  bool _billPayStarted = false;
+
+  bool get _isBillPayMode => widget.billPayRequestModel != null;
 
   // Cart validation state
   bool _isValidating = false;
@@ -170,6 +201,7 @@ class _CartScreenState extends State<CartScreen> {
     _houseCtrl.text = addressModel.address ?? '';
     _landmarkCtrl.text = addressModel.landmark ?? '';
     _reOrderPending = widget.reOrderModel != null;
+    _billPayPending = _isBillPayMode;
 
     coupon = _fireStoreUtils.getAllCoupons();
     getFoodType();
@@ -177,8 +209,17 @@ class _CartScreenState extends State<CartScreen> {
     _fetchServerTimeOffset();
 
     // Initialize Dineaway state
-    selectedDineawayType = null;
-    isDineawaySelected = false;
+    if (_isBillPayMode) {
+      // Bill Pay is always Dineaway; the vendor already decided this is a
+      // bill settlement, not a fresh Takeaway/Dining choice — so there is
+      // no sub-type picker to show, unlike a normal Dineaway order.
+      selctedOrderTypeValue = 'Dineaway';
+      selectedDineawayType = 'Bill Pay';
+      isDineawaySelected = true;
+    } else {
+      selectedDineawayType = null;
+      isDineawaySelected = false;
+    }
   }
 
   @override
@@ -333,8 +374,8 @@ class _CartScreenState extends State<CartScreen> {
 
   getFoodType() async {
     SharedPreferences sp = await SharedPreferences.getInstance();
-    // Re-orders restore service type from the original order's fields — skip here.
-    if (widget.reOrderModel == null) {
+    // Re-orders and Bill Pay both restore/force their own service type — skip here.
+    if (widget.reOrderModel == null && !_isBillPayMode) {
       setState(() {
         selctedOrderTypeValue =
             sp.getString("foodType") == "" || sp.getString("foodType") == null
@@ -597,7 +638,7 @@ class _CartScreenState extends State<CartScreen> {
           builder: (ctx) => ProductOptionsDialog(
             productModel: fresh,
             initialVariantInfo: oldVariantInfo,
-            onAddToCart: (ProductModel updatedProduct, double totalPrice) async {
+            onAddToCart: (ProductModel updatedProduct, double totalPrice, int quantity) async {
               Navigator.of(ctx).pop(updatedProduct);
             },
           ),
@@ -650,6 +691,39 @@ class _CartScreenState extends State<CartScreen> {
     }
   }
 
+  // ── Bill Pay accept: drop the vendor's exact bill into a cleared cart ────────
+  // Deliberately does NOT re-fetch/re-price items like _populateFromReOrder —
+  // the whole point is the customer pays exactly what the vendor billed, not
+  // today's catalog price. Items are inserted byte-for-byte from the vendor's
+  // request and the UI locks them from edits (see _isBillPayMode gates in
+  // _modernCartItem/_buildItemsContainer). Skips _validateCart() entirely for
+  // the same reason — no price/stock reconciliation against catalog data.
+  Future<void> _populateFromBillPay() async {
+    final order = widget.billPayRequestModel!;
+    try {
+      await cartDatabase.deleteAllProducts();
+      for (final cp in order.products) {
+        try {
+          await cartDatabase.reAddProduct(cp);
+        } catch (_) {}
+      }
+      vendorModel = await _fireStoreUtils.getVendorByVendorID(order.vendorID);
+      vendorID = order.vendorID;
+      await getTaxData();
+    } catch (_) {
+      // Fall back to whatever partial state was populated — the item list
+      // itself (already written above) is what matters for the locked UI.
+    } finally {
+      if (mounted) {
+        setState(() {
+          _billPayPending = false;
+          isDeliverFound = true; // skip getDeliveyData()/_validateCart() — no re-pricing for a locked bill
+          _isCartInitialized = true;
+        });
+      }
+    }
+  }
+
   Future<void> getDeliveyData() async {
     isDeliverFound = true;
     try {
@@ -683,6 +757,10 @@ class _CartScreenState extends State<CartScreen> {
 
   Future<void> _validateCart() async {
     if (!mounted || cartProducts.isEmpty || _isValidating) return;
+    // TEMPORARY [CART-PERF] - timing instrumentation for the loading-speed
+    // investigation. Remove once done.
+    final validateSw = Stopwatch()..start();
+    debugPrint('[CART-PERF] _validateCart START — ${cartProducts.length} item(s)');
     // Stamp the hash now so the StreamBuilder doesn't schedule a redundant
     // re-validation when it rebuilds after _isCartInitialized becomes true.
     _lastPermCartHash = cartProducts.map((p) => p.id).join(',');
@@ -712,6 +790,7 @@ class _CartScreenState extends State<CartScreen> {
     // ── Fetch all products in parallel ────────────────────────────────────────
     // Snapshot the list so mutations during async work don't cause issues.
     final cartSnapshot = List<CartProduct>.from(cartProducts);
+    final fetchProductsSw = Stopwatch()..start();
     final freshProducts = await Future.wait<ProductModel?>(
       cartSnapshot.map((cp) async {
         try {
@@ -721,6 +800,8 @@ class _CartScreenState extends State<CartScreen> {
         }
       }),
     );
+    debugPrint('[CART-PERF] getProductByID x${cartSnapshot.length} (parallel) — '
+        '${fetchProductsSw.elapsedMilliseconds}ms');
 
     // ── Process results (no more async Firestore calls inside this loop) ──────
     final List<String> idsToRemove = [];
@@ -1008,6 +1089,7 @@ class _CartScreenState extends State<CartScreen> {
           if (!_isCartInitialized) _isCartInitialized = true;
         });
       }
+      debugPrint('[CART-PERF] _validateCart TOTAL — ${validateSw.elapsedMilliseconds}ms');
     }
   }
 
@@ -1057,7 +1139,7 @@ class _CartScreenState extends State<CartScreen> {
         builder: (ctx) => ProductOptionsDialog(
           productModel: fresh,
           initialVariantInfo: vi,
-          onAddToCart: (ProductModel updatedProduct, double totalPrice) async {
+          onAddToCart: (ProductModel updatedProduct, double totalPrice, int quantity) async {
             Navigator.of(ctx).pop(updatedProduct);
           },
         ),
@@ -1167,6 +1249,14 @@ class _CartScreenState extends State<CartScreen> {
         if (mounted) _populateFromReOrder();
       });
     }
+
+    // Kick off Bill Pay population once cartDatabase is available
+    if (_isBillPayMode && !_billPayStarted) {
+      _billPayStarted = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _populateFromBillPay();
+      });
+    }
   }
 
   @override
@@ -1185,7 +1275,7 @@ class _CartScreenState extends State<CartScreen> {
   Widget _buildScreen(BuildContext context) {
     return Scaffold(
       backgroundColor:
-          isDarkMode(context) ? AppThemeData.surfaceDark : AppThemeData.surface,
+          isDarkMode(context) ? AppThemeData.surfaceDark : const Color(0xFFF2F0F8),
       body: SafeArea(
         child: StreamBuilder<List<CartProduct>>(
           stream: _cartStream ?? cartDatabase.watchProducts,
@@ -1201,12 +1291,13 @@ class _CartScreenState extends State<CartScreen> {
                 // the stream has a chance to deliver the actual cart contents.
                 if (data.isEmpty &&
                     !_reOrderPending &&
+                    !_billPayPending &&
                     snapshot.connectionState != ConnectionState.waiting) {
                   // Real empty cart confirmed — skip validation, show real UI immediately
                   WidgetsBinding.instance.addPostFrameCallback((_) {
                     if (mounted) setState(() => _isCartInitialized = true);
                   });
-                } else if (data.isNotEmpty && !_reOrderPending) {
+                } else if (data.isNotEmpty && !_reOrderPending && !_billPayPending) {
                   // Keep the skeleton visible while validation runs.
                   // _validateCart() sets _isCartInitialized = true when it
                   // finishes, so the cart only appears fully checked.
@@ -1236,10 +1327,10 @@ class _CartScreenState extends State<CartScreen> {
                       percentage = 0.0;
                       type = 0.0;
                       txt.clear();
+                      _appliedCouponMinAmount = 0.0;
                       specialDiscount = 0.0;
                       specialDiscountAmount = 0.0;
                       specialType = '';
-                      _suppressSpecialDiscountForCoupon = false;
                       tipValue = 0.0;
                       deliveryCharges = '0.0';
                       isDeliverFound = false;
@@ -1267,7 +1358,10 @@ class _CartScreenState extends State<CartScreen> {
               final cartHash = cartProducts.map((p) => p.id).join(',');
               if (_lastPermCartHash != cartHash) {
                 _lastPermCartHash = cartHash;
-                if (_isCartInitialized && !_isValidating && !_dialogsFlushInProgress) {
+                if (_isBillPayMode) {
+                  // Locked bill — no fresh-price/stock reconciliation against
+                  // catalog data; the customer pays exactly what was billed.
+                } else if (_isCartInitialized && !_isValidating && !_dialogsFlushInProgress) {
                   // Cart items changed after initial load — re-validate from Firestore
                   WidgetsBinding.instance.addPostFrameCallback((_) {
                     if (mounted && !_isValidating && !_dialogsFlushInProgress) _validateCart();
@@ -1369,7 +1463,7 @@ class _CartScreenState extends State<CartScreen> {
                                             percentage = 0.0;
                                             type = 0.0;
                                             txt.clear();
-                                            _suppressSpecialDiscountForCoupon = false;
+                                            _appliedCouponMinAmount = 0.0;
                                           });
                                         },
                                         child: Container(
@@ -1440,15 +1534,19 @@ class _CartScreenState extends State<CartScreen> {
                               const SizedBox(height: 12),
                             ],
 
-                            // ── Schedule ──
+                            // ── Schedule (not offered for Bill Pay — you're paying for what
+                            // was already served, not scheduling a future order) ──
                             if ((sectionConstantModel?.serviceTypeFlag ?? '') !=
-                                "ecommerce-service") ...[
+                                    "ecommerce-service" &&
+                                !_isBillPayMode) ...[
                               _modernScheduleSection(),
                               const SizedBox(height: 12),
                             ],
 
-                            // ── Dineaway ──
-                            if (selctedOrderTypeValue == "Dineaway") ...[
+                            // ── Dineaway sub-type picker (skipped for Bill Pay — the vendor
+                            // already decided this is a bill settlement, not a fresh
+                            // Takeaway/Dining choice) ──
+                            if (selctedOrderTypeValue == "Dineaway" && !_isBillPayMode) ...[
                               _modernDineawaySection(),
                               const SizedBox(height: 12),
                             ],
@@ -1522,8 +1620,13 @@ class _CartScreenState extends State<CartScreen> {
                       }
                       if (couponId.isEmpty) txt.text = "";
 
+                      // Use the resolved (post-conflict-rules, post-ceiling)
+                      // amounts here, not the raw fields — grandtotal above
+                      // was computed from these, and the order document must
+                      // match what was actually charged (see their
+                      // declaration for why they're safe to read here).
                       final specialDiscountMap = {
-                        'special_discount': specialDiscountAmount,
+                        'special_discount': effectiveSpecialDiscountAmount,
                         'special_discount_label': specialDiscount,
                         'specialType': specialType,
                       };
@@ -1536,7 +1639,7 @@ class _CartScreenState extends State<CartScreen> {
                         PaymentScreen(
                           total: grandtotal,
                           products: cartProducts,
-                          discount: per == 0.0 ? type : per,
+                          discount: effectiveDiscountVal,
                           couponCode: txt.text,
                           couponId: couponId,
                           notes: noteController.text,
@@ -1549,6 +1652,9 @@ class _CartScreenState extends State<CartScreen> {
                           scheduleTime: scheduleTime,
                           addressModel: addressModel,
                           orderType: orderTypeToStore,
+                          billPayRequestId: widget.billPayRequestModel?.id,
+                          expectedBillVersion:
+                              widget.billPayRequestModel?.billPayExpiresAt?.millisecondsSinceEpoch,
                         ),
                       );
                     }
@@ -1716,21 +1822,21 @@ class _CartScreenState extends State<CartScreen> {
         border: Border.all(
           color: dark
               ? AppThemeData.darkBorderSecondary
-              : AppThemeData.neutral100,
-          width: dark ? 1.0 : 0.8,
+              : const Color(0xFFE5E1FF),
+          width: 1.0,
         ),
         boxShadow: dark
             ? null
             : [
                 BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.05),
-                  blurRadius: 24,
-                  offset: const Offset(0, 2),
+                  color: Colors.black.withValues(alpha: 0.07),
+                  blurRadius: 20,
+                  offset: const Offset(0, 3),
                 ),
                 BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.03),
-                  blurRadius: 8,
-                  offset: const Offset(0, 1),
+                  color: AppThemeData.primary500.withValues(alpha: 0.04),
+                  blurRadius: 12,
+                  offset: const Offset(0, 2),
                 ),
               ],
       ),
@@ -1833,6 +1939,8 @@ class _CartScreenState extends State<CartScreen> {
               child: TextField(
                 controller: _houseCtrl,
                 textCapitalization: TextCapitalization.words,
+                maxLength: 250,
+                buildCounter: (context, {required currentLength, required isFocused, maxLength}) => null,
                 style: TextStyle(
                   color: dark ? AppThemeData.darkTextPrimary : AppThemeData.neutral900,
                   fontSize: 14,
@@ -1884,6 +1992,8 @@ class _CartScreenState extends State<CartScreen> {
               child: TextField(
                 controller: _landmarkCtrl,
                 textCapitalization: TextCapitalization.words,
+                maxLength: 250,
+                buildCounter: (context, {required currentLength, required isFocused, maxLength}) => null,
                 style: TextStyle(
                   color: dark ? AppThemeData.darkTextPrimary : AppThemeData.neutral900,
                   fontSize: 14,
@@ -2672,6 +2782,42 @@ class _CartScreenState extends State<CartScreen> {
       grandtotal = subTotal + double.parse(deliveryCharges) + tipValue;
     }
 
+    // Re-validate the applied coupon's minimum-order condition against the
+    // *current* subtotal on every build. Previously this was only checked
+    // once at apply-time (_doApplyCoupon/_applyManualCoupon) — removing an
+    // item afterwards dropped subTotal below the coupon's applicableAmount
+    // but the coupon stayed visually "applied" and kept discounting the
+    // displayed total indefinitely (server-side verifyCoupon() already
+    // rejects it at checkout regardless, but the cart showed a total the
+    // customer would never actually be charged).
+    if (couponId.isNotEmpty &&
+        _appliedCouponMinAmount > 0 &&
+        subTotal < _appliedCouponMinAmount) {
+      final removedMinAmount = _appliedCouponMinAmount;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || couponId.isEmpty) return;
+        setState(() {
+          couponId = '';
+          percentage = 0.0;
+          type = 0.0;
+          txt.clear();
+          _appliedCouponMinAmount = 0.0;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(
+            'Coupon removed — order total is now below its minimum of ${amountShow(amount: removedMinAmount.toStringAsFixed(2))}.'
+                .tr(),
+          ),
+          backgroundColor: Colors.orange.shade700,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ));
+      });
+      // Don't let this build still show the stale discount in the total.
+      percentage = 0.0;
+      type = 0.0;
+    }
+
     if (percentage != null) {
       amount = 0;
       amount = subTotal * percentage / 100;
@@ -2685,8 +2831,7 @@ class _CartScreenState extends State<CartScreen> {
       discountVal = type;
     }
 
-    if (vendorModel != null && specialDiscountEnable &&
-        !_suppressSpecialDiscountForCoupon) {
+    if (vendorModel != null && specialDiscountEnable) {
       if (vendorModel!.specialDiscountEnable) {
         // Reset special discount amount at the beginning
         specialDiscountAmount = 0.0;
@@ -2817,35 +2962,43 @@ class _CartScreenState extends State<CartScreen> {
       specialDiscountAmount = 0.0;
     }
 
-    // Conflict resolution: if both coupon and special discount are active and
-    // their combined value exceeds the subtotal, keep only the larger discount
-    // for this build. The _doApplyCoupon path handles the user-triggered case;
-    // this handles the rare automatic case (special window opens mid-session).
+    // Conflict resolution: coupon and special discount are allowed to stack
+    // freely up to the combined-discount ceiling below, which is the single
+    // source of truth for how much of each actually applies — it re-runs on
+    // every build and is the exact same coupon-preserved-first algorithm
+    // verifyOrder.js uses server-side, so the client never has to guess which
+    // discount the server will end up favouring.
     //
-    // effectiveDiscountVal / effectiveSpecialDiscountAmount are LOCAL — they
-    // hold the actually-applied amounts after resolution. Class-level variables
-    // are NOT mutated here so the next build cycle isn't corrupted.
-    final double couponEffective = per != 0.0 ? per : type;
-    double effectiveDiscountVal = discountVal;
-    double effectiveSpecialDiscountAmount = specialDiscountAmount;
+    // effectiveDiscountVal / effectiveSpecialDiscountAmount are fields (see
+    // their declaration above) — reassigned fresh every build, never `final`.
+    effectiveDiscountVal = discountVal;
+    effectiveSpecialDiscountAmount = specialDiscountAmount;
     String? _discountConflictWarning;
-    if (couponEffective > 0 &&
-        specialDiscountAmount > 0 &&
-        couponEffective + specialDiscountAmount > subTotal) {
-      if (couponEffective <= specialDiscountAmount) {
-        // Coupon is smaller — undo its effect on grandtotal for this frame.
-        grandtotal += couponEffective;
-        effectiveDiscountVal = 0;
-        _discountConflictWarning =
-            'Coupon discount not applied — special discount gives a higher saving.'
-                .tr();
-      } else {
-        // Special discount is smaller — undo its effect for this frame.
-        grandtotal += specialDiscountAmount;
-        effectiveSpecialDiscountAmount = 0;
-        _discountConflictWarning =
-            'Special discount not applied — coupon gives a higher saving.'.tr();
-      }
+    // Combined-discount ceiling: coupon + special discount together can't
+    // discount more than maxCombinedDiscountPercent% of the order (default 70, admin-configurable
+    // via settings/globalSettings — see constants.dart). The coupon is
+    // trusted first (it's the user's deliberate choice, and the one
+    // independently re-verified server-side in verifyOrderOnCreate) — the
+    // special discount is trimmed to whatever room is left, then the coupon
+    // itself as a last-resort backstop.
+    final double maxCombinedDiscount = subTotal * maxCombinedDiscountPercent / 100;
+    if (effectiveDiscountVal + effectiveSpecialDiscountAmount > maxCombinedDiscount) {
+      final double cappedDiscountVal = effectiveDiscountVal > maxCombinedDiscount
+          ? maxCombinedDiscount
+          : effectiveDiscountVal;
+      final double remaining =
+          (maxCombinedDiscount - cappedDiscountVal).clamp(0.0, double.infinity);
+      final double cappedSpecialDiscountAmount =
+          effectiveSpecialDiscountAmount > remaining
+              ? remaining
+              : effectiveSpecialDiscountAmount;
+      grandtotal += (effectiveDiscountVal - cappedDiscountVal) +
+          (effectiveSpecialDiscountAmount - cappedSpecialDiscountAmount);
+      effectiveDiscountVal = cappedDiscountVal;
+      effectiveSpecialDiscountAmount = cappedSpecialDiscountAmount;
+      _discountConflictWarning =
+          'Combined discount is capped at ${maxCombinedDiscountPercent.toStringAsFixed(0)}% of your order total.'
+              .tr();
     }
     grandtotal = grandtotal.clamp(0.0, double.infinity);
 
@@ -3780,15 +3933,24 @@ class _CartScreenState extends State<CartScreen> {
       decoration: BoxDecoration(
         color: dark ? AppThemeData.darkBgSecondary : Colors.white,
         borderRadius: BorderRadius.circular(20),
-        border:
-            dark ? Border.all(color: AppThemeData.darkBorderPrimary, width: 1) : null,
+        border: Border.all(
+          color: dark
+              ? AppThemeData.darkBorderPrimary
+              : const Color(0xFFE5E1FF),
+          width: 1.0,
+        ),
         boxShadow: dark
             ? null
             : [
                 BoxShadow(
                   color: Colors.black.withValues(alpha: 0.07),
-                  blurRadius: 18,
+                  blurRadius: 20,
                   offset: const Offset(0, 4),
+                ),
+                BoxShadow(
+                  color: AppThemeData.primary500.withValues(alpha: 0.04),
+                  blurRadius: 12,
+                  offset: const Offset(0, 2),
                 ),
               ],
       ),
@@ -3829,64 +3991,88 @@ class _CartScreenState extends State<CartScreen> {
               Divider(height: 1, indent: 16, endIndent: 16, color: dividerColor),
           ],
 
-          // ── Add More Items ──
-          Divider(height: 1, indent: 16, endIndent: 16, color: dividerColor),
-          InkWell(
-            onTap: () {
-              if (vendorModel != null) {
-                Navigator.of(context).push(MaterialPageRoute(
-                  builder: (_) =>
-                      NewVendorProductsScreen(vendorModel: vendorModel!),
-                ));
-              } else {
-                // Vendor data not yet ready — re-trigger the load pipeline
-                // and show the skeleton until it completes.
-                setState(() {
-                  _isCartInitialized = false;
-                  isDeliverFound = false;
-                });
-                getDeliveyData();
-              }
-            },
-            borderRadius: const BorderRadius.only(
-              bottomLeft: Radius.circular(20),
-              bottomRight: Radius.circular(20),
-            ),
-            child: Padding(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Container(
-                    width: 26,
-                    height: 26,
-                    decoration: BoxDecoration(
-                      color: AppThemeData.primary500.withValues(alpha: 0.10),
-                      shape: BoxShape.circle,
+          // ── Add More Items (not offered for a locked Bill Pay cart) ──
+          if (!_isBillPayMode) ...[
+            Divider(height: 1, indent: 16, endIndent: 16, color: dividerColor),
+            InkWell(
+              onTap: () {
+                if (vendorModel != null) {
+                  BehaviorTracker.setNextEntrySource('Cart');
+                  Navigator.of(context).push(MaterialPageRoute(
+                    builder: (_) =>
+                        NewVendorProductsScreen(vendorModel: vendorModel!),
+                  ));
+                } else {
+                  // Vendor data not yet ready — re-trigger the load pipeline
+                  // and show the skeleton until it completes.
+                  setState(() {
+                    _isCartInitialized = false;
+                    isDeliverFound = false;
+                  });
+                  getDeliveyData();
+                }
+              },
+              borderRadius: const BorderRadius.only(
+                bottomLeft: Radius.circular(20),
+                bottomRight: Radius.circular(20),
+              ),
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Container(
+                      width: 26,
+                      height: 26,
+                      decoration: BoxDecoration(
+                        color: AppThemeData.primary500.withValues(alpha: 0.10),
+                        shape: BoxShape.circle,
+                      ),
+                      child: Icon(Icons.add,
+                          color: AppThemeData.primary500, size: 16),
                     ),
-                    child: Icon(Icons.add,
-                        color: AppThemeData.primary500, size: 16),
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    "Add More Items".tr(),
-                    style: AppTypography.labelMedium.copyWith(
+                    const SizedBox(width: 8),
+                    Text(
+                      "Add More Items".tr(),
+                      style: AppTypography.labelMedium.copyWith(
+                        color: AppThemeData.primary500,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.1,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    Icon(
+                      Icons.arrow_forward_ios_rounded,
                       color: AppThemeData.primary500,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 0.1,
+                      size: 12,
                     ),
-                  ),
-                  const SizedBox(width: 4),
-                  Icon(
-                    Icons.arrow_forward_ios_rounded,
-                    color: AppThemeData.primary500,
-                    size: 12,
+                  ],
+                ),
+              ),
+            ),
+          ] else ...[
+            Divider(height: 1, indent: 16, endIndent: 16, color: dividerColor),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+              child: Row(
+                children: [
+                  Icon(Icons.lock_outline_rounded,
+                      color: AppThemeData.neutral400, size: 16),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      "Bill sent by the vendor — items can't be changed".tr(),
+                      style: AppTypography.labelSmall.copyWith(
+                        color: AppThemeData.neutral400,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
                   ),
                 ],
               ),
             ),
-          ),
+          ],
 
           // ── Note for Restaurant ──
           Divider(height: 1, color: dividerColor),
@@ -4172,8 +4358,30 @@ class _CartScreenState extends State<CartScreen> {
                       ],
                     ),
                   ],
-                  // ── Edit button (minimal whisper) ──
+                  // ── Edit button (minimal whisper) — hidden for a locked Bill Pay item ──
                   const SizedBox(height: 9),
+                  if (_isBillPayMode)
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.lock_outline_rounded,
+                            size: 12,
+                            color: dark
+                                ? AppThemeData.darkBorderPrimary
+                                : AppThemeData.neutral300),
+                        const SizedBox(width: 4),
+                        Text(
+                          "Fixed by vendor".tr(),
+                          style: AppTypography.caption.copyWith(
+                            color: dark
+                                ? AppThemeData.darkBorderPrimary
+                                : AppThemeData.neutral400,
+                            letterSpacing: 0.1,
+                          ),
+                        ),
+                      ],
+                    )
+                  else
                   GestureDetector(
                     onTap: () async {
                       final pid = cartProduct.id.split('~').first;
@@ -4223,7 +4431,7 @@ class _CartScreenState extends State<CartScreen> {
                             productModel: pm!,
                             initialVariantInfo: vi,
                             initialExtras: prevExtras,
-                            onAddToCart: (ProductModel updatedProduct, double totalPrice) async {
+                            onAddToCart: (ProductModel updatedProduct, double totalPrice, int quantity) async {
                               Navigator.of(ctx).pop();
                               await cartDatabase.removeProduct(cartProduct.id);
                               await cartDatabase.addProduct(updatedProduct, cartDatabase, true);
@@ -4272,7 +4480,24 @@ class _CartScreenState extends State<CartScreen> {
               crossAxisAlignment: CrossAxisAlignment.end,
               mainAxisSize: MainAxisSize.min,
               children: [
-                // Qty stepper — Swiggy-style pill
+                // Qty — locked read-only chip for a Bill Pay item, editable
+                // Swiggy-style stepper pill otherwise.
+                if (_isBillPayMode)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: AppThemeData.primary500.withValues(alpha: 0.10),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      'x${cartProduct.quantity}',
+                      style: AppTypography.labelMedium.copyWith(
+                        fontWeight: FontWeight.w700,
+                        color: AppThemeData.primary500,
+                      ),
+                    ),
+                  )
+                else
                 Container(
                   decoration: BoxDecoration(
                     border: Border.all(
@@ -4287,6 +4512,11 @@ class _CartScreenState extends State<CartScreen> {
                         onTap: () {
                           if (quen <= 1) {
                             cartDatabase.removeProduct(cartProduct.id);
+                            BehaviorTracker.track(kEvtProductRemovedFromCart, {
+                              'productId': cartProduct.id,
+                              'vendorId': cartProduct.vendorID,
+                              'categoryId': cartProduct.category_id,
+                            });
                           } else {
                             quen--;
                             removetocard(cartProduct, quen);
@@ -4606,6 +4836,13 @@ class _CartScreenState extends State<CartScreen> {
         quantity: qun,
         // nullable fields omitted → Moor's nullToAbsent keeps DB values intact
       ));
+      BehaviorTracker.track(kEvtProductQuantityChanged, {
+        'productId': cartProduct.id,
+        'vendorId': cartProduct.vendorID,
+        'categoryId': cartProduct.category_id,
+        'direction': 'inc',
+        'newQuantity': qun,
+      });
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -4628,8 +4865,20 @@ class _CartScreenState extends State<CartScreen> {
           vendorID: cartProduct.vendorID,
           quantity: qun,
         ));
+        BehaviorTracker.track(kEvtProductQuantityChanged, {
+          'productId': cartProduct.id,
+          'vendorId': cartProduct.vendorID,
+          'categoryId': cartProduct.category_id,
+          'direction': 'dec',
+          'newQuantity': qun,
+        });
       } else {
         await cartDatabase.removeProduct(cartProduct.id);
+        BehaviorTracker.track(kEvtProductRemovedFromCart, {
+          'productId': cartProduct.id,
+          'vendorId': cartProduct.vendorID,
+          'categoryId': cartProduct.category_id,
+        });
       }
     } catch (e) {
       if (mounted) {
@@ -4727,6 +4976,19 @@ class _CartScreenState extends State<CartScreen> {
             return const SizedBox(
               height: 220,
               child: Center(child: CircularProgressIndicator.adaptive()),
+            );
+          }
+
+          if (snapshot.hasError) {
+            return SizedBox(
+              height: 220,
+              child: Center(
+                child: Text(
+                  'Could not load coupons. Please try again.'.tr(),
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: AppThemeData.error500),
+                ),
+              ),
             );
           }
 
@@ -4838,6 +5100,8 @@ class _CartScreenState extends State<CartScreen> {
                             child: TextField(
                               controller: txt,
                               textCapitalization: TextCapitalization.characters,
+                              maxLength: 30,
+                              buildCounter: (context, {required currentLength, required isFocused, maxLength}) => null,
                               style: AppTypography.labelMedium.copyWith(
                                 color: dark
                                     ? AppThemeData.darkTextPrimary
@@ -5170,18 +5434,6 @@ class _CartScreenState extends State<CartScreen> {
                       fontWeight: FontWeight.w500,
                     ),
                   ),
-                  if (offer.descriptionOffer != null &&
-                      offer.descriptionOffer!.isNotEmpty) ...[
-                    const SizedBox(height: 2),
-                    Text(
-                      offer.descriptionOffer!,
-                      style: AppTypography.caption.copyWith(
-                        color: dark
-                            ? AppThemeData.darkTextSecondary
-                            : AppThemeData.neutral500,
-                      ),
-                    ),
-                  ],
                   // Unlock hint for non-applicable coupons
                   if (!applicable && hasMinAmt) ...[
                     const SizedBox(height: 6),
@@ -5455,6 +5707,7 @@ class _CartScreenState extends State<CartScreen> {
     final isPercentage = offer.discountTypeOffer == 'Percentage' ||
         offer.discountTypeOffer == 'Percent';
     final raw = double.tryParse(offer.discountOffer ?? '0') ?? 0;
+    final couponMinAmount = double.tryParse(offer.applicableAmount ?? '0') ?? 0;
     // Percentage is already bounded to <=100% by the vendor app (so it can
     // never exceed subtotal), but a flat-amount coupon has no such guarantee
     // if the vendor left "Minimum Order Amount" at 0 — cap it here as a
@@ -5463,64 +5716,44 @@ class _CartScreenState extends State<CartScreen> {
     final couponEffective =
         isPercentage ? subTotal * raw / 100 : (raw > subTotal ? subTotal : raw);
 
-    // Conflict check: both discounts active and combined > subtotal.
+    // Coupon and special discount stack up to the combined-discount ceiling
+    // (see build()'s combined-discount-ceiling block) — the coupon is always
+    // applied here; the summary section is what actually resolves how much
+    // of each survives the ceiling, and reruns on every build.
     if (specialDiscountAmount > 0 &&
         couponEffective > 0 &&
-        couponEffective + specialDiscountAmount > subTotal) {
+        couponEffective + specialDiscountAmount >
+            subTotal * maxCombinedDiscountPercent / 100) {
       Navigator.pop(sheetCtx);
-      if (couponEffective <= specialDiscountAmount) {
-        // Coupon is the smaller discount — reject it and keep special discount.
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(
-            'Coupon not applied — special discount '
-            '(${amountShow(amount: specialDiscountAmount.toStringAsFixed(2))}) '
-            'already gives a higher saving. Remove it first to use this coupon.'
-                .tr(),
-          ),
-          backgroundColor: Colors.orange.shade700,
-          behavior: SnackBarBehavior.floating,
-          duration: const Duration(seconds: 4),
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        ));
-      } else {
-        // Special discount is the smaller one — remove it and apply the coupon.
-        setState(() {
-          _suppressSpecialDiscountForCoupon = true;
-          specialDiscount = 0.0;
-          specialDiscountAmount = 0.0;
-          specialType = 'amount';
-          if (isPercentage) {
-            percentage = raw;
-            type = 0.0;
-          } else {
-            type = couponEffective;
-            percentage = 0.0;
-          }
-          couponId = offer.offerId!;
-          txt.text = offer.offerCode ?? '';
-        });
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(
-            'Special discount removed — coupon saves '
-            '${amountShow(amount: couponEffective.toStringAsFixed(2))}'
-            ', which is more than the special discount\'s '
-            '${amountShow(amount: (couponEffective - specialDiscountAmount).abs().toStringAsFixed(2))} difference.'
-                .tr(),
-          ),
-          backgroundColor: AppThemeData.accent500,
-          behavior: SnackBarBehavior.floating,
-          duration: const Duration(seconds: 4),
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        ));
-      }
+      setState(() {
+        if (isPercentage) {
+          percentage = raw;
+          type = 0.0;
+        } else {
+          type = couponEffective;
+          percentage = 0.0;
+        }
+        couponId = offer.offerId!;
+        txt.text = offer.offerCode ?? '';
+        _appliedCouponMinAmount = couponMinAmount;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(
+          'Coupon applied. Combined with the special discount, savings are '
+          'capped at ${maxCombinedDiscountPercent.toStringAsFixed(0)}% of your order total.'
+              .tr(),
+        ),
+        backgroundColor: Colors.orange.shade700,
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 4),
+        shape:
+            RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ));
       return;
     }
 
     // No conflict — apply coupon normally.
     setState(() {
-      _suppressSpecialDiscountForCoupon = false;
       if (isPercentage) {
         percentage = raw;
         type = 0.0;
@@ -5530,6 +5763,7 @@ class _CartScreenState extends State<CartScreen> {
       }
       couponId = offer.offerId!;
       txt.text = offer.offerCode ?? '';
+      _appliedCouponMinAmount = couponMinAmount;
     });
     Navigator.pop(sheetCtx);
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(

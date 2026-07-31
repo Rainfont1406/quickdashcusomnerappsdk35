@@ -7,6 +7,7 @@ import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/User.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/device_session_service.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/msg91_service.dart';
 import 'package:emartconsumer/services/notification_service.dart';
@@ -176,6 +177,9 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
     if (mounted) setState(() => _isVerifying = true);
     ShowToastDialog.showLoader('Verifying your account...');
 
+    // TEMPORARY [LOGIN-PERF] - timing instrumentation for the login-speed
+    // investigation. Remove once done.
+    final totalSw = Stopwatch()..start();
     try {
       // ── Step 1: For signup, generate the UUID now so the server can mint
       //            a token for it. For login the server does the Firestore
@@ -197,6 +201,7 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
         if (newUid != null) 'new_user_id': newUid,
       };
 
+      final verifyOtpSw = Stopwatch()..start();
       final resp = await http
           .post(
             Uri.parse('$_kApiBase/api/auth/verify-otp'),
@@ -204,6 +209,7 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
             body: jsonEncode(body),
           )
           .timeout(const Duration(seconds: 20));
+      debugPrint('[LOGIN-PERF] HTTP POST verify-otp — ${verifyOtpSw.elapsedMilliseconds}ms (status=${resp.statusCode})');
 
       final respJson = jsonDecode(resp.body) as Map<String, dynamic>;
 
@@ -220,19 +226,34 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
       // ── Step 3: Establish a real Firebase Auth session so request.auth.uid
       //            equals the user's Firestore document ID for all subsequent
       //            Firestore writes.
+      final signInSw = Stopwatch()..start();
       await firebase_auth.FirebaseAuth.instance
           .signInWithCustomToken(firebaseToken);
+      debugPrint('[LOGIN-PERF] signInWithCustomToken — ${signInSw.elapsedMilliseconds}ms');
 
       if (!mounted) return;
 
       // ── Step 4a: LOGIN flow ────────────────────────────────────────
       if (!widget.isSignup) {
-        final snap = await FirebaseFirestore.instance
-            .collection(USERS)
-            .where('phoneNumber', isEqualTo: phoneNumber)
-            .where('countryCode', isEqualTo: countryCode)
-            .where('role', isEqualTo: USER_ROLE_CUSTOMER)
-            .get();
+        // The user lookup and the FCM token fetch are independent of each
+        // other — run them concurrently instead of paying for the token
+        // fetch strictly after the Firestore query resolves. Same fix as
+        // hasFinishedOnBoarding() in main.dart's session-restore path.
+        // Explicit <dynamic> because NotificationService.getToken() has no
+        // declared return type.
+        final userLookupSw = Stopwatch()..start();
+        final loginResults = await Future.wait<dynamic>([
+          FirebaseFirestore.instance
+              .collection(USERS)
+              .where('phoneNumber', isEqualTo: phoneNumber)
+              .where('countryCode', isEqualTo: countryCode)
+              .where('role', isEqualTo: USER_ROLE_CUSTOMER)
+              .get(),
+          NotificationService.getToken(),
+        ]);
+        debugPrint('[LOGIN-PERF] user lookup+getToken (parallel) — ${userLookupSw.elapsedMilliseconds}ms');
+        final snap = loginResults[0] as QuerySnapshot<Map<String, dynamic>>;
+        final fcmToken = loginResults[1] as String;
 
         if (!mounted) return;
 
@@ -265,9 +286,23 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
           return;
         }
 
-        userModel.fcmToken = await NotificationService.getToken();
-        // This write now succeeds: request.auth.uid == userModel.userID
-        await FireStoreUtils.updateCurrentUser(userModel);
+        final deviceSessionSw = Stopwatch()..start();
+        final sessionResult = await DeviceSessionService.authorize(fcmToken: fcmToken);
+        debugPrint('[LOGIN-PERF] DeviceSessionService.authorize — ${deviceSessionSw.elapsedMilliseconds}ms');
+        if (!sessionResult.allowed) {
+          ShowToastDialog.closeLoader();
+          if (mounted) setState(() => _isVerifying = false);
+          ShowToastDialog.showToast(sessionResult.message!);
+          if (mounted) pushAndRemoveUntil(context, const LoginScreen());
+          return;
+        }
+
+        userModel.fcmToken = fcmToken;
+        // This write now succeeds: request.auth.uid == userModel.userID.
+        // Fire-and-forget: navigation doesn't need to wait on this write's
+        // round trip — MyAppState.currentUser below already reflects the
+        // update in memory. Same fix as hasFinishedOnBoarding() in main.dart.
+        unawaited(FireStoreUtils.updateCurrentUser(userModel));
 
         final prefs = await SharedPreferences.getInstance();
         await prefs.setString(PHONE_AUTH_USER_ID, userModel.userID);
@@ -276,6 +311,7 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
 
         if (!mounted) return;
         ShowToastDialog.closeLoader();
+        debugPrint('[LOGIN-PERF] TOTAL (tap to navigate) — ${totalSw.elapsedMilliseconds}ms');
 
         final addresses = userModel.shippingAddress;
         if (addresses != null && addresses.isNotEmpty) {

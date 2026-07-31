@@ -22,6 +22,21 @@ class VendorModel {
 
   String categoryTitle;
 
+  // Store-level Cuisine selection (North Indian, Chinese, Pizza, ...) -
+  // deliberately separate from categoryID/categoryTitle above, which is the
+  // vestigial store-level copy of the product-level food category (the
+  // Vendor App/Web's Add Store screen never actually let a vendor pick it
+  // through any real UI). cuisineNames is denormalized alongside cuisineIds
+  // so search/display never need a second Firestore query.
+  List<String> cuisineIds;
+  List<String> cuisineNames;
+
+  // Store-level Business Type selection (Cafe, Restaurant, Canteen, ...) -
+  // single-select, unlike cuisineIds/cuisineNames above. businessTypeName is
+  // denormalized alongside businessTypeId for the same reason cuisineNames is.
+  String businessTypeId;
+  String businessTypeName;
+
   Timestamp? createdAt;
 
   String description;
@@ -101,6 +116,12 @@ class VendorModel {
   bool diningEnabled;
   bool billPayEnabled;
 
+  // Store-level opt-in for a UI-only 7-minute countdown shown on the
+  // customer's Order Details screen after a Bill Pay order — a visual cue
+  // for crowded self-checkout stores that the screen is live, not a
+  // screenshot. Not a security/expiry mechanism. See OrderDetailsScreen.
+  bool enableBillPaymentTimer;
+
   // Derived — admin controls sub-types (takeaway / dining), not dineaway itself
   bool get dineAwayEnabled => takeawayEnabled || diningEnabled;
 
@@ -117,6 +138,8 @@ class VendorModel {
   List<SpecialDiscountModel> specialDiscount;
   bool specialDiscountEnable;
 
+  List<Map<String, dynamic>>? topProducts;
+
   VendorModel(
       {this.author = '',
       this.hidephotos = false,
@@ -125,6 +148,10 @@ class VendorModel {
       this.categoryID = '',
       this.categoryPhoto = '',
       this.categoryTitle = '',
+      this.cuisineIds = const [],
+      this.cuisineNames = const [],
+      this.businessTypeId = '',
+      this.businessTypeName = '',
       this.createdAt,
       this.filters = const {},
       this.description = '',
@@ -172,11 +199,13 @@ class VendorModel {
       this.takeawayEnabled = true,
       this.diningEnabled = true,
       this.billPayEnabled = false,
+      this.enableBillPaymentTimer = false,
       this.vendorDeliveryOpen = true,
       this.vendorDineawayOpen = true,
       this.wantsDelivery = true,
       this.wantsTakeaway = true,
       this.wantsDining = true,
+      this.topProducts,
       geoFireData,
       this.deliveryCharge})
       : geoFireData = geoFireData ??
@@ -220,6 +249,10 @@ class VendorModel {
       categoryID: parsedJson['categoryID'] ?? '',
       categoryPhoto: parsedJson['categoryPhoto'] ?? '',
       categoryTitle: parsedJson['categoryTitle'] ?? '',
+      cuisineIds: parsedJson['cuisineIds'] != null ? List<String>.from(parsedJson['cuisineIds']) : [],
+      cuisineNames: parsedJson['cuisineNames'] != null ? List<String>.from(parsedJson['cuisineNames']) : [],
+      businessTypeId: parsedJson['businessTypeId'] ?? '',
+      businessTypeName: parsedJson['businessTypeName'] ?? '',
       createdAt: parsedJson['createdAt'] ?? Timestamp.now(),
       deliveryCharge: (parsedJson.containsKey('deliveryCharge') &&
               parsedJson['deliveryCharge'] != null)
@@ -278,11 +311,17 @@ class VendorModel {
       takeawayEnabled: parsedJson['takeawayEnabled'] as bool? ?? true,
       diningEnabled: parsedJson['diningEnabled'] as bool? ?? true,
       billPayEnabled: parsedJson['billPayEnabled'] as bool? ?? false,
+      enableBillPaymentTimer: parsedJson['enableBillPaymentTimer'] as bool? ?? false,
       vendorDeliveryOpen: parsedJson['vendorDeliveryOpen'] as bool? ?? true,
       vendorDineawayOpen: parsedJson['vendorDineawayOpen'] as bool? ?? true,
       wantsDelivery: parsedJson['wantsDelivery'] as bool? ?? true,
       wantsTakeaway: parsedJson['wantsTakeaway'] as bool? ?? true,
       wantsDining: parsedJson['wantsDining'] as bool? ?? true,
+      topProducts: parsedJson['topProducts'] != null
+          ? List<Map<String, dynamic>>.from(
+              (parsedJson['topProducts'] as List).map(
+                (e) => Map<String, dynamic>.from(e as Map)))
+          : null,
     );
   }
 
@@ -295,6 +334,10 @@ class VendorModel {
       'categoryID': categoryID,
       'categoryPhoto': categoryPhoto,
       'categoryTitle': categoryTitle,
+      'cuisineIds': cuisineIds,
+      'cuisineNames': cuisineNames,
+      'businessTypeId': businessTypeId,
+      'businessTypeName': businessTypeName,
       'createdAt': createdAt,
       'description': description,
       'phonenumber': phonenumber,
@@ -343,6 +386,7 @@ class VendorModel {
       'takeawayEnabled': takeawayEnabled,
       'diningEnabled': diningEnabled,
       'billPayEnabled': billPayEnabled,
+      'enableBillPaymentTimer': enableBillPaymentTimer,
       'vendorDeliveryOpen': vendorDeliveryOpen,
       'vendorDineawayOpen': vendorDineawayOpen,
       'wantsDelivery': wantsDelivery,

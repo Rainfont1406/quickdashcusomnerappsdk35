@@ -330,6 +330,8 @@ class _LocationPickerState extends State<LocationPicker> {
         'addressdetails': '1',
         'limit': '8',
         'accept-language': lang,
+        // Hard filter: only Indian results are returned at all.
+        'countrycodes': 'in',
       });
       final response = await http.get(url, headers: {
         'User-Agent': 'QuickDash/1.0',
@@ -438,7 +440,6 @@ class _LocationPickerState extends State<LocationPicker> {
     final themeChange = Provider.of<DarkThemeProvider>(context);
     final dark = themeChange.darkTheme;
     final bottomPadding = MediaQuery.of(context).padding.bottom;
-    final topPadding = MediaQuery.of(context).padding.top;
 
     return Scaffold(
       extendBodyBehindAppBar: true,
@@ -567,179 +568,204 @@ class _LocationPickerState extends State<LocationPicker> {
             ),
           ),
 
-          // ── Back button ────────────────────────────────────────────────
+          // ── Top bar: back button + search ──────────────────────────────
+          // SafeArea (not a manual MediaQuery.padding.top + fixed offset)
+          // keeps the back button clear of the status bar/notch on phones
+          // where that inset is taller or shaped differently than usual.
           Positioned(
-            top: topPadding + 8,
-            left: 12,
-            child: GestureDetector(
-              onTap: () => Navigator.pop(context),
-              child: Container(
-                width: 40,
-                height: 40,
-                decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.45),
-                  shape: BoxShape.circle,
-                ),
-                child: const Icon(Icons.arrow_back_ios_new_rounded,
-                    color: Colors.white, size: 18),
-              ),
-            ),
-          ),
-
-          // ── Search bar + inline results (Zomato/Swiggy style) ──────────
-          Positioned(
-            top: topPadding + 8,
-            left: 62,
-            right: 12,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                // Search input
-                Container(
-                  height: 48,
-                  decoration: BoxDecoration(
-                    color: dark ? AppThemeData.darkBgSecondary : Colors.white,
-                    borderRadius: BorderRadius.circular(14),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.18),
-                        blurRadius: 12,
-                        offset: const Offset(0, 3),
+            top: 0,
+            left: 0,
+            right: 0,
+            child: SafeArea(
+              bottom: false,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    GestureDetector(
+                      onTap: () => Navigator.pop(context),
+                      child: Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: 0.45),
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(Icons.arrow_back_ios_new_rounded,
+                            color: Colors.white, size: 18),
                       ),
-                    ],
-                  ),
-                  child: TextField(
-                    controller: searchController,
-                    focusNode: _searchFocus,
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontFamily: AppThemeData.medium,
-                      color: dark
-                          ? AppThemeData.darkTextPrimary
-                          : AppThemeData.neutral900,
                     ),
-                    decoration: InputDecoration(
-                      contentPadding: const EdgeInsets.symmetric(vertical: 14),
-                      border: InputBorder.none,
-                      prefixIcon: Icon(Icons.search_rounded,
-                          color: AppThemeData.primary500, size: 22),
-                      suffixIcon: _isSearchLoading
-                          ? Padding(
-                              padding: const EdgeInsets.all(14),
-                              child: SizedBox(
-                                width: 16,
-                                height: 16,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  valueColor: const AlwaysStoppedAnimation(
-                                      AppThemeData.primary500),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          // Search input
+                          Container(
+                            height: 48,
+                            decoration: BoxDecoration(
+                              color: dark
+                                  ? AppThemeData.darkBgSecondary
+                                  : Colors.white,
+                              borderRadius: BorderRadius.circular(14),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withValues(alpha: 0.18),
+                                  blurRadius: 12,
+                                  offset: const Offset(0, 3),
+                                ),
+                              ],
+                            ),
+                            child: TextField(
+                              controller: searchController,
+                              focusNode: _searchFocus,
+                              style: TextStyle(
+                                fontSize: 14,
+                                fontFamily: AppThemeData.medium,
+                                color: dark
+                                    ? AppThemeData.darkTextPrimary
+                                    : AppThemeData.neutral900,
+                              ),
+                              decoration: InputDecoration(
+                                contentPadding:
+                                    const EdgeInsets.symmetric(vertical: 14),
+                                border: InputBorder.none,
+                                prefixIcon: Icon(Icons.search_rounded,
+                                    color: AppThemeData.primary500, size: 22),
+                                suffixIcon: _isSearchLoading
+                                    ? Padding(
+                                        padding: const EdgeInsets.all(14),
+                                        child: SizedBox(
+                                          width: 16,
+                                          height: 16,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                            valueColor:
+                                                const AlwaysStoppedAnimation(
+                                                    AppThemeData.primary500),
+                                          ),
+                                        ),
+                                      )
+                                    : searchController.text.isNotEmpty
+                                        ? IconButton(
+                                            icon: Icon(Icons.close_rounded,
+                                                size: 18,
+                                                color: dark
+                                                    ? AppThemeData
+                                                        .darkTextTertiary
+                                                    : AppThemeData
+                                                        .neutral400),
+                                            onPressed: () {
+                                              searchController.clear();
+                                              setState(() {
+                                                _searchResults = [];
+                                                _showSearchResults = false;
+                                              });
+                                            },
+                                          )
+                                        : null,
+                                hintText: 'Search for a location...'.tr(),
+                                hintStyle: TextStyle(
+                                  fontSize: 14,
+                                  fontFamily: AppThemeData.regular,
+                                  color: dark
+                                      ? AppThemeData.darkTextTertiary
+                                      : AppThemeData.neutral400,
                                 ),
                               ),
-                            )
-                          : searchController.text.isNotEmpty
-                              ? IconButton(
-                                  icon: Icon(Icons.close_rounded,
-                                      size: 18,
-                                      color: dark
-                                          ? AppThemeData.darkTextTertiary
-                                          : AppThemeData.neutral400),
-                                  onPressed: () {
-                                    searchController.clear();
-                                    setState(() {
-                                      _searchResults = [];
-                                      _showSearchResults = false;
-                                    });
-                                  },
-                                )
-                              : null,
-                      hintText: 'Search for a location...'.tr(),
-                      hintStyle: TextStyle(
-                        fontSize: 14,
-                        fontFamily: AppThemeData.regular,
-                        color: dark
-                            ? AppThemeData.darkTextTertiary
-                            : AppThemeData.neutral400,
-                      ),
-                    ),
-                  ),
-                ),
+                            ),
+                          ),
 
-                // Inline results dropdown
-                if (_showSearchResults && _searchResults.isNotEmpty)
-                  Container(
-                    margin: const EdgeInsets.only(top: 4),
-                    decoration: BoxDecoration(
-                      color:
-                          dark ? AppThemeData.darkBgSecondary : Colors.white,
-                      borderRadius: BorderRadius.circular(14),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withValues(alpha: 0.15),
-                          blurRadius: 12,
-                          offset: const Offset(0, 4),
-                        ),
-                      ],
-                    ),
-                    constraints: const BoxConstraints(maxHeight: 280),
-                    child: ListView.separated(
-                      padding: EdgeInsets.zero,
-                      shrinkWrap: true,
-                      itemCount: _searchResults.length,
-                      separatorBuilder: (_, __) => Divider(
-                        height: 1,
-                        color: dark
-                            ? AppThemeData.darkBorderPrimary
-                            : AppThemeData.neutral100,
-                      ),
-                      itemBuilder: (_, i) {
-                        final s = _searchResults[i];
-                        return ListTile(
-                          dense: true,
-                          contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 14, vertical: 4),
-                          leading: Container(
-                            width: 34,
-                            height: 34,
-                            decoration: BoxDecoration(
-                              color: AppThemeData.primary500
-                                  .withValues(alpha: 0.1),
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: Icon(s.icon,
-                                color: AppThemeData.primary500, size: 18),
-                          ),
-                          title: Text(
-                            s.title,
-                            style: TextStyle(
-                              fontFamily: AppThemeData.semiBold,
-                              fontSize: 13,
-                              color: dark
-                                  ? AppThemeData.darkTextPrimary
-                                  : AppThemeData.neutral900,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          subtitle: s.subtitle.isNotEmpty
-                              ? Text(
-                                  s.subtitle,
-                                  style: TextStyle(
-                                    fontFamily: AppThemeData.regular,
-                                    fontSize: 11,
-                                    color: dark
-                                        ? AppThemeData.darkTextTertiary
-                                        : AppThemeData.neutral500,
+                          // Inline results dropdown
+                          if (_showSearchResults && _searchResults.isNotEmpty)
+                            Container(
+                              margin: const EdgeInsets.only(top: 4),
+                              decoration: BoxDecoration(
+                                color: dark
+                                    ? AppThemeData.darkBgSecondary
+                                    : Colors.white,
+                                borderRadius: BorderRadius.circular(14),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color:
+                                        Colors.black.withValues(alpha: 0.15),
+                                    blurRadius: 12,
+                                    offset: const Offset(0, 4),
                                   ),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                )
-                              : null,
-                          onTap: () => _selectSearchResult(s),
-                        );
-                      },
+                                ],
+                              ),
+                              constraints:
+                                  const BoxConstraints(maxHeight: 280),
+                              child: ListView.separated(
+                                padding: EdgeInsets.zero,
+                                shrinkWrap: true,
+                                itemCount: _searchResults.length,
+                                separatorBuilder: (_, __) => Divider(
+                                  height: 1,
+                                  color: dark
+                                      ? AppThemeData.darkBorderPrimary
+                                      : AppThemeData.neutral100,
+                                ),
+                                itemBuilder: (_, i) {
+                                  final s = _searchResults[i];
+                                  return ListTile(
+                                    dense: true,
+                                    contentPadding:
+                                        const EdgeInsets.symmetric(
+                                            horizontal: 14, vertical: 4),
+                                    leading: Container(
+                                      width: 34,
+                                      height: 34,
+                                      decoration: BoxDecoration(
+                                        color: AppThemeData.primary500
+                                            .withValues(alpha: 0.1),
+                                        borderRadius:
+                                            BorderRadius.circular(8),
+                                      ),
+                                      child: Icon(s.icon,
+                                          color: AppThemeData.primary500,
+                                          size: 18),
+                                    ),
+                                    title: Text(
+                                      s.title,
+                                      style: TextStyle(
+                                        fontFamily: AppThemeData.semiBold,
+                                        fontSize: 13,
+                                        color: dark
+                                            ? AppThemeData.darkTextPrimary
+                                            : AppThemeData.neutral900,
+                                      ),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                    subtitle: s.subtitle.isNotEmpty
+                                        ? Text(
+                                            s.subtitle,
+                                            style: TextStyle(
+                                              fontFamily:
+                                                  AppThemeData.regular,
+                                              fontSize: 11,
+                                              color: dark
+                                                  ? AppThemeData
+                                                      .darkTextTertiary
+                                                  : AppThemeData.neutral500,
+                                            ),
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                          )
+                                        : null,
+                                    onTap: () => _selectSearchResult(s),
+                                  );
+                                },
+                              ),
+                            ),
+                        ],
+                      ),
                     ),
-                  ),
-              ],
+                  ],
+                ),
+              ),
             ),
           ),
 

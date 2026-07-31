@@ -12,6 +12,19 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../constants.dart';
 
+// True for up to 48 hours after an order reaches ORDER_STATUS_COMPLETED or
+// ORDER_STATUS_REJECTED (via `statusUpdatedAt`), so vendor/customer chat
+// isn't cut off the instant an order finishes. False if the status isn't
+// terminal, or `statusUpdatedAt` was never recorded (e.g. an order that
+// reached a terminal status before this field existed).
+bool isWithinTerminalChatWindow(String status, Timestamp? statusUpdatedAt) {
+  final isTerminal =
+      status == ORDER_STATUS_COMPLETED || status == ORDER_STATUS_REJECTED;
+  if (!isTerminal || statusUpdatedAt == null) return false;
+  return DateTime.now().difference(statusUpdatedAt.toDate()) <=
+      const Duration(hours: 48);
+}
+
 String? validateName(String? value) {
   String pattern = r'(^[a-zA-Z ]*$)';
   RegExp regExp = RegExp(pattern);

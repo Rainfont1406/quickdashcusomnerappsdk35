@@ -2,135 +2,182 @@ import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/controller/on_boarding_controller.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
-import 'package:emartconsumer/theme/responsive.dart';
-import 'package:emartconsumer/theme/round_button_fill.dart';
+import 'package:emartconsumer/ui/auth_screen/auth_widgets.dart';
 import 'package:emartconsumer/ui/auth_screen/login_screen.dart';
-import 'package:emartconsumer/utils/DarkThemeProvider.dart';
 import 'package:emartconsumer/utils/network_image_widget.dart';
+import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
-import 'package:get/get.dart';
+// Hide GetX's own String.tr getter (Trans extension) — it collides with
+// easy_localization's String.tr() method, which is what the rest of the
+// app actually uses for translations. GetX is only used here for its
+// GetX<T>/Rx state management, not its i18n system.
+import 'package:get/get.dart' hide Trans;
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:provider/provider.dart';
 
 class OnBoardingScreen extends StatelessWidget {
   const OnBoardingScreen({Key? key}) : super(key: key);
 
   @override
   Widget build(BuildContext context) {
-    final themeChange = Provider.of<DarkThemeProvider>(context);
+    final dark = isDarkMode(context);
     return GetX<OnBoardingController>(
       init: OnBoardingController(),
       builder: (controller) {
         return Scaffold(
-          backgroundColor: isDarkMode(context) ? AppThemeData.surfaceDark : AppThemeData.surface,
+          backgroundColor: dark ? AppThemeData.surfaceDark : AppThemeData.surface,
           body: controller.isLoading.value
-              ? Center(child: CircularProgressIndicator())
-              : Container(
-                  color: themeChange.getThem() ? AppThemeData.surfaceDark : AppThemeData.surface,
+              ? const Center(child: CircularProgressIndicator())
+              : SafeArea(
                   child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 50),
+                    padding: const EdgeInsets.symmetric(horizontal: 24),
                     child: Column(
-                      mainAxisAlignment: MainAxisAlignment.end,
                       crossAxisAlignment: CrossAxisAlignment.center,
                       children: [
-                        Padding(
-                          padding: const EdgeInsets.only(top: 10),
-                          child: Align(
-                            alignment: Alignment.centerRight,
-                            child: RoundedButtonFill(
-                              title: "Skip",
-                              width: 20,
-                              height: 5,
-                              color: themeChange.getThem() ? AppThemeData.primary600 : AppThemeData.primary50,
-                              textColor: AppThemeData.primary500,
-                              onPress: () {
-                                setFinishedOnBoarding();
-                                pushReplacement(context, const LoginScreen());
-                              },
+                        const SizedBox(height: 8),
+
+                        // ── Skip ─────────────────────────────────────────
+                        Align(
+                          alignment: Alignment.centerRight,
+                          child: TextButton(
+                            onPressed: () {
+                              setFinishedOnBoarding();
+                              pushReplacement(context, const LoginScreen());
+                            },
+                            style: TextButton.styleFrom(
+                              foregroundColor: AppThemeData.primary500,
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 12, vertical: 8),
+                            ),
+                            child: Text(
+                              'Skip'.tr(),
+                              style: const TextStyle(
+                                fontFamily: AppThemeData.semiBold,
+                                fontSize: 14,
+                              ),
                             ),
                           ),
                         ),
-                        SizedBox(
-                          height: 20,
-                        ),
+
+                        // ── Swipeable pages ──────────────────────────────
                         Expanded(
                           child: PageView.builder(
-                              controller: controller.pageController,
-                              onPageChanged: controller.selectedPageIndex.call,
-                              itemCount: controller.onBoardingList.length,
-                              itemBuilder: (context, index) {
-                                return Column(
-                                  mainAxisAlignment: MainAxisAlignment.start,
-                                  crossAxisAlignment: CrossAxisAlignment.center,
-                                  children: [
-                                    Text(
-                                      controller.onBoardingList[index].title.toString(),
-                                      textAlign: TextAlign.center,
-                                      style: TextStyle(
-                                        color: themeChange.getThem() ? AppThemeData.grey50 : AppThemeData.grey900,
-                                        fontSize: 24,
-                                        fontFamily: AppThemeData.semiBold,
-                                        fontWeight: FontWeight.w400,
+                            controller: controller.pageController,
+                            onPageChanged: controller.selectedPageIndex.call,
+                            itemCount: controller.onBoardingList.length,
+                            itemBuilder: (context, index) {
+                              final item = controller.onBoardingList[index];
+                              return Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                crossAxisAlignment: CrossAxisAlignment.center,
+                                children: [
+                                  // Image gets the lion's share of the page
+                                  // and is never cropped — BoxFit.contain
+                                  // shows the whole illustration, letterboxed
+                                  // rather than clipped, whatever its aspect
+                                  // ratio. See perfect-fit size guidance in
+                                  // the file-level doc comment below.
+                                  Expanded(
+                                    flex: 5,
+                                    child: Padding(
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 8, vertical: 16),
+                                      child: NetworkImageWidget(
+                                        imageUrl: item.image.toString(),
+                                        fit: BoxFit.contain,
+                                        width: double.infinity,
+                                        height: double.infinity,
                                       ),
                                     ),
-                                    const SizedBox(
-                                      height: 12,
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    item.title.toString(),
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(
+                                      color: dark
+                                          ? AppThemeData.grey50
+                                          : AppThemeData.grey900,
+                                      fontSize: 24,
+                                      fontFamily: AppThemeData.bold,
+                                      height: 1.3,
                                     ),
-                                    Text(
-                                      controller.onBoardingList[index].description.toString(),
+                                  ),
+                                  const SizedBox(height: 10),
+                                  Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 12),
+                                    child: Text(
+                                      item.description.toString(),
                                       textAlign: TextAlign.center,
                                       style: TextStyle(
-                                        color: themeChange.getThem() ? AppThemeData.grey300 : AppThemeData.grey600,
+                                        color: dark
+                                            ? AppThemeData.grey400
+                                            : AppThemeData.grey600,
                                         fontSize: 14,
                                         fontFamily: AppThemeData.regular,
-                                        fontWeight: FontWeight.w400,
+                                        height: 1.6,
                                       ),
                                     ),
-                                    const SizedBox(
-                                      height: 12,
-                                    ),
-                                    Expanded(
-                                      child: NetworkImageWidget(
-                                        imageUrl: controller.onBoardingList[controller.selectedPageIndex.value].image.toString(),
-                                        width: Responsive.width(90, context),
-                                      ),
-                                    ),
-                                  ],
-                                );
-                              }),
+                                  ),
+                                ],
+                              );
+                            },
+                          ),
                         ),
-                        const SizedBox(
-                          height: 32,
+
+                        const SizedBox(height: 24),
+
+                        // ── Page dots ────────────────────────────────────
+                        // Driven entirely by onBoardingList.length — never
+                        // assumes a fixed page count.
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: List.generate(
+                            controller.onBoardingList.length,
+                            (i) => AnimatedContainer(
+                              duration: const Duration(milliseconds: 200),
+                              margin: const EdgeInsets.symmetric(horizontal: 4),
+                              width: controller.selectedPageIndex.value == i
+                                  ? 22
+                                  : 7,
+                              height: 7,
+                              decoration: BoxDecoration(
+                                color: controller.selectedPageIndex.value == i
+                                    ? AppThemeData.primary500
+                                    : (dark
+                                        ? AppThemeData.grey700
+                                        : AppThemeData.grey200),
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                            ),
+                          ),
                         ),
-                        RoundedButtonFill(
-                          title: controller.selectedPageIndex.value == 2 ? "Get Started" : "Next",
-                          width: 60,
-                          color: controller.selectedPageIndex == 2
-                              ? isDarkMode(context)
-                                  ? AppThemeData.grey50
-                                  : AppThemeData.grey900
-                              : isDarkMode(context)
-                                  ? AppThemeData.grey900
-                                  : AppThemeData.grey200,
-                          textColor: controller.selectedPageIndex == 2
-                              ? isDarkMode(context)
-                                  ? AppThemeData.grey900
-                                  : AppThemeData.grey50
-                              : isDarkMode(context)
-                                  ? AppThemeData.grey50
-                                  : AppThemeData.grey900,
-                          onPress: () {
-                            if (controller.selectedPageIndex.value == 2) {
+
+                        const SizedBox(height: 24),
+
+                        // ── Next / Get Started ───────────────────────────
+                        // Uses the controller's own isLastPage (based on
+                        // onBoardingList.length), not a hardcoded page index
+                        // — works correctly no matter how many onboarding
+                        // pages are configured in the admin panel.
+                        AuthPrimaryButton(
+                          label: controller.isLastPage
+                              ? 'Get Started'.tr()
+                              : 'Next'.tr(),
+                          onTap: () {
+                            if (controller.isLastPage) {
                               setFinishedOnBoarding();
                               pushReplacement(context, const LoginScreen());
                             } else {
-                              controller.pageController.jumpToPage(controller.selectedPageIndex.value + 1);
+                              controller.pageController.nextPage(
+                                duration: const Duration(milliseconds: 280),
+                                curve: Curves.easeOut,
+                              );
                             }
                           },
                         ),
-                        const SizedBox(
-                          height: 20,
-                        ),
+
+                        const SizedBox(height: 24),
                       ],
                     ),
                   ),

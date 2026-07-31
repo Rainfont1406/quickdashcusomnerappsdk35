@@ -7,6 +7,8 @@ import 'package:emartconsumer/model/ProductModel.dart';
 import 'package:emartconsumer/model/Ratingmodel.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/behavior/behavior_event_types.dart';
+import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:flutter/material.dart';
@@ -164,16 +166,29 @@ class _OrderRatingScreenState extends State<OrderRatingScreen> {
         reviewAttributes: {},
       );
       await FireStoreUtils.updateReviewbyId(rate);
+      BehaviorTracker.track(kEvtRestaurantRated, {
+        'vendorId': widget.orderModel.vendorID,
+        'productId': rate.productId,
+        'rating': _stars,
+        'hasReviewText': _commentCtrl.text.trim().isNotEmpty,
+        'orderId': widget.orderModel.id,
+      });
 
       if (_productModel != null) {
-        _productModel!.reviewsCount = _reviewCount + 1;
-        _productModel!.reviewsSum = _reviewSum + _stars;
-        await FireStoreUtils.updateProduct(_productModel!);
+        final newCount = _reviewCount + 1;
+        final newSum = _reviewSum + _stars;
+        await FireStoreUtils.updateProductReviewStats(
+            _productModel!.id, newCount, newSum, _productModel!.reviewAttributes ?? {});
+        _productModel!.reviewsCount = newCount;
+        _productModel!.reviewsSum = newSum;
       }
       if (_vendorModel != null) {
-        _vendorModel!.reviewsCount = _vendorReviewCount + 1;
-        _vendorModel!.reviewsSum = _vendorReviewSum + _stars;
-        await FireStoreUtils.updateVendor(_vendorModel!);
+        final newVendorCount = _vendorReviewCount + 1;
+        final newVendorSum = _vendorReviewSum + _stars;
+        await FireStoreUtils.updateVendorReviewStats(
+            _vendorModel!.id, newVendorCount, newVendorSum);
+        _vendorModel!.reviewsCount = newVendorCount;
+        _vendorModel!.reviewsSum = newVendorSum;
       }
 
       if (mounted) {
@@ -182,7 +197,9 @@ class _OrderRatingScreenState extends State<OrderRatingScreen> {
           _submitted = true;
         });
       }
-    } catch (_) {
+    } catch (e, s) {
+      // ignore: avoid_print
+      print('[REVIEW-DEBUG] OrderRatingScreen submit EXCEPTION: $e\n$s');
       if (mounted) setState(() => _submitting = false);
       _snack('Failed to submit. Please try again.'.tr());
     }
@@ -533,6 +550,8 @@ class _OrderRatingScreenState extends State<OrderRatingScreen> {
               focusNode: _focusNode,
               maxLines: null,
               minLines: 4,
+              maxLength: 1000,
+              buildCounter: (context, {required currentLength, required isFocused, maxLength}) => null,
               keyboardType: TextInputType.multiline,
               textCapitalization: TextCapitalization.sentences,
               style: AppTypography.bodyMedium.copyWith(
@@ -849,13 +868,13 @@ class _RatingSkeletonLoaderState extends State<_RatingSkeletonLoader>
                 _box(190, 15, radius: 7),
                 const SizedBox(height: 22),
 
-                // 5 star circles
+                // 5 star circles — horizontal: 5 matches RatingBar itemPadding
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: List.generate(5, (i) {
                     return Padding(
                       padding:
-                          const EdgeInsets.symmetric(horizontal: 7),
+                          const EdgeInsets.symmetric(horizontal: 5),
                       child: _box(44, 44, radius: 22),
                     );
                   }),

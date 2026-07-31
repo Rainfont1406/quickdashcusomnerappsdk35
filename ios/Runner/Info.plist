@@ -48,7 +48,7 @@
 			<string>Editor</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>com.googleusercontent.apps.841077018919-ap6ufmadhjb306vmo0j0o83ade5gvkki</string>
+				<string>com.googleusercontent.apps.60208840695-v9nctp1ie5i6fdolg89n25kfh3d4nsec</string>
 			</array>
 		</dict>
 	</array>
@@ -60,6 +60,8 @@
 	<string>bdf664e526e6dfaa40b4dd28f67c4890</string>
 	<key>FacebookDisplayName</key>
 	<string>Instachatty</string>
+	<key>GMSApiKey</key>
+	<string>PASTE_REAL_IOS_GOOGLE_MAPS_KEY_HERE</string>
 	<key>LSApplicationQueriesSchemes</key>
 	<array>
 		<string>fbapi</string>

@@ -8,11 +8,15 @@ import 'package:emartconsumer/model/FavouriteModel.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/model/offer_model.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/behavior/behavior_event_types.dart';
+import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/auth_screen/login_screen.dart';
+import 'package:emartconsumer/widget/shimmer_box.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:visibility_detector/visibility_detector.dart';
 
 import '../vendorProductsScreen/newVendorProductsScreen.dart';
 
@@ -293,8 +297,10 @@ class _ViewAllRestaurantState extends State<ViewAllRestaurant>
         .toList();
 
     return GestureDetector(
-      onTap: () =>
-          push(context, NewVendorProductsScreen(vendorModel: vendorModel)),
+      onTap: () {
+        BehaviorTracker.setNextEntrySource('Home');
+        push(context, NewVendorProductsScreen(vendorModel: vendorModel));
+      },
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 6),
         child: Container(
@@ -320,44 +326,10 @@ class _ViewAllRestaurantState extends State<ViewAllRestaurant>
                   children: [
                     ClipRRect(
                       borderRadius: BorderRadius.circular(10),
-                      child: CachedNetworkImage(
+                      child: _LazyVendorThumb(
+                        cacheKey: vendorModel.id,
                         imageUrl: getImageVAlidUrl(vendorModel.photo),
-                        height: 100,
-                        width: 100,
-                        fit: BoxFit.cover,
-                        imageBuilder: (context, imageProvider) => Container(
-                          width: 100,
-                          height: 100,
-                          decoration: BoxDecoration(
-                            borderRadius: BorderRadius.circular(10),
-                            image: DecorationImage(
-                                image: imageProvider, fit: BoxFit.cover),
-                          ),
-                        ),
-                        placeholder: (context, url) => AnimatedBuilder(
-                          animation: _shimmerController,
-                          builder: (_, __) => Container(
-                            width: 100,
-                            height: 100,
-                            decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(10),
-                              color: Color.lerp(
-                                AppThemeData.grey100,
-                                AppThemeData.grey300,
-                                _shimmerController.value,
-                              ),
-                            ),
-                          ),
-                        ),
-                        errorWidget: (context, url, error) => ClipRRect(
-                          borderRadius: BorderRadius.circular(10),
-                          child: Image.network(
-                            placeholderImage,
-                            fit: BoxFit.cover,
-                            cacheHeight: 100,
-                            cacheWidth: 100,
-                          ),
-                        ),
+                        size: 100,
                       ),
                     ),
                     if (discounts.isNotEmpty)
@@ -428,6 +400,8 @@ class _ViewAllRestaurantState extends State<ViewAllRestaurant>
                                             MyAppState.currentUser!.userID,
                                       ),
                                     );
+                                    BehaviorTracker.track(kEvtRestaurantUnfavorited,
+                                        {'vendorId': vendorModel.id});
                                   } else {
                                     lstFav.add(vendorModel.id);
                                     FireStoreUtils.setFavouriteStore(
@@ -439,6 +413,8 @@ class _ViewAllRestaurantState extends State<ViewAllRestaurant>
                                             MyAppState.currentUser!.userID,
                                       ),
                                     );
+                                    BehaviorTracker.track(kEvtRestaurantFavorited,
+                                        {'vendorId': vendorModel.id});
                                   }
                                 });
                               }
@@ -513,6 +489,72 @@ class _ViewAllRestaurantState extends State<ViewAllRestaurant>
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+// Viewport-gated (2026-07-20, explicit product request to verify this
+// screen): this screen's outer ListView.builder is already a real,
+// unbounded, non-shrinkWrap list (unlike AllStore/NewArrival on Home), so
+// Flutter's own virtualization already limits how many cards build ahead of
+// scroll - but the default cache extent still pre-builds a couple of cards
+// beyond the visible screen, firing their image request immediately. Same
+// VisibilityDetector-gated pattern as _RestaurantCardImage/_LazyDishImage
+// elsewhere in the app, so only thumbnails actually scrolled into view ever
+// fire a network request here too.
+class _LazyVendorThumb extends StatefulWidget {
+  final String cacheKey;
+  final String imageUrl;
+  final double size;
+
+  const _LazyVendorThumb({
+    required this.cacheKey,
+    required this.imageUrl,
+    required this.size,
+  });
+
+  @override
+  State<_LazyVendorThumb> createState() => _LazyVendorThumbState();
+}
+
+class _LazyVendorThumbState extends State<_LazyVendorThumb> {
+  bool _visible = false;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_visible) {
+      return VisibilityDetector(
+        key: ValueKey('vendorThumb_${widget.cacheKey}'),
+        onVisibilityChanged: (info) {
+          if (!_visible && info.visibleFraction > 0 && mounted) {
+            setState(() => _visible = true);
+          }
+        },
+        child: ShimmerBox(
+          width: widget.size,
+          height: widget.size,
+          borderRadius: 0, // outer ClipRRect at the call site already clips this
+        ),
+      );
+    }
+    return CachedNetworkImage(
+      imageUrl: widget.imageUrl,
+      height: widget.size,
+      width: widget.size,
+      fit: BoxFit.cover,
+      imageBuilder: (context, imageProvider) => Container(
+        width: widget.size,
+        height: widget.size,
+        decoration: BoxDecoration(
+          image: DecorationImage(image: imageProvider, fit: BoxFit.cover),
+        ),
+      ),
+      errorWidget: (context, url, error) => Image.network(
+        placeholderImage,
+        fit: BoxFit.cover,
+        cacheHeight: widget.size.toInt(),
+        cacheWidth: widget.size.toInt(),
       ),
     );
   }

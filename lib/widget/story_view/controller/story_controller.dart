@@ -10,6 +10,12 @@ class StoryController {
   // progress bar matches the true video length (fixes the black-screen overshoot).
   final durationNotifier = BehaviorSubject<Duration>();
 
+  // Fires true when the video player stalls waiting for data, false when the
+  // buffer fills and playback resumes. Used by _VendorStoryPageState to pause
+  // the view-count timer during buffer stalls so wall-clock time is not counted
+  // as watch time.
+  final bufferingNotifier = BehaviorSubject<bool>.seeded(false);
+
   void pause() => playbackNotifier.add(PlaybackState.pause);
   void play() => playbackNotifier.add(PlaybackState.play);
   void next() => playbackNotifier.add(PlaybackState.next);
@@ -19,8 +25,13 @@ class StoryController {
     if (!durationNotifier.isClosed) durationNotifier.add(d);
   }
 
+  void notifyBuffering(bool isBuffering) {
+    if (!bufferingNotifier.isClosed) bufferingNotifier.add(isBuffering);
+  }
+
   void dispose() {
     playbackNotifier.close();
     durationNotifier.close();
+    bufferingNotifier.close();
   }
 }
