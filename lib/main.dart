@@ -36,6 +36,7 @@ import 'package:flutter_easyloading/flutter_easyloading.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'model/SectionModel.dart';
 import 'model/User.dart';
 import 'theme/app_them_data.dart';
 import 'utils/DarkThemeProvider.dart';
@@ -425,6 +426,39 @@ Future<void> _clearCachedUserProfile(String uid) async {
   } catch (_) {}
 }
 
+// ── Cached sections (global app config, not per-user) ───────────────────────
+// getSections() was the single largest remaining cost on a warm reopen
+// (~2-2.5s) even after the user-profile cache-hit fast path — same
+// cache-then-refresh-in-background treatment closes that gap. SectionModel
+// has no Timestamp/GeoPoint fields, so plain json.encode/decode is safe here
+// without the reviver machinery the user-profile cache needs.
+const String _cachedSectionsKey = 'cached_sections_list';
+
+Future<List<SectionModel>?> _loadCachedSections() async {
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_cachedSectionsKey);
+    if (raw == null) return null;
+    final decoded = json.decode(raw) as List<dynamic>;
+    return decoded
+        .map((e) => SectionModel.fromJson(e as Map<String, dynamic>))
+        .toList();
+  } catch (e) {
+    debugPrint('[STARTUP-PERF] _loadCachedSections failed, ignoring cache: $e');
+    return null;
+  }
+}
+
+Future<void> _cacheSections(List<SectionModel> sections) async {
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    final encoded = json.encode(sections.map((s) => s.toJson()).toList());
+    await prefs.setString(_cachedSectionsKey, encoded);
+  } catch (e) {
+    debugPrint('[STARTUP-PERF] _cacheSections failed, skipping: $e');
+  }
+}
+
 class OnBoarding extends StatefulWidget {
   const OnBoarding({Key? key}) : super(key: key);
 
@@ -438,9 +472,25 @@ class OnBoardingState extends State<OnBoarding> {
 
   bool _navigated = false;
 
-  void _safeNavigate(VoidCallback navigate) {
+  // Splash-screen display budget: never shorter than 800ms (so a fast
+  // cache-hit doesn't flash by instantly) and — for the cache-hit path only,
+  // see _kMaxCacheHitWait below — never blocked past 2s. Set the instant
+  // this screen appears, in initState().
+  DateTime? _flowStartedAt;
+  static const _kMinSplashDisplay = Duration(milliseconds: 800);
+  static const _kMaxCacheHitWait = Duration(seconds: 2);
+
+  Future<void> _safeNavigate(VoidCallback navigate) async {
     if (_navigated || !mounted) return;
     _navigated = true;
+    final startedAt = _flowStartedAt;
+    if (startedAt != null) {
+      final remaining = _kMinSplashDisplay - DateTime.now().difference(startedAt);
+      if (remaining > Duration.zero) {
+        await Future.delayed(remaining);
+        if (!mounted) return;
+      }
+    }
     navigate();
   }
 
@@ -458,7 +508,22 @@ class OnBoardingState extends State<OnBoarding> {
         MyAppState.selectedPosotion = user.shippingAddress!.first;
       }
       // --- Begin: Set section info as ServiceListScreen does ---
-      final sections = await _timedStep('getSections', () => FireStoreUtils.getSections());
+      // Cache-first, same pattern as the user profile above — sections
+      // rarely change, so a stale-by-a-few-minutes copy navigating
+      // instantly beats a fresh copy costing another ~2s network round
+      // trip on every single reopen. Refreshed in the background either way.
+      final cachedSections = await _timedStep(
+          'loadCachedSections', () => _loadCachedSections());
+      List<SectionModel> sections;
+      if (cachedSections != null && cachedSections.isNotEmpty) {
+        sections = cachedSections;
+        unawaited(FireStoreUtils.getSections().then((fresh) {
+          if (fresh.isNotEmpty) unawaited(_cacheSections(fresh));
+        }));
+      } else {
+        sections = await _timedStep('getSections', () => FireStoreUtils.getSections());
+        if (sections.isNotEmpty) unawaited(_cacheSections(sections));
+      }
       if (sections.isNotEmpty) {
         sectionConstantModel = sections.first;
 
@@ -487,7 +552,7 @@ class OnBoardingState extends State<OnBoarding> {
       }
 
       // Push to HomeScreen with drawer support
-      _safeNavigate(() => pushReplacement(
+      await _safeNavigate(() => pushReplacement(
           context,
           ContainerScreen(
             user: MyAppState.currentUser!,
@@ -497,7 +562,7 @@ class OnBoardingState extends State<OnBoarding> {
           )));
       // --- End ---
     } else {
-      _safeNavigate(() => pushAndRemoveUntil(context, LocationPermissionScreen()));
+      await _safeNavigate(() => pushAndRemoveUntil(context, LocationPermissionScreen()));
     }
   }
 
@@ -561,9 +626,22 @@ class OnBoardingState extends State<OnBoarding> {
               cachedUser.role == USER_ROLE_CUSTOMER &&
               cachedUser.active) {
             completionPath = 'cache-hit (auth branch)';
-            await _navigateWithUser(cachedUser);
-            unawaited(_refreshUserProfileInBackground(firebaseUser.uid));
-            return;
+            try {
+              // This branch is pure local reads (no network) and normally
+              // finishes in well under a second — the 2s cap is a safety
+              // net for a genuine hang, not something the happy path should
+              // ever hit. On timeout, fall through to the real network path
+              // below rather than get stuck; _safeNavigate's _navigated
+              // guard makes that safe even if this branch got partway
+              // through navigating before timing out.
+              await _navigateWithUser(cachedUser).timeout(_kMaxCacheHitWait);
+              unawaited(_refreshUserProfileInBackground(firebaseUser.uid));
+              return;
+            } on TimeoutException {
+              completionPath = 'cache-hit-timeout (auth branch)';
+              debugPrint(
+                  '[STARTUP-PERF] cache-hit fast path exceeded ${_kMaxCacheHitWait.inSeconds}s, falling through to network path');
+            }
           }
 
           // TEMPORARY: isolate ID-token acquisition from the Firestore query
@@ -642,9 +720,16 @@ class OnBoardingState extends State<OnBoarding> {
                 cachedUser.role == USER_ROLE_CUSTOMER &&
                 cachedUser.active) {
               completionPath = 'cache-hit (msg91 branch)';
-              await _navigateWithUser(cachedUser);
-              unawaited(_refreshUserProfileInBackground(savedPhoneUid));
-              return;
+              try {
+                // See the identical comment in the auth branch above.
+                await _navigateWithUser(cachedUser).timeout(_kMaxCacheHitWait);
+                unawaited(_refreshUserProfileInBackground(savedPhoneUid));
+                return;
+              } on TimeoutException {
+                completionPath = 'cache-hit-timeout (msg91 branch)';
+                debugPrint(
+                    '[STARTUP-PERF] cache-hit fast path exceeded ${_kMaxCacheHitWait.inSeconds}s, falling through to network path');
+              }
             }
 
             // Same concurrency fix as the auth branch above — getCurrentUser
@@ -701,6 +786,7 @@ class OnBoardingState extends State<OnBoarding> {
   @override
   void initState() {
     super.initState();
+    _flowStartedAt = DateTime.now();
     hasFinishedOnBoarding().timeout(
       const Duration(seconds: 15),
       onTimeout: () {

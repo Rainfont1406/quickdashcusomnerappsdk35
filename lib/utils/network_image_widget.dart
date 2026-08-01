@@ -45,6 +45,21 @@ String _preciseBunnyUrl(String url, BuildContext context, double? displayWidth) 
   return bunnyOptimizedUrl(url, width: targetWidth);
 }
 
+/// Warms the cache for an upcoming carousel image using the exact same
+/// resized-URL computation NetworkImageWidget itself uses, so the cache key
+/// matches and the image is already decoded by the time a PageView actually
+/// scrolls to it — call this for the "next" page as soon as the "current"
+/// one settles, giving it a full tick interval of lead time instead of only
+/// starting the fetch the moment the carousel wants to advance (which is
+/// what caused the brief shimmer/white flash on the incoming photo).
+/// Errors are swallowed — a failed precache just means that page falls back
+/// to its own normal loading state, same as if this was never called.
+void precacheCarouselImage(BuildContext context, String imageUrl, {double? width}) {
+  final resolvedUrl = _preciseBunnyUrl(imageUrl, context, width);
+  precacheImage(CachedNetworkImageProvider(resolvedUrl), context)
+      .catchError((_) {});
+}
+
 class NetworkImageWidget extends StatelessWidget {
   final String imageUrl;
   final double? height;

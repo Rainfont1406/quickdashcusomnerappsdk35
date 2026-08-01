@@ -1038,7 +1038,20 @@ class _ContainerScreen extends State<ContainerScreen> with WidgetsBindingObserve
                                       }),
                               ],
                   ),
-            body: _currentWidget,
+            // Android 15 (targetSdkVersion 35) enforces edge-to-edge: the app
+            // window now extends under the system nav bar / gesture strip by
+            // default, so screens must explicitly pad for it or content (and,
+            // during route transitions, whatever's visible behind/around it)
+            // can render into that area. top:false because every non-Home
+            // selection already gets its top inset from the AppBar above, and
+            // HomeScreen pads its own top manually (MediaQuery.viewPadding.top)
+            // — only bottom needs a shell-level catch-all. Safe to nest: any
+            // screen below (e.g. CartScreen) that already wraps itself in its
+            // own SafeArea just sees zero remaining padding here, no double-pad.
+            body: SafeArea(
+              top: false,
+              child: _currentWidget,
+            ),
           );
         }),
       ),

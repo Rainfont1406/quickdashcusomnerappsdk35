@@ -3652,8 +3652,13 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
               "ecommerce-service"
           ? Container(
               color: AppThemeData.primary500,
-              padding: const EdgeInsets.only(
-                  left: 20, right: 20, bottom: 20, top: 20),
+              // bottom: 20 was a fixed offset that didn't account for the
+              // system nav-bar/gesture inset (edge-to-edge on API 35).
+              padding: EdgeInsets.only(
+                  left: 20,
+                  right: 20,
+                  bottom: 20 + MediaQuery.of(context).padding.bottom,
+                  top: 20),
 
               child: Row(
                 children: [

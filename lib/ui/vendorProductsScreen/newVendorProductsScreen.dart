@@ -810,6 +810,14 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
   PageController pageController = PageController();
   int currentPage = 0;
   Timer? _sliderTimer;
+  // Which _cardPhotos indices have actually finished decoding at least once
+  // (via NetworkImageWidget's onLoaded/onError below) — animateSlider()
+  // only auto-advances to an index once it's in here, and proactively
+  // precaches the upcoming index the moment the current one settles, so the
+  // image is normally already decoded well before the timer wants to move
+  // to it. Fixes a brief shimmer/white flash that showed on the incoming
+  // photo when the carousel advanced to one that hadn't loaded yet.
+  final Set<int> _heroSettledPages = {};
 
   // photos[0] = logo, photos[1..n] = card gallery images.
   List<String> get _cardPhotos {
@@ -823,18 +831,32 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
   void animateSlider() {
     if (_cardPhotos.length > 1) {
       _sliderTimer = Timer.periodic(const Duration(seconds: 2), (Timer timer) {
-        if (currentPage < _cardPhotos.length - 1) {
-          currentPage++;
-        } else {
-          currentPage = 0;
-        }
+        final next = currentPage >= _cardPhotos.length - 1 ? 0 : currentPage + 1;
+        // Skip this tick (don't advance) if the upcoming photo hasn't
+        // finished decoding yet — advancing to it would show a shimmer/
+        // white flash instead of the actual image. It was already
+        // proactively precached when the current page settled, so this
+        // normally only skips a tick right after the very first photo
+        // loads, never afterward.
+        if (!_heroSettledPages.contains(next)) return;
+        // Wrapping last -> first: a plain PageView isn't circular, so
+        // animateToPage(0) from the last page scrolls backward through
+        // every intermediate photo instead of cutting straight to the
+        // first. jumpToPage snaps instantly for just this one wrap-around
+        // step; every other advance still uses the normal smooth animation.
+        final wrapping = currentPage >= _cardPhotos.length - 1;
+        currentPage = wrapping ? 0 : currentPage + 1;
 
         if (pageController.hasClients) {
-          pageController.animateToPage(
-            currentPage,
-            duration: const Duration(milliseconds: 300),
-            curve: Curves.easeIn,
-          );
+          if (wrapping) {
+            pageController.jumpToPage(currentPage);
+          } else {
+            pageController.animateToPage(
+              currentPage,
+              duration: const Duration(milliseconds: 300),
+              curve: Curves.easeIn,
+            );
+          }
         }
         setState(() {});
       });
@@ -1021,7 +1043,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                               end: const Alignment(0, 1),
                                               colors: [
                                                 Colors.black.withOpacity(0),
-                                                Colors.black
+                                                Colors.black.withOpacity(0.55),
                                               ],
                                             ),
                                           ),
@@ -1038,15 +1060,29 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                       itemBuilder:
                                           (BuildContext context, int index) {
                                         String image = _cardPhotos[index];
+                                        final heroWidth =
+                                            Responsive.width(100, context);
+                                        void onSettled() {
+                                          _heroSettledPages.add(index);
+                                          final next =
+                                              (index + 1) % _cardPhotos.length;
+                                          if (!_heroSettledPages.contains(next)) {
+                                            precacheCarouselImage(
+                                                context, _cardPhotos[next],
+                                                width: heroWidth);
+                                          }
+                                        }
+
                                         return Stack(
                                           children: [
                                             NetworkImageWidget(
                                               imageUrl: image,
                                               fit: BoxFit.cover,
-                                              width: Responsive.width(
-                                                  100, context),
+                                              width: heroWidth,
                                               height: Responsive.height(
                                                   40, context),
+                                              onLoaded: onSettled,
+                                              onError: (_) => onSettled(),
                                             ),
                                             Container(
                                               decoration: BoxDecoration(
@@ -1056,7 +1092,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                                   end: const Alignment(0, 1),
                                                   colors: [
                                                     Colors.black.withOpacity(0),
-                                                    Colors.black
+                                                    Colors.black.withOpacity(0.55),
                                                   ],
                                                 ),
                                               ),

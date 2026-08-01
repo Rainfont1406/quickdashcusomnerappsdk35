@@ -41,8 +41,6 @@ class _ReviewScreenState extends State<ReviewScreen> with TickerProviderStateMix
   FireStoreUtils fireStoreUtils = FireStoreUtils();
   final comment = TextEditingController();
   var ratings = 0.0;
-  var reviewCount, reviewSum;
-  var vendorReviewCount, vendoReviewSum;
 
   ProductModel? productModel;
   VendorCategoryModel? vendorCategoryModel;
@@ -85,9 +83,6 @@ class _ReviewScreenState extends State<ReviewScreen> with TickerProviderStateMix
         productModel = value;
 
         if (ratingModel != null) {
-          reviewCount = value.reviewsCount - 1;
-          reviewSum = value.reviewsSum - num.parse(ratingModel!.rating.toString());
-
           if (value.reviewAttributes != null) {
             value.reviewAttributes!.forEach((key, value) {
               ReviewsAttribute reviewsAttributeModel = ReviewsAttribute.fromJson(value);
@@ -97,21 +92,12 @@ class _ReviewScreenState extends State<ReviewScreen> with TickerProviderStateMix
             });
           }
         } else {
-          reviewCount = value.reviewsCount;
-          reviewSum = value.reviewsSum;
           reviewProductAttributes = value.reviewAttributes!;
         }
       });
     });
 
     vendorModel = await FireStoreUtils.getVendor(productModel!.vendorID);
-    if (ratingModel != null) {
-      vendorReviewCount = vendorModel!.reviewsCount - 1;
-      vendoReviewSum = vendorModel!.reviewsSum - num.parse(ratingModel!.rating.toString());
-    } else {
-      vendorReviewCount = vendorModel!.reviewsCount;
-      vendoReviewSum = vendorModel!.reviewsSum;
-    }
 
     await fireStoreUtils.getVendorCategoryByCategoryId(widget.product.category_id.toString()).then((value) {
       setState(() {
@@ -451,7 +437,10 @@ class _ReviewScreenState extends State<ReviewScreen> with TickerProviderStateMix
                 ))),
         bottomNavigationBar: ratingModel != null
             ? Padding(
-                padding: const EdgeInsets.symmetric(vertical: 20.0, horizontal: 25),
+                // vertical: 20.0 was a fixed offset that didn't account for
+                // the system nav-bar/gesture inset (edge-to-edge on API 35).
+                padding: EdgeInsets.fromLTRB(25, 20, 25,
+                    20 + MediaQuery.of(context).padding.bottom),
                 child: ElevatedButton(
                   style: ElevatedButton.styleFrom(
                     padding: const EdgeInsets.all(12),
@@ -491,12 +480,15 @@ class _ReviewScreenState extends State<ReviewScreen> with TickerProviderStateMix
                       });
                     }
 
-                    productModel!.reviewsCount = reviewCount + 1;
-                    productModel!.reviewsSum = reviewSum + ratings;
                     productModel!.reviewAttributes = reviewProductAttributes;
 
-                    vendorModel!.reviewsCount = vendorReviewCount + 1;
-                    vendorModel!.reviewsSum = vendoReviewSum + ratings;
+                    // Edit: count holds steady, sum moves by the swing between
+                    // old and new star rating - see updateVendorReviewStats'
+                    // doc comment for why this must be a delta, not a
+                    // client-computed absolute total.
+                    final num oldRating =
+                        num.tryParse(ratingModel!.rating.toString()) ?? 0;
+                    final num ratingSwing = ratings - oldRating;
                     RatingModel ratingproduct = RatingModel(
                         productId: ratingModel!.productId,
                         comment: comment.text,
@@ -511,9 +503,10 @@ class _ReviewScreenState extends State<ReviewScreen> with TickerProviderStateMix
                         profile: MyAppState.currentUser!.profilePictureURL,
                         reviewAttributes: reviewAttribute);
                     await FireStoreUtils.updateReviewbyId(ratingproduct);
-                    await FireStoreUtils.updateReviewbyId(ratingproduct);
-                    await FireStoreUtils.updateVendor(vendorModel!);
-                    var error = await FireStoreUtils.updateProduct(productModel!);
+                    await FireStoreUtils.updateVendorReviewStats(
+                        vendorModel!.id, 0, ratingSwing);
+                    await FireStoreUtils.updateProductReviewStats(
+                        productModel!.id, 0, ratingSwing, reviewProductAttributes);
                     await hideProgress();
                     Navigator.pop(context, OrdersScreen());
                   },
@@ -524,7 +517,10 @@ class _ReviewScreenState extends State<ReviewScreen> with TickerProviderStateMix
                 ),
               )
             : Padding(
-                padding: const EdgeInsets.symmetric(vertical: 20.0, horizontal: 25),
+                // vertical: 20.0 was a fixed offset that didn't account for
+                // the system nav-bar/gesture inset (edge-to-edge on API 35).
+                padding: EdgeInsets.fromLTRB(25, 20, 25,
+                    20 + MediaQuery.of(context).padding.bottom),
                 child: ElevatedButton(
                   style: ElevatedButton.styleFrom(
                     padding: const EdgeInsets.all(12),
@@ -577,14 +573,12 @@ class _ReviewScreenState extends State<ReviewScreen> with TickerProviderStateMix
         });
       }
 
-      productModel!.reviewsCount = reviewCount + 1;
-      productModel!.reviewsSum = reviewSum + ratings;
       productModel!.reviewAttributes = reviewProductAttributes;
       //  widget.order.products.first.
 
-      vendorModel!.reviewsCount = vendorReviewCount + 1;
-      vendorModel!.reviewsSum = vendoReviewSum + ratings;
-
+      // New review: count moves by exactly +1, sum by exactly +ratings - see
+      // updateVendorReviewStats' doc comment for why this must be a delta,
+      // not a client-computed absolute total.
       DocumentReference documentReference = FireStoreUtils.firestore.collection(Order_Rating).doc();
       RatingModel rate = RatingModel(
           id: documentReference.id,
@@ -600,8 +594,9 @@ class _ReviewScreenState extends State<ReviewScreen> with TickerProviderStateMix
           createdAt: Timestamp.now(),
           reviewAttributes: reviewAttribute);
       await FireStoreUtils.updateReviewbyId(rate);
-      await FireStoreUtils.updateVendor(vendorModel!);
-      var error = await FireStoreUtils.updateProduct(productModel!);
+      await FireStoreUtils.updateVendorReviewStats(vendorModel!.id, 1, ratings);
+      await FireStoreUtils.updateProductReviewStats(
+          productModel!.id, 1, ratings, reviewProductAttributes);
       await hideProgress();
       Navigator.pop(context, OrdersScreen());
     }

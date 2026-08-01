@@ -112,7 +112,10 @@ class _GiftCardRedeemScreenState extends State<GiftCardRedeemScreen> {
         ),
       ),
       bottomNavigationBar: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        // vertical: 12 was a fixed offset that didn't account for the system
+        // nav-bar/gesture inset (edge-to-edge on API 35) - pad the bottom
+        // side separately so it adds the inset instead of losing it.
+        padding: EdgeInsets.fromLTRB(16, 12, 16, 12 + MediaQuery.of(context).padding.bottom),
         child:  RoundedButtonFill(
           title: "Redeem".tr(),
           color: AppThemeData.primary500,

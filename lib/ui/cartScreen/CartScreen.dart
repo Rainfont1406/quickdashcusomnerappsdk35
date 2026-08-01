@@ -142,6 +142,11 @@ class _CartScreenState extends State<CartScreen> {
 
   // Cart skeleton: shows until first validation completes (or empty-cart confirmed)
   bool _isCartInitialized = false;
+  // [CART-PERF] race-condition audit only: records whether the initState
+  // getTaxData() call has already resolved by the time getDeliveyData()
+  // reaches its own getTaxData() call. Read-only instrumentation, no
+  // behavior change.
+  bool _firstTaxDataCallDone = false;
 
   // Re-order flow: true while background validation + cart population is in progress
   bool _reOrderPending = false;
@@ -182,8 +187,18 @@ class _CartScreenState extends State<CartScreen> {
   DateTime get _serverAdjustedNow => DateTime.now().add(_serverTimeOffset);
 
   Future<void> _fetchServerTimeOffset() async {
+    final sw = Stopwatch()..start();
+    // source=Firestore('_serverPing/ping' doc) — NOT a plain read: this is a
+    // WRITE (.set with FieldValue.serverTimestamp()) immediately followed by
+    // a READ of the same doc, two sequential round trips, not one. Also has
+    // an existing 5-minute in-memory cache (see FireStoreUtils._serverTimeTtl)
+    // — this whole body only actually reaches Firestore once per 5 minutes
+    // per app session; a cache-hit here returns near-instantly and this log
+    // line's own elapsed time reflects that when it happens.
+    debugPrint('[CART-PERF][_fetchServerTimeOffset] request START at ${DateTime.now().toIso8601String()}');
     final deviceBefore = DateTime.now();
     final serverTime = await FireStoreUtils.getServerTime();
+    debugPrint('[CART-PERF][_fetchServerTimeOffset] Firestore Future resolved (write+read, or cache-hit) — ${sw.elapsedMilliseconds}ms');
     final elapsed = DateTime.now().difference(deviceBefore);
     // Compensate for round-trip latency using the midpoint of the request window.
     final deviceMidpoint = deviceBefore.add(elapsed ~/ 2);
@@ -191,22 +206,39 @@ class _CartScreenState extends State<CartScreen> {
       setState(() {
         _serverTimeOffset = serverTime.difference(deviceMidpoint);
       });
+      debugPrint('[CART-PERF][_fetchServerTimeOffset] setState called — ${sw.elapsedMilliseconds}ms');
+      WidgetsBinding.instance.addPostFrameCallback((_) => debugPrint(
+          '[CART-PERF][_fetchServerTimeOffset] next frame rendered — ${sw.elapsedMilliseconds}ms'));
     }
   }
 
   @override
   void initState() {
     super.initState();
+    final initSw = Stopwatch()..start();
+    debugPrint('[CART-PERF] CartScreen.initState START at ${DateTime.now().toIso8601String()}');
     addressModel = MyAppState.selectedPosotion;
     _houseCtrl.text = addressModel.address ?? '';
     _landmarkCtrl.text = addressModel.landmark ?? '';
     _reOrderPending = widget.reOrderModel != null;
     _billPayPending = _isBillPayMode;
 
-    coupon = _fireStoreUtils.getAllCoupons();
-    getFoodType();
-    getTaxData();
-    _fetchServerTimeOffset();
+    coupon = _fireStoreUtils.getAllCoupons().then((value) {
+      debugPrint('[CART-PERF] getAllCoupons END — ${initSw.elapsedMilliseconds}ms since initState');
+      return value;
+    });
+    debugPrint('[CART-PERF] getFoodType START — ${initSw.elapsedMilliseconds}ms since initState');
+    getFoodType().then((_) => debugPrint(
+        '[CART-PERF] getFoodType END — ${initSw.elapsedMilliseconds}ms since initState'));
+    debugPrint('[CART-PERF] getTaxData START — ${initSw.elapsedMilliseconds}ms since initState at ${DateTime.now().toIso8601String()}');
+    getTaxData().then((_) {
+      _firstTaxDataCallDone = true;
+      debugPrint(
+          '[CART-PERF] getTaxData END (1st/initState call) — ${initSw.elapsedMilliseconds}ms since initState, wall-clock ${DateTime.now().toIso8601String()}');
+    });
+    debugPrint('[CART-PERF] _fetchServerTimeOffset START — ${initSw.elapsedMilliseconds}ms since initState');
+    _fetchServerTimeOffset().then((_) => debugPrint(
+        '[CART-PERF] _fetchServerTimeOffset END — ${initSw.elapsedMilliseconds}ms since initState'));
 
     // Initialize Dineaway state
     if (_isBillPayMode) {
@@ -361,11 +393,30 @@ class _CartScreenState extends State<CartScreen> {
   }
 
   // Fetches tax data for the active section (not country-scoped - single-country deployment).
+  // TEMPORARY [CART-PERF] fine-grained staging. Firestore's Dart SDK does
+  // not expose true network-level TTFB (first-byte) — .get()/.set() resolve
+  // as a single opaque Future covering channel + server + native-SDK
+  // deserialize, with no hook in between. These stages are the finest grain
+  // actually observable from Dart: request-issued -> Firestore Future
+  // resolves (network+server, opaque) -> local model-mapping -> setState
+  // called -> next frame actually rendered (via addPostFrameCallback).
+  // Data source for both functions below: Firestore only — no Laravel API,
+  // Cloud Function, or SharedPreferences/local cache involved in the
+  // network path itself (getFoodType's one SharedPreferences read is a
+  // separate, unrelated local value, not a cache of the Firestore call).
   Future<void> getTaxData() async {
+    final sw = Stopwatch()..start();
+    debugPrint('[CART-PERF][getTaxData] source=Firestore(tax collection, '
+        'compound where sectionId+enable) request START at ${DateTime.now().toIso8601String()}');
     try {
       final taxes = await FireStoreUtils().getTaxList(sectionConstantModel?.id);
+      debugPrint('[CART-PERF][getTaxData] Firestore Future resolved — ${sw.elapsedMilliseconds}ms');
       taxList = taxes ?? [];
+      debugPrint('[CART-PERF][getTaxData] model mapping done — ${sw.elapsedMilliseconds}ms');
       setState(() {});
+      debugPrint('[CART-PERF][getTaxData] setState called — ${sw.elapsedMilliseconds}ms');
+      WidgetsBinding.instance.addPostFrameCallback((_) => debugPrint(
+          '[CART-PERF][getTaxData] next frame rendered — ${sw.elapsedMilliseconds}ms'));
     } catch (e) {
       print('Error fetching tax data: $e');
       taxList = [];
@@ -373,6 +424,9 @@ class _CartScreenState extends State<CartScreen> {
   }
 
   getFoodType() async {
+    final sw = Stopwatch()..start();
+    debugPrint('[CART-PERF][getFoodType] source=Firestore(Setting/specialDiscountOffer doc) '
+        'request START at ${DateTime.now().toIso8601String()}');
     SharedPreferences sp = await SharedPreferences.getInstance();
     // Re-orders and Bill Pay both restore/force their own service type — skip here.
     if (widget.reOrderModel == null && !_isBillPayMode) {
@@ -388,8 +442,12 @@ class _CartScreenState extends State<CartScreen> {
         .doc('specialDiscountOffer')
         .get()
         .then((value) {
+      debugPrint('[CART-PERF][getFoodType] Firestore Future resolved — ${sw.elapsedMilliseconds}ms');
       specialDiscountEnable = value.data()?['isEnable'] ?? false;
+      debugPrint('[CART-PERF][getFoodType] model mapping done — ${sw.elapsedMilliseconds}ms');
     });
+    WidgetsBinding.instance.addPostFrameCallback((_) => debugPrint(
+        '[CART-PERF][getFoodType] next frame rendered — ${sw.elapsedMilliseconds}ms'));
   }
 
   // ── Service type switcher (used by inline DeliveryTypeSelector in cart) ───────
@@ -726,16 +784,24 @@ class _CartScreenState extends State<CartScreen> {
 
   Future<void> getDeliveyData() async {
     isDeliverFound = true;
+    // getVendorByVendorID() and getTaxData() have no dependency on each
+    // other — getTaxData() only needs the app-wide sectionConstantModel,
+    // not vendorModel — so run them concurrently instead of sequentially.
+    // Only getRoadDistanceKm further down is a genuine dependency (needs
+    // vendorModel.latitude/longitude) and must stay sequential after it.
+    final deliverySw = Stopwatch()..start();
+    debugPrint('[CART-PERF][getDeliveyData] getVendorByVendorID + getTaxData START (parallel) at ${DateTime.now().toIso8601String()}');
     try {
-      await _fireStoreUtils
-          .getVendorByVendorID(cartProducts.first.vendorID)
-          .then((value) {
-        vendorModel = value;
-        vendorID = cartProducts.first.vendorID;
-      });
-
-      // Get tax data for this vendor/section
-      await getTaxData();
+      await Future.wait([
+        _fireStoreUtils
+            .getVendorByVendorID(cartProducts.first.vendorID)
+            .then((value) {
+          vendorModel = value;
+          vendorID = cartProducts.first.vendorID;
+        }),
+        getTaxData(),
+      ]);
+      debugPrint('[CART-PERF][getDeliveyData] getVendorByVendorID + getTaxData END — ${deliverySw.elapsedMilliseconds}ms');
 
       if (selctedOrderTypeValue == "Delivery" && addressModel.location != null) {
         final kmStr = await getRoadDistanceKm(
@@ -789,7 +855,24 @@ class _CartScreenState extends State<CartScreen> {
 
     // ── Fetch all products in parallel ────────────────────────────────────────
     // Snapshot the list so mutations during async work don't cause issues.
+    // TEMPORARY [CART-PERF] query-pattern audit: source=Firestore(PRODUCTS
+    // collection), one .doc(id).get() PER cart line item, all fired
+    // concurrently via Future.wait — NOT a true single Firestore batch read
+    // (whereIn/getAll would be one wire round-trip for all N; this is N
+    // round-trips overlapped in time, which shares network latency but still
+    // pays N× the per-request server-side/parsing overhead). Also: no dedup
+    // by base product id before firing — a cart with two variant line items
+    // of the SAME product (same id before the '~' split) fires two identical
+    // .doc(sameId).get() calls, a small but real redundant-read case.
     final cartSnapshot = List<CartProduct>.from(cartProducts);
+    final baseProductIds =
+        cartSnapshot.map((cp) => cp.id.split('~').first).toSet();
+    debugPrint('[CART-PERF][_validateCart] query pattern: '
+        '${cartSnapshot.length} line item(s), one Firestore doc read each '
+        '(Future.wait-parallel, not a whereIn/getAll batch), '
+        '${baseProductIds.length} distinct product id(s) '
+        '(${cartSnapshot.length - baseProductIds.length} redundant duplicate read(s) '
+        'if that number is > 0)');
     final fetchProductsSw = Stopwatch()..start();
     final freshProducts = await Future.wait<ProductModel?>(
       cartSnapshot.map((cp) async {
@@ -1060,7 +1143,9 @@ class _CartScreenState extends State<CartScreen> {
         _lastPermCartHash = postRemovalHash;
         _isValidating = false;
       });
+      debugPrint('[CART-PERF][_validateCart] setState (skeleton->real UI) called — ${validateSw.elapsedMilliseconds}ms');
       WidgetsBinding.instance.addPostFrameCallback((_) {
+        debugPrint('[CART-PERF][_validateCart] next frame rendered — ${validateSw.elapsedMilliseconds}ms');
         if (mounted && !_isCartInitialized) {
           setState(() => _isCartInitialized = true);
         }

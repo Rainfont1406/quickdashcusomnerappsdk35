@@ -13,6 +13,7 @@ import 'package:emartconsumer/model/offer_model.dart';
 import 'package:emartconsumer/model/story_model.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/behavior/behavior_counters.dart';
+import 'package:firebase_auth/firebase_auth.dart' as auth;
 import 'package:emartconsumer/services/behavior/behavior_event_types.dart';
 import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/helper.dart';
@@ -1979,7 +1980,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   /// Fetches today's story view records for the current user and populates
   /// [_viewedTodayIds] so the sort puts unviewed stories first.
   Future<void> _loadViewedTodayIds() async {
-    final userID = MyAppState.currentUser?.userID;
+    // MyAppState.currentUser is populated from an async Firestore fetch
+    // during login/session-restore, which can still be in flight right after
+    // a fresh login following a data clear - Firebase Auth's own currentUser
+    // is cached locally the instant sign-in completes, so fall back to it
+    // rather than silently skipping this fetch (same race already fixed for
+    // the write side in story_view.dart's _recordView()). Without this,
+    // SharedPreferences' local "viewed today" cache is wiped by the data
+    // clear AND this Firestore catch-up loses the race and never runs,
+    // so already-watched stories permanently look unwatched until the next
+    // calendar day.
+    final userID = MyAppState.currentUser?.userID ??
+        auth.FirebaseAuth.instance.currentUser?.uid;
     if (userID == null || userID.isEmpty) return;
     final now = DateTime.now();
     final dateKey =
@@ -2644,12 +2656,28 @@ class _RestaurantCardImageState extends State<_RestaurantCardImage> {
         // Skip this tick (don't advance) while the current photo is still
         // loading — the next tick will re-check once it settles.
         if (!_settledPages.contains(_currentPage)) return;
-        final next = (_currentPage + 1) % imgs.length;
-        _pageController.animateToPage(
-          next,
-          duration: const Duration(milliseconds: 400),
-          curve: Curves.easeInOut,
-        );
+        // Wrapping last -> first: a plain PageView isn't circular, so
+        // animateToPage(0) from the last page scrolls backward through
+        // every intermediate photo instead of cutting straight to the
+        // first. jumpToPage snaps instantly for just this one wrap-around
+        // step; every other advance still uses the normal smooth animation.
+        final wrapping = _currentPage >= imgs.length - 1;
+        final next = wrapping ? 0 : _currentPage + 1;
+        // Also skip if the UPCOMING photo itself hasn't decoded yet —
+        // advancing to it would show a shimmer/white flash instead of the
+        // actual image. It's proactively precached when the current page
+        // settles (see onLoaded below), so this normally only matters right
+        // after the very first photo loads.
+        if (!_settledPages.contains(next)) return;
+        if (wrapping) {
+          _pageController.jumpToPage(next);
+        } else {
+          _pageController.animateToPage(
+            next,
+            duration: const Duration(milliseconds: 400),
+            curve: Curves.easeInOut,
+          );
+        }
       });
     }
   }
@@ -2707,8 +2735,16 @@ class _RestaurantCardImageState extends State<_RestaurantCardImage> {
                   controller: _pageController,
                   itemCount: imgs.length,
                   onPageChanged: (i) => setState(() => _currentPage = i),
-                  itemBuilder: (_, i) {
+                  itemBuilder: (context, i) {
                     _logImageLoadStart('vendorCard', imgs[i], section: widget.sectionLabel);
+                    void onSettled() {
+                      _settledPages.add(i);
+                      final next = (i + 1) % imgs.length;
+                      if (!_settledPages.contains(next)) {
+                        precacheCarouselImage(context, imgs[next]);
+                      }
+                    }
+
                     return NetworkImageWidget(
                       imageUrl: imgs[i],
                       fit: BoxFit.cover,
@@ -2716,11 +2752,11 @@ class _RestaurantCardImageState extends State<_RestaurantCardImage> {
                       width: double.infinity,
                       cacheManager: perfDiagnosticCacheManager,
                       onLoaded: () {
-                        _settledPages.add(i);
+                        onSettled();
                         _logImageLoadEnd('vendorCard', imgs[i]);
                       },
                       onError: (e) {
-                        _settledPages.add(i);
+                        onSettled();
                         _logImageLoadEnd('vendorCard', imgs[i], error: e.toString());
                       },
                     );
@@ -4633,16 +4669,33 @@ class _BannerViewState extends State<BannerView> {
     _startAutoScroll();
   }
 
+  void _precacheNextBanner(BuildContext context, int index) {
+    if (widget.bannerList.length <= 1) return;
+    final next = (index + 1) % widget.bannerList.length;
+    if (_settledPages.contains(next)) return;
+    precacheCarouselImage(context, widget.bannerList[next].photo.toString());
+  }
+
   void _startAutoScroll() {
     _autoScrollTimer = Timer.periodic(const Duration(seconds: 4), (_) {
       if (!mounted || widget.bannerList.length <= 1) return;
       if (!_settledPages.contains(_currentPage)) return;
-      final int next = (_currentPage + 1) % widget.bannerList.length;
-      _pageController.animateToPage(
-        next,
-        duration: const Duration(milliseconds: 550),
-        curve: Curves.easeInOut,
-      );
+      // See the identical comment in the restaurant-card carousel above —
+      // jumpToPage avoids scrolling backward through every banner on wrap.
+      final wrapping = _currentPage >= widget.bannerList.length - 1;
+      final int next = wrapping ? 0 : _currentPage + 1;
+      // Also skip if the upcoming banner hasn't decoded yet — see the
+      // identical comment in the restaurant-card carousel above.
+      if (!_settledPages.contains(next)) return;
+      if (wrapping) {
+        _pageController.jumpToPage(next);
+      } else {
+        _pageController.animateToPage(
+          next,
+          duration: const Duration(milliseconds: 550),
+          curve: Curves.easeInOut,
+        );
+      }
     });
   }
 
@@ -4798,10 +4851,12 @@ class _BannerViewState extends State<BannerView> {
                             cacheManager: perfDiagnosticCacheManager,
                             onLoaded: () {
                               _settledPages.add(index);
+                              _precacheNextBanner(context, index);
                               _logImageLoadEnd('banner', bannerUrl);
                             },
                             onError: (e) {
                               _settledPages.add(index);
+                              _precacheNextBanner(context, index);
                               _logImageLoadEnd('banner', bannerUrl, error: e.toString());
                             },
                           ),

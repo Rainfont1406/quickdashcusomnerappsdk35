@@ -289,7 +289,9 @@ class _GiftCardScreenState extends State<GiftCardScreen> {
               ),
             ),
       bottomNavigationBar: Padding(
-        padding: const EdgeInsets.only(right: 40.0, left: 40.0, top: 10, bottom: 10),
+        // bottom: 10 was a fixed offset that didn't account for the system
+        // nav-bar/gesture inset (edge-to-edge on API 35) - add it in.
+        padding: EdgeInsets.only(right: 40.0, left: 40.0, top: 10, bottom: 10 + MediaQuery.of(context).padding.bottom),
         child: ConstrainedBox(
           constraints: const BoxConstraints(minWidth: double.infinity),
           child: ElevatedButton(

@@ -771,7 +771,11 @@ class _LocationPickerState extends State<LocationPicker> {
 
           // ── Current location FAB ──────────────────────────────────────
           Positioned(
-            bottom: currentAddress.isNotEmpty ? 220 : 24,
+            // Fixed offset didn't account for the system nav-bar/gesture
+            // inset (edge-to-edge on API 35) - the FAB could sit flush
+            // against or under it. Same `bottomPadding` already used by the
+            // bottom info card above.
+            bottom: (currentAddress.isNotEmpty ? 220 : 24) + bottomPadding,
             right: 16,
             child: GestureDetector(
               onTap: _isLocating ? null : _setUserLocation,

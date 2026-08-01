@@ -1188,18 +1188,26 @@ class FireStoreUtils {
   // differently) and make that diff check see more than just these two
   // keys, silently denying the write. Same class of bug already fixed once
   // in vendorApp's order-accept flow (see updateOrderFields there).
-  static Future<void> updateVendorReviewStats(String vendorId, num reviewsCount, num reviewsSum) async {
+  // Atomic FieldValue.increment deltas, not absolute totals - a client-computed
+  // absolute .set() here would lose concurrent reviewers' updates (classic
+  // read-modify-write race: two customers reviewing the same vendor around the
+  // same time each read a stale total and overwrite the other's contribution,
+  // letting reviewsSum drift out of ratio with reviewsCount over time). Pass
+  // the delta this single review adds (+1/+rating for a new review, 0/swing
+  // for an edit) - firestore.rules' per-write bounds on vendors/{id} still
+  // apply to the resulting document either way.
+  static Future<void> updateVendorReviewStats(String vendorId, num reviewsCountDelta, num reviewsSumDelta) async {
     await firestore.collection(VENDORS).doc(vendorId).set({
-      'reviewsCount': reviewsCount,
-      'reviewsSum': reviewsSum,
+      'reviewsCount': FieldValue.increment(reviewsCountDelta),
+      'reviewsSum': FieldValue.increment(reviewsSumDelta),
     }, SetOptions(merge: true));
   }
 
   // Same reasoning as updateVendorReviewStats above, for the product doc.
-  static Future<void> updateProductReviewStats(String productId, num reviewsCount, num reviewsSum, Map<String, dynamic> reviewAttributes) async {
+  static Future<void> updateProductReviewStats(String productId, num reviewsCountDelta, num reviewsSumDelta, Map<String, dynamic> reviewAttributes) async {
     await firestore.collection(PRODUCTS).doc(productId).set({
-      'reviewsCount': reviewsCount,
-      'reviewsSum': reviewsSum,
+      'reviewsCount': FieldValue.increment(reviewsCountDelta),
+      'reviewsSum': FieldValue.increment(reviewsSumDelta),
       'reviewAttributes': reviewAttributes,
     }, SetOptions(merge: true));
   }

@@ -75,32 +75,34 @@ class _LanguageChooceScreenState extends State<LanguageChooseScreen> with Single
           ),
         ],
       ),
-      bottomNavigationBar: Padding(
-        padding: const EdgeInsets.all(20.0),
-        child: RoundedButtonFill(
-          title: "Save".tr(),
-          color: AppThemeData.primary500,
-          textColor: AppThemeData.grey50,
-          onPress: () async {
-            SharedPreferences sp = await SharedPreferences.getInstance();
-            sp.setString("languageCode", selectedLanguage);
-            context.setLocale(Locale(selectedLanguage));
+      bottomNavigationBar: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(20.0),
+          child: RoundedButtonFill(
+            title: "Save".tr(),
+            color: AppThemeData.primary500,
+            textColor: AppThemeData.grey50,
+            onPress: () async {
+              SharedPreferences sp = await SharedPreferences.getInstance();
+              sp.setString("languageCode", selectedLanguage);
+              context.setLocale(Locale(selectedLanguage));
 
-            if (widget.isContainer) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text(
-                    'Language change successfully'.tr(),
-                    style: const TextStyle(color: Colors.white),
-                  ).tr(),
-                  duration: const Duration(seconds: 2),
-                  backgroundColor: Colors.black,
-                ),
-              );
-            } else {
-              Navigator.pop(context);
-            }
-          },
+              if (widget.isContainer) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(
+                      'Language change successfully'.tr(),
+                      style: const TextStyle(color: Colors.white),
+                    ).tr(),
+                    duration: const Duration(seconds: 2),
+                    backgroundColor: Colors.black,
+                  ),
+                );
+              } else {
+                Navigator.pop(context);
+              }
+            },
+          ),
         ),
       ),
     );
