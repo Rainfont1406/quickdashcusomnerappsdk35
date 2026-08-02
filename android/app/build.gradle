@@ -34,7 +34,7 @@ def releaseKeyPassword = localProperties.getProperty('RELEASE_KEY_PASSWORD')
 
 android {
     namespace 'com.emart.customer'
-    compileSdkVersion 35
+    compileSdkVersion 36
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
@@ -63,7 +63,7 @@ android {
         applicationId "com.quickdash.customer"
         minSdkVersion 26
         multiDexEnabled = true
-        targetSdkVersion 35
+        targetSdkVersion 36
         versionCode flutterVersionCode.toInteger()
         versionName flutterVersionName
         manifestPlaceholders = [googleMapsApiKey: googleMapsApiKey]

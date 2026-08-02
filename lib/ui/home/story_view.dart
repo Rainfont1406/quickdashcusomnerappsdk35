@@ -577,8 +577,11 @@ class _VendorStoryPageState extends State<_VendorStoryPage> {
     return SizedBox.expand(
       child: ImageFiltered(
         imageFilter: ui.ImageFilter.blur(sigmaX: 18, sigmaY: 18),
+        // Blurred beyond recognition anyway - a tiny transform is plenty and
+        // avoids a second full-resolution fetch competing for bandwidth with
+        // the real image loading in parallel via ImageLoader.loadImage above.
         child: Image.network(
-          imageUrl,
+          bunnyOptimizedUrl(imageUrl, width: 150, quality: 40),
           fit: BoxFit.cover,
           errorBuilder: (_, __, ___) => const ColoredBox(color: Colors.black),
         ),
@@ -594,7 +597,12 @@ class _VendorStoryPageState extends State<_VendorStoryPage> {
       for (final url in story.imageUrl) {
         final urlStr = url.toString();
         items.add(StoryItem.pageImage(
-          url: urlStr,
+          // Story images were being fetched at full original upload
+          // resolution (no width/quality transform), unlike every other
+          // image in the app - a multi-MB camera photo took ~8s to load
+          // (measured via [STORY-PERF][IMG]). Full-screen display never
+          // needs more than screen width.
+          url: bunnyOptimizedUrl(urlStr, width: 1080),
           controller: _controller,
           imageFit: BoxFit.contain,
           duration: const Duration(seconds: 5),

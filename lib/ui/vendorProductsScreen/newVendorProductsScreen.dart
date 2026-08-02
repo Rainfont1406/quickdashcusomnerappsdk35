@@ -3116,30 +3116,45 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                     ),
                   ],
                 ),
-                children: [
-                  Builder(builder: (context) {
-                    final categoryProducts =
-                        _productsForCategory(vendorCategoryModel.id);
-                    return ListView.separated(
-                      itemCount: categoryProducts.length,
-                      shrinkWrap: true,
-                      physics: const NeverScrollableScrollPhysics(),
-                      padding: const EdgeInsets.only(top: 4, bottom: 4),
-                      separatorBuilder: (context, index) => Divider(
-                        height: 1,
-                        thickness: 1,
-                        color: isDarkMode(context)
-                            ? AppThemeData.grey800.withOpacity(0.5)
-                            : AppThemeData.grey200,
-                        indent: 16,
-                        endIndent: 16,
-                      ),
-                      itemBuilder: (context, index) {
-                        return _buildProductCard(categoryProducts[index]);
-                      },
-                    );
-                  }),
-                ],
+                // ExpansionTile builds `children` unconditionally regardless
+                // of collapsed/expanded visual state - the windowed
+                // auto-expand system above (_updateCategoryExpansionWindow,
+                // _categoryExpandBuffer) only ever controlled the animation,
+                // never whether this category's product cards (and their
+                // images) actually got built. On a large menu that meant
+                // EVERY category's ListView.separated - and every product
+                // card's image request - fired immediately on load, in list
+                // order, regardless of scroll position: scrolling straight to
+                // item ~180 still queued images 1-179 first. Gating on the
+                // same expansion state the window already maintains means
+                // only categories within the ±_categoryExpandBuffer window
+                // (or manually expanded) ever build their product cards.
+                children: _isCategoryExpanded(categoryId, defaultValue: false)
+                    ? [
+                        Builder(builder: (context) {
+                          final categoryProducts =
+                              _productsForCategory(vendorCategoryModel.id);
+                          return ListView.separated(
+                            itemCount: categoryProducts.length,
+                            shrinkWrap: true,
+                            physics: const NeverScrollableScrollPhysics(),
+                            padding: const EdgeInsets.only(top: 4, bottom: 4),
+                            separatorBuilder: (context, index) => Divider(
+                              height: 1,
+                              thickness: 1,
+                              color: isDarkMode(context)
+                                  ? AppThemeData.grey800.withOpacity(0.5)
+                                  : AppThemeData.grey200,
+                              indent: 16,
+                              endIndent: 16,
+                            ),
+                            itemBuilder: (context, index) {
+                              return _buildProductCard(categoryProducts[index]);
+                            },
+                          );
+                        }),
+                      ]
+                    : const <Widget>[],
               ),
             ),
           );

@@ -4626,7 +4626,12 @@ class BannerView extends StatefulWidget {
 
 class _BannerViewState extends State<BannerView> {
   late final PageController _pageController;
+  // _currentPage is the REAL banner index (0..bannerList.length-1) - used for
+  // the dot indicator and all "which banner is this" business logic.
+  // _rawPage is the actual, unbounded PageView position (see itemCount below)
+  // - only ever fed back into the PageController itself.
   int _currentPage = 0;
+  int _rawPage = 0;
   Timer? _autoScrollTimer;
   // Same fix as _RestaurantCardImage's carousel — don't advance to the next
   // banner while the current one is still loading. "Settled" = loaded OR
@@ -4680,22 +4685,21 @@ class _BannerViewState extends State<BannerView> {
     _autoScrollTimer = Timer.periodic(const Duration(seconds: 4), (_) {
       if (!mounted || widget.bannerList.length <= 1) return;
       if (!_settledPages.contains(_currentPage)) return;
-      // See the identical comment in the restaurant-card carousel above —
-      // jumpToPage avoids scrolling backward through every banner on wrap.
-      final wrapping = _currentPage >= widget.bannerList.length - 1;
-      final int next = wrapping ? 0 : _currentPage + 1;
-      // Also skip if the upcoming banner hasn't decoded yet — see the
-      // identical comment in the restaurant-card carousel above.
-      if (!_settledPages.contains(next)) return;
-      if (wrapping) {
-        _pageController.jumpToPage(next);
-      } else {
-        _pageController.animateToPage(
-          next,
-          duration: const Duration(milliseconds: 550),
-          curve: Curves.easeInOut,
-        );
-      }
+      // itemCount is unbounded (see build() below) and itemBuilder maps any
+      // index through % bannerList.length, so wrapping from the last real
+      // banner back to the first is just "keep going forward one more page"
+      // - no more special-cased instant jumpToPage, every advance animates
+      // identically, including the wrap.
+      final int nextRaw = _rawPage + 1;
+      final int nextReal = nextRaw % widget.bannerList.length;
+      // Skip if the upcoming banner hasn't decoded yet — see the identical
+      // comment in the restaurant-card carousel above.
+      if (!_settledPages.contains(nextReal)) return;
+      _pageController.animateToPage(
+        nextRaw,
+        duration: const Duration(milliseconds: 550),
+        curve: Curves.easeInOut,
+      );
     });
   }
 
@@ -4716,19 +4720,27 @@ class _BannerViewState extends State<BannerView> {
             physics: const ClampingScrollPhysics(),
             controller: _pageController,
             scrollDirection: Axis.horizontal,
-            itemCount: widget.bannerList.length,
+            // Unbounded (null) so the wrap from last banner back to first is
+            // just "one more page forward" for the PageController - never
+            // needs an instant jump. A single banner has nothing to loop, so
+            // it stays a normal finite (1-item) PageView.
+            itemCount: widget.bannerList.length <= 1 ? widget.bannerList.length : null,
             padEnds: false,
             pageSnapping: true,
             onPageChanged: (value) {
               setState(() {
-                _currentPage = value;
+                _rawPage = value;
+                _currentPage = value % widget.bannerList.length;
                 // A fast swipe shouldn't wait out _scheduleUnlock's delay -
                 // whatever page the customer actually lands on unlocks
                 // immediately, exactly like it would have before this fix.
-                _unlockedIndices.add(value);
+                _unlockedIndices.add(_currentPage);
               });
             },
-            itemBuilder: (BuildContext context, int index) {
+            itemBuilder: (BuildContext context, int rawIndex) {
+              final int index = widget.bannerList.length <= 1
+                  ? 0
+                  : rawIndex % widget.bannerList.length;
               final BannerModel bannerModel = widget.bannerList[index];
               final bannerUrl = bannerModel.photo.toString();
               if (!_unlockedIndices.contains(index)) {
