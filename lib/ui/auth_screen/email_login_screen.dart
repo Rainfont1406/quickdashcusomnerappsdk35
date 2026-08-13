@@ -134,8 +134,14 @@ class _EmailLoginScreenState extends State<EmailLoginScreen> {
         } else {
           MyAppState.selectedPosotion = userModel.shippingAddress!.first;
         }
-        pushAndRemoveUntil(context, ServiceListScreen());
+        // TEMPORARY [LOGIN-PERF] - marks the exact handoff moment so the
+        // gap between here and ServiceListScreen's own initState ENTER log
+        // isolates pure navigation/widget-creation overhead from the async
+        // work that happens inside ServiceListScreen itself.
+        debugPrint('[LOGIN-PERF] pushAndRemoveUntil(ServiceListScreen) — ${totalSw.elapsedMilliseconds}ms since tap');
+        pushAndRemoveUntil(context, ServiceListScreen(user: userModel));
       } else {
+        debugPrint('[LOGIN-PERF] pushAndRemoveUntil(LocationPermissionScreen) — ${totalSw.elapsedMilliseconds}ms since tap');
         pushAndRemoveUntil(context, LocationPermissionScreen());
       }
     } on auth.FirebaseAuthException catch (e) {

@@ -8,6 +8,7 @@ import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/vendorProductsScreen/newVendorProductsScreen.dart';
+import 'package:emartconsumer/utils/network_image_widget.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -224,6 +225,7 @@ class _ViewAllPopularFoodNearByScreenState
     return GestureDetector(
       onTap: () {
         BehaviorTracker.setNextEntrySource('Home');
+        precacheVendorHeroImage(context, vendor);
         push(context, NewVendorProductsScreen(vendorModel: vendor));
       },
       child: Padding(

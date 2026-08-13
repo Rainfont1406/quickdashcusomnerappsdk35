@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
@@ -585,7 +586,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
     print("------->${foodType}");
     if (_isDineAwayMode) {
       await fireStoreUtils
-          .getVendorProductsTakeAWay(widget.vendorModel.id)
+          .getVendorProductsPreferSectionCache(widget.vendorModel.id, takeAway: true)
           .then((value) {
         _rawDineAwayProducts =
             value.where((p) => p.takeaway || p.dineIn).toList();
@@ -597,7 +598,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
       });
     } else {
       await fireStoreUtils
-          .getVendorProductsDelivery(widget.vendorModel.id)
+          .getVendorProductsPreferSectionCache(widget.vendorModel.id, takeAway: false)
           .then((value) {
         // Firestore's deliveryOption filter is commented out server-side
         // (see FireStoreUtils.getVendorProductsDelivery), so it must be
@@ -695,21 +696,39 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
   getVendorCategoryById() async {
     vendorCategoryList.clear();
 
-    // Many products share the same category — fetch each *distinct* category
-    // ID once instead of once per product (e.g. 40 products across 5
-    // categories means 5 reads instead of 40). Fetched in parallel, then
-    // de-dup once all results are in: the old fire-and-forget .then() pattern
-    // caused a race where two futures completing simultaneously could both
-    // pass the "already in list?" check and add the same category twice.
+    // Many products share the same category — resolve each *distinct*
+    // category ID once instead of once per product (e.g. 40 products across
+    // 5 categories means at most 5 reads instead of 40, often zero). Home's
+    // getCuisines() already loaded every category for this section into
+    // productCategoryById (constants.dart) - checked first here, so a
+    // vendor whose categories were all already seen on Home costs nothing.
+    // Only a genuine miss (a category added after Home last loaded, or this
+    // screen reached before Home's own fetch resolved) falls back to a real
+    // Firestore query, same as before. Fetched in parallel, then de-dup once
+    // all results are in: the old fire-and-forget .then() pattern caused a
+    // race where two futures completing simultaneously could both pass the
+    // "already in list?" check and add the same category twice.
     final uniqueCategoryIds =
         productList.map((e) => e.categoryID.toString()).toSet();
-    final futures = uniqueCategoryIds
-        .map((id) => FireStoreUtils.getVendorCategoryById(id))
-        .toList();
-    final results = await Future.wait(futures);
+    final resolved = <VendorCategoryModel>[];
+    final missingIds = <String>[];
+    for (final id in uniqueCategoryIds) {
+      final cached = productCategoryById[id];
+      if (cached != null) {
+        resolved.add(cached);
+      } else {
+        missingIds.add(id);
+      }
+    }
+    if (missingIds.isNotEmpty) {
+      // One batched query instead of one query per missing ID (see
+      // FireStoreUtils.getVendorCategoriesByIds's doc comment).
+      resolved.addAll(
+          await FireStoreUtils.getVendorCategoriesByIds(missingIds));
+    }
     final seen = <String>{};
-    for (final value in results) {
-      if (value != null && seen.add(value.id.toString())) {
+    for (final value in resolved) {
+      if (seen.add(value.id.toString())) {
         vendorCategoryList.add(value);
       }
     }
@@ -818,6 +837,24 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
   // to it. Fixes a brief shimmer/white flash that showed on the incoming
   // photo when the carousel advanced to one that hadn't loaded yet.
   final Set<int> _heroSettledPages = {};
+  // Same purpose as _heroSettledPages above, for the single-photo fallback
+  // hero (no gallery photos beyond the logo) - gates when its dark scrim
+  // overlay switches on.
+  bool _singlePhotoLoaded = false;
+
+  // CachedNetworkImage's imageBuilder/errorWidget can fire synchronously,
+  // mid-build, when the image is already cache-warm (e.g. from a previous
+  // visit or the precache above) - calling setState() directly from there
+  // throws "setState() or markNeedsBuild() called during build". Deferring
+  // to a post-frame callback keeps the scrim-reveal behavior while avoiding
+  // that crash entirely, whether the image loads instantly or after a real
+  // network wait.
+  void _markSinglePhotoLoaded() {
+    if (_singlePhotoLoaded) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) setState(() => _singlePhotoLoaded = true);
+    });
+  }
 
   // photos[0] = logo, photos[1..n] = card gallery images.
   List<String> get _cardPhotos {
@@ -1034,20 +1071,45 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                           width: Responsive.width(100, context),
                                           height:
                                               Responsive.height(40, context),
+                                          cacheManager: perfDiagnosticCacheManager,
+                                          // Hero box is often taller (relative
+                                          // to its width) than this 16:9
+                                          // cover photo's own aspect ratio -
+                                          // BoxFit.cover then scales based on
+                                          // height, not width, so the resize
+                                          // request must account for that or
+                                          // the fetched image ends up smaller
+                                          // than what's actually rendered.
+                                          resizeWidth: math.max(
+                                            Responsive.width(100, context),
+                                            Responsive.height(40, context) *
+                                                16 /
+                                                9,
+                                          ),
+                                          onLoaded: _markSinglePhotoLoaded,
+                                          onError: (_) => _markSinglePhotoLoaded(),
                                         ),
-                                        Container(
-                                          decoration: BoxDecoration(
-                                            gradient: LinearGradient(
-                                              begin:
-                                                  const Alignment(0.00, -1.00),
-                                              end: const Alignment(0, 1),
-                                              colors: [
-                                                Colors.black.withOpacity(0),
-                                                Colors.black.withOpacity(0.55),
-                                              ],
+                                        // Only darken once the photo has
+                                        // actually loaded - while the
+                                        // shimmer skeleton is showing, this
+                                        // scrim just muddied its clean pulse
+                                        // into a flat, blurry-looking
+                                        // gradient with nothing recognizable
+                                        // as "still loading".
+                                        if (_singlePhotoLoaded)
+                                          Container(
+                                            decoration: BoxDecoration(
+                                              gradient: LinearGradient(
+                                                begin:
+                                                    const Alignment(0.00, -1.00),
+                                                end: const Alignment(0, 1),
+                                                colors: [
+                                                  Colors.black.withOpacity(0),
+                                                  Colors.black.withOpacity(0.55),
+                                                ],
+                                              ),
                                             ),
                                           ),
-                                        ),
                                       ],
                                     )
                                   : PageView.builder(
@@ -1062,14 +1124,36 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                         String image = _cardPhotos[index];
                                         final heroWidth =
                                             Responsive.width(100, context);
+                                        final heroHeight =
+                                            Responsive.height(40, context);
+                                        // See the single-photo fallback
+                                        // above for why this isn't just
+                                        // heroWidth.
+                                        final heroResizeWidth = math.max(
+                                            heroWidth, heroHeight * 16 / 9);
                                         void onSettled() {
+                                          if (_heroSettledPages.contains(index)) return;
+                                          // Mutate immediately (needed right
+                                          // now for the precache-next check
+                                          // below) but defer the setState
+                                          // that reveals the scrim - this
+                                          // callback can fire synchronously
+                                          // mid-build when the image is
+                                          // already cache-warm, and calling
+                                          // setState() then throws "called
+                                          // during build".
                                           _heroSettledPages.add(index);
+                                          WidgetsBinding.instance.addPostFrameCallback((_) {
+                                            if (mounted) setState(() {});
+                                          });
                                           final next =
                                               (index + 1) % _cardPhotos.length;
                                           if (!_heroSettledPages.contains(next)) {
                                             precacheCarouselImage(
                                                 context, _cardPhotos[next],
-                                                width: heroWidth);
+                                                width: heroWidth,
+                                                resizeWidth: heroResizeWidth,
+                                                cacheManager: perfDiagnosticCacheManager);
                                           }
                                         }
 
@@ -1079,24 +1163,31 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                               imageUrl: image,
                                               fit: BoxFit.cover,
                                               width: heroWidth,
-                                              height: Responsive.height(
-                                                  40, context),
+                                              height: heroHeight,
+                                              resizeWidth: heroResizeWidth,
+                                              cacheManager: perfDiagnosticCacheManager,
                                               onLoaded: onSettled,
                                               onError: (_) => onSettled(),
                                             ),
-                                            Container(
-                                              decoration: BoxDecoration(
-                                                gradient: LinearGradient(
-                                                  begin: const Alignment(
-                                                      0.00, -1.00),
-                                                  end: const Alignment(0, 1),
-                                                  colors: [
-                                                    Colors.black.withOpacity(0),
-                                                    Colors.black.withOpacity(0.55),
-                                                  ],
+                                            // Only darken once settled (loaded
+                                            // or errored) - see the
+                                            // single-photo fallback above for
+                                            // why this scrim is gated instead
+                                            // of always-on.
+                                            if (_heroSettledPages.contains(index))
+                                              Container(
+                                                decoration: BoxDecoration(
+                                                  gradient: LinearGradient(
+                                                    begin: const Alignment(
+                                                        0.00, -1.00),
+                                                    end: const Alignment(0, 1),
+                                                    colors: [
+                                                      Colors.black.withOpacity(0),
+                                                      Colors.black.withOpacity(0.55),
+                                                    ],
+                                                  ),
                                                 ),
                                               ),
-                                            ),
                                           ],
                                         );
                                       },
@@ -3740,9 +3831,18 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
 
   // Method to handle adding product to cart with options dialog
   Future<void> _handleAddToCart(ProductModel productModel,
-      {bool showPairsWellWith = true}) async {
+      {bool showPairsWellWith = true, bool fromCarousel = false}) async {
     if (MyAppState.currentUser == null) {
       ShowToastDialog.showToast("Please login to add to cart".tr());
+      return;
+    }
+    // (2026-08-03) Every ADD button that calls into this already hides
+    // itself when the restaurant is closed (see _buildProductCard's own
+    // showAddButton/isOpen gate), but that's only button *visibility* -
+    // this guard is the actual enforcement point so nothing upstream can
+    // add to cart while closed, by omission or otherwise.
+    if (!isOpen && sectionConstantModel!.serviceTypeFlag != "ecommerce-service") {
+      ShowToastDialog.showToast('Restaurant is not accepting orders right now'.tr());
       return;
     }
 
@@ -3767,7 +3867,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                 int quantity) async {
               Navigator.of(ctx).pop();
               await _addProductToCart(updatedProduct);
-              if (showPairsWellWith) _showPairsWellWith(productModel);
+              if (showPairsWellWith) _showPairsWellWith(productModel, fromCarousel: fromCarousel);
             },
           );
         },
@@ -3775,7 +3875,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
     } else {
       // No variants or add-ons, add directly to cart
       await _addProductToCart(productModel);
-      if (showPairsWellWith) _showPairsWellWith(productModel);
+      if (showPairsWellWith) _showPairsWellWith(productModel, fromCarousel: fromCarousel);
     }
   }
 
@@ -3822,6 +3922,16 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
               int quantity) async {
             if (MyAppState.currentUser == null) {
               ShowToastDialog.showToast("Please login to add to cart".tr());
+              return;
+            }
+            // (2026-08-03) Real gap found: tapping a product card to open
+            // this quick-view sheet was never gated on the restaurant's
+            // open/closed status (viewing a closed restaurant's menu is
+            // fine) - but its own Add button had no such check either, so
+            // a user could still add to cart here even while the main
+            // list's ADD button was correctly hidden for being closed.
+            if (!isOpen && sectionConstantModel!.serviceTypeFlag != "ecommerce-service") {
+              ShowToastDialog.showToast('Restaurant is not accepting orders right now'.tr());
               return;
             }
             Navigator.of(ctx).pop();
@@ -4327,6 +4437,30 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
     final isDark = isDarkMode(context);
     final cartProduct = _cartProductFor(productModel);
 
+    // Same ADD-button visibility gating the main menu row uses (_buildProductCard) -
+    // this card previously always showed its ADD button/quantity pill
+    // regardless of restaurant-open status, per-product service-type
+    // eligibility, or login state, unlike the main menu which hides the
+    // whole button area when any of those fail. Explicit product decision
+    // (2026-08-02): match the main menu exactly, including hiding the
+    // quantity pill for already-in-cart items when the store is off, same
+    // as the main menu does.
+    final bool _recoHasRestrictions = productModel.deliveryOption ||
+        productModel.takeaway ||
+        productModel.dineIn;
+    final bool _recoShowAddButton = !_recoHasRestrictions ||
+        (_isDineAwayMode &&
+            _dineAwaySubMode == 'Takeaway' &&
+            productModel.takeaway) ||
+        (_isDineAwayMode &&
+            _dineAwaySubMode == 'Dining' &&
+            productModel.dineIn) ||
+        (!_isDineAwayMode && productModel.deliveryOption);
+    final bool _recoCanShowAddArea = _recoShowAddButton &&
+        (isOpen || sectionConstantModel!.serviceTypeFlag == "ecommerce-service") &&
+        (MyAppState.currentUser != null ||
+            sectionConstantModel!.serviceTypeFlag == "ecommerce-service");
+
     // Same price/disPrice + variant resolution used by the main list's itemBuilder.
     String price = "0.0";
     String disPrice = "0.0";
@@ -4436,65 +4570,70 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                     width: 16,
                   ),
                 ),
-                Positioned(
-                  right: 9,
-                  bottom: 0,
-                  child: (cartProduct == null || cartProduct.quantity == 0)
-                      ? Material(
-                          color: AppThemeData.primary500,
-                          borderRadius: BorderRadius.circular(11),
-                          elevation: 2,
-                          child: InkWell(
+                if (_recoCanShowAddArea)
+                  Positioned(
+                    right: 9,
+                    bottom: 0,
+                    child: (cartProduct == null || cartProduct.quantity == 0)
+                        ? Material(
+                            color: AppThemeData.primary500,
                             borderRadius: BorderRadius.circular(11),
-                            onTap: () async {
-                              // Recommended For You (2026-07-26, explicit
-                              // product request): the pairs-well-with panel
-                              // only ever renders inline inside the main
-                              // menu list's own per-item loop, so setting
-                              // _pairsWellWithProductId from a carousel add
-                              // had nothing to actually show. Routing
-                              // through the same quick-view sheet the main
-                              // list itself uses (_showProductQuickView,
-                              // whose own onAddToCart already calls
-                              // _showPairsWellWith) sidesteps that gap
-                              // entirely instead of teaching the carousel a
-                              // second render location.
-                              if (enablePairsWellWith) {
-                                _showProductQuickView(productModel,
+                            elevation: 2,
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(11),
+                              onTap: () async {
+                                // One-tap add, same as the main menu row
+                                // (explicit product decision, 2026-08-02) -
+                                // previously Recommended For You routed
+                                // through the full quick-view sheet instead of
+                                // adding directly (see git history), so the
+                                // ADD button needed two taps here vs one on
+                                // the main menu for an identical-looking
+                                // button. _handleAddToCart already opens the
+                                // options dialog itself when the product
+                                // genuinely has variants/add-ons, exactly like
+                                // the main menu's own ADD button - no
+                                // special-casing needed here anymore.
+                                // Pairs Well With re-enabled (2026-08-03) -
+                                // fromCarousel: true routes the suggestion
+                                // panel to its dedicated render point below
+                                // the carousels (_buildCarouselPairsWellWithPanel)
+                                // instead of _showPairsWellWith's default
+                                // inline-in-main-list slot, which this card
+                                // isn't part of and so never rendered
+                                // anything.
+                                await _handleAddToCart(productModel,
+                                    showPairsWellWith: enablePairsWellWith,
                                     fromCarousel: true);
-                                return;
-                              }
-                              await _handleAddToCart(productModel,
-                                  showPairsWellWith: enablePairsWellWith);
-                              onItemAdded?.call(productModel);
-                            },
-                            child: Container(
-                              constraints: const BoxConstraints(
-                                  minWidth: 46, minHeight: 35),
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 12, vertical: 7),
-                              alignment: Alignment.center,
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Text(
-                                    "ADD".tr(),
-                                    style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.w700,
+                                onItemAdded?.call(productModel);
+                              },
+                              child: Container(
+                                constraints: const BoxConstraints(
+                                    minWidth: 46, minHeight: 35),
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 12, vertical: 7),
+                                alignment: Alignment.center,
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(
+                                      "ADD".tr(),
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w700,
+                                      ),
                                     ),
-                                  ),
-                                  const SizedBox(width: 4),
-                                  const Icon(Icons.add,
-                                      color: Colors.white, size: 15),
-                                ],
+                                    const SizedBox(width: 4),
+                                    const Icon(Icons.add,
+                                        color: Colors.white, size: 15),
+                                  ],
+                                ),
                               ),
                             ),
-                          ),
-                        )
-                      : _buildHorizontalQuantityPill(context, cartProduct),
-                ),
+                          )
+                        : _buildHorizontalQuantityPill(context, cartProduct),
+                  ),
               ],
             ),
           ),

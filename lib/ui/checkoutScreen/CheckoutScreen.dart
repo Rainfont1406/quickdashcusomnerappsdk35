@@ -6,10 +6,8 @@ import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
-import 'package:emartconsumer/services/device_session_service.dart';
 import 'package:emartconsumer/model/AddressModel.dart';
 import 'package:emartconsumer/model/OrderModel.dart';
-import 'package:emartconsumer/model/ProductModel.dart';
 import 'package:emartconsumer/model/TaxModel.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
@@ -42,6 +40,16 @@ class CheckoutScreen extends StatefulWidget {
   // Links a Bill Pay accept order back to the original vendor request doc
   // for Cloud Function reconciliation — see PaymentScreen.billPayRequestId.
   final String? billPayRequestId;
+  // Set only by the wallet payment flow (2026-08-06): the order was already
+  // created atomically, server-side, in the SAME Firestore transaction as
+  // the wallet deduction (see createVerifiedWalletOrder in
+  // paymentIntents.js) - it already exists by the time this screen opens.
+  // When set, _placeOrder() must NOT attempt to write the order document
+  // again: vendor_orders' security rules only allow a customer to change
+  // `status`/`billPayRespondedAt` on an existing order, so a full rewrite
+  // is correctly rejected as permission-denied. Only the remaining client
+  // side-effects (stock decrement, confirmation UI) still need to run.
+  final OrderModel? alreadyPlacedOrder;
 
   const CheckoutScreen({
     Key? key,
@@ -67,6 +75,7 @@ class CheckoutScreen extends StatefulWidget {
     this.address,
     this.orderType,
     this.billPayRequestId,
+    this.alreadyPlacedOrder,
   }) : super(key: key);
 
   @override
@@ -116,7 +125,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         final bool isTakeaway = widget.take_away ?? false;
         if (!isTakeaway && widget.address == null) {
           if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            ScaffoldMessenger.of(context)
+              ..hideCurrentSnackBar()
+              ..showSnackBar(SnackBar(
               content: Text('Delivery address is missing. Cannot place order.'.tr()),
               backgroundColor: AppThemeData.error500,
               behavior: SnackBarBehavior.floating,
@@ -658,7 +669,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     // ── Case 1: address is null ──────────────────────────────────────────────
     if (widget.address == null) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(SnackBar(
           content: Text('Please add a delivery address to continue.'.tr()),
           backgroundColor: AppThemeData.error500,
           behavior: SnackBarBehavior.floating,
@@ -861,11 +874,55 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
   Future<void> _placeOrder() async {
     if (widget.products.isEmpty) return;
+
+    // Wallet path (2026-08-06): the order already exists, created
+    // atomically with the wallet deduction - see alreadyPlacedOrder's own
+    // doc comment. Only the remaining side-effect (stock decrement) and
+    // the confirmation UI still need to happen; skip everything else
+    // (vendor re-fetch, service gates, and above all the Firestore write,
+    // which would now be rejected as permission-denied).
+    final alreadyPlaced = widget.alreadyPlacedOrder;
+    if (alreadyPlaced != null) {
+      await showProgress('Please wait...'.tr(), false);
+      await Future.wait(alreadyPlaced.products.map((cartProduct) =>
+          FireStoreUtils.decrementProductStock(
+            productId: cartProduct.id.split('~').first,
+            quantity: cartProduct.quantity,
+            variantId: cartProduct.variant_info != null
+                ? cartProduct.id.split('~').last
+                : null,
+          )));
+      await hideProgress();
+      if (!mounted) return;
+      showModalBottomSheet(
+        isScrollControlled: true,
+        isDismissible: false,
+        context: context,
+        enableDrag: false,
+        backgroundColor: Colors.transparent,
+        builder: (context) => ClipRRect(
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+          child: PlaceOrderScreen(
+            orderModel: alreadyPlaced,
+            isPaymentVerified: true,
+          ),
+        ),
+      );
+      return;
+    }
+
     // TEMPORARY [ORDER-PERF] - timing instrumentation for the loading-speed
     // investigation. Remove once done.
     final placeOrderSw = Stopwatch()..start();
     debugPrint('[ORDER-PERF] CheckoutScreen._placeOrder START');
-    if (!await DeviceSessionService.enforceActive(context)) return;
+    // (2026-08-03) No standalone enforceActive() call here anymore - it was
+    // a full extra HTTP round trip checking the exact same thing that
+    // createVerifiedOrderPayment/createVerifiedWalletOrder/
+    // createVerifiedCodOrder already re-verify server-side, one step later
+    // in this same flow (see their 'device_superseded' handling in
+    // rozorpayConroller.dart / _handleVerifiedPaymentFailure). Removing the
+    // duplicate shortens the critical path instead of lengthening it, since
+    // the two calls ran sequentially, never in parallel.
 
     final List<CartProduct> tempProducts = List.from(widget.products);
 
@@ -917,7 +974,9 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         await hideProgress();
         if (mounted) {
           setState(() => _isPlacingOrder = false);
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          ScaffoldMessenger.of(context)
+            ..hideCurrentSnackBar()
+            ..showSnackBar(SnackBar(
             content: Text(_serviceBlockReason!),
             backgroundColor: AppThemeData.error500,
             behavior: SnackBarBehavior.floating,
@@ -1041,30 +1100,19 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       debugPrint('[ORDER-PERF] FireStoreUtils.placeOrder (Firestore write) — '
           '${writeOrderSw.elapsedMilliseconds}ms (TOTAL so far ${placeOrderSw.elapsedMilliseconds}ms)');
 
-      // Decrement product stock — best-effort, never fails the order
-      await Future.wait(tempProducts.map((cartProduct) async {
-        try {
-          final productModel = await FireStoreUtils()
-              .getProductByID(cartProduct.id.split('~').first);
-          if (cartProduct.variant_info != null &&
-              productModel.itemAttributes?.variants != null) {
-            for (final v in productModel.itemAttributes!.variants!) {
-              if (v.variant_id == cartProduct.id.split('~').last &&
-                  v.variant_quantity != '-1') {
-                v.variant_quantity =
-                    (int.parse(v.variant_quantity.toString()) -
-                            cartProduct.quantity)
-                        .toString();
-              }
-            }
-          } else if (productModel.quantity != -1) {
-            productModel.quantity -= cartProduct.quantity;
-          }
-          await FireStoreUtils.updateProduct(productModel);
-        } catch (stockErr) {
-          debugPrint('Stock update error for ${cartProduct.id}: $stockErr');
-        }
-      }));
+      // Decrement product stock — best-effort, never fails the order.
+      // Atomic per-product transaction (FirebaseHelper.decrementProductStock)
+      // instead of a plain read-then-overwrite - see that method's doc
+      // comment for why the old pattern could silently lose a decrement
+      // under concurrent orders.
+      await Future.wait(tempProducts.map((cartProduct) =>
+          FireStoreUtils.decrementProductStock(
+            productId: cartProduct.id.split('~').first,
+            quantity: cartProduct.quantity,
+            variantId: cartProduct.variant_info != null
+                ? cartProduct.id.split('~').last
+                : null,
+          )));
 
       await hideProgress();
 
@@ -1084,11 +1132,13 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           ),
         ),
       );
-    } catch (e) {
+    } catch (e, s) {
       await hideProgress();
       if (mounted) {
         setState(() => _isPlacingOrder = false);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(SnackBar(
           content: Text('Failed to place order. Please try again.'.tr()),
           backgroundColor: AppThemeData.error500,
           behavior: SnackBarBehavior.floating,
@@ -1097,7 +1147,11 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           duration: const Duration(seconds: 4),
         ));
       }
-      debugPrint('_placeOrder error: $e');
+      // TEMPORARY [ORDER-PERF] - stack trace added (2026-08-06) while
+      // investigating the same intermittent post-payment failure on the
+      // takeaway path (see PaymentScreen.dart's placeOrder()). Remove once
+      // root cause is confirmed.
+      debugPrint('[ORDER-BUILD] CheckoutScreen._placeOrder error: $e\n$s');
     }
   }
 }

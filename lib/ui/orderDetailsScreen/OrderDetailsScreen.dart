@@ -16,6 +16,7 @@ import 'package:emartconsumer/model/User.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/model/variant_info.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/device_session_service.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
@@ -100,6 +101,22 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
   @override
   void initState() {
     loadData();
+
+    // (2026-08-03) Device-session verification redesign - Order Details/QR
+    // is the actual business-critical surface (an order is what gets
+    // presented for gate exit), so this is where the fallback check lives
+    // now instead of on every app cold-start/resume. FCM's force_logout
+    // push is still the primary, immediate path; this only matters when
+    // that push was missed (offline, OEM-killed, notifications blocked, app
+    // was fully closed). enforceActiveForOrder() already signs out +
+    // redirects to LoginScreen on its own when inactive, so nothing further
+    // is needed here on failure. Fire-and-forget - must never delay this
+    // screen rendering the order for the common (still-active) case.
+    // Session-scoped, not per-order (see enforceActiveForOrder's own doc
+    // comment) - only the first Order Details open per login session does a
+    // real check; every later one (same or different order) is free until
+    // sign-out/new login/app restart.
+    DeviceSessionService.enforceActiveForOrder(context);
 
     super.initState();
   }
@@ -1671,6 +1688,19 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
   }
 
   Widget buildBillSummaryCard(OrderModel orderModel) {
+    // ── Pricing-verified path (2026-08-04) ──────────────────────────────
+    // order.pricing is the immutable, server-verified snapshot written by
+    // the verifyOrderOnCreate Cloud Function a few seconds after order
+    // creation. When present, use it directly so this screen can never
+    // disagree with Cart/OrdersScreen about an already-placed order's
+    // total. Absent on pre-existing orders and briefly absent right after
+    // a brand-new order is created (before the trigger has run) — in
+    // both cases fall through to the original recompute-from-raw-fields
+    // logic below, completely unchanged.
+    if (orderModel.pricing != null) {
+      return _buildBillSummaryCardFromPricing(orderModel, orderModel.pricing!);
+    }
+
     double tipValue = (orderModel.tipValue == null || orderModel.tipValue!.isEmpty) ? 0.0 : double.parse(orderModel.tipValue!);
     double specialDiscountAmount = 0.0;
     if (orderModel.specialDiscount != null && orderModel.specialDiscount!.isNotEmpty) {
@@ -1776,6 +1806,124 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                 ),
                 Text(
                   amountShow(amount: totalamount.toString()),
+                  style: AppTypography.labelLarge.copyWith(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 17,
+                    color: AppThemeData.primary500,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Renders the bill summary card straight from the server-verified
+  // order.pricing snapshot — no recomputation, so this always matches
+  // OrdersScreen's per-row total and Cart's total-at-checkout-time for the
+  // same order. See buildBillSummaryCard for when this is used vs. the
+  // legacy recompute fallback.
+  Widget _buildBillSummaryCardFromPricing(OrderModel orderModel, Map<String, dynamic> pricing) {
+    double num_(dynamic v) => v == null ? 0.0 : (v is num ? v.toDouble() : double.tryParse(v.toString()) ?? 0.0);
+    double subtotalAmount = num_(pricing['subtotal']);
+    double discountAmount = num_(pricing['discount']);
+    double specialDiscountAmount = num_(pricing['specialDiscount']);
+    double taxAmount = num_(pricing['tax']);
+    double deliveryChargeAmount = num_(pricing['deliveryCharge']);
+    double tipAmount = num_(pricing['tip']);
+    double totalAmount = num_(pricing['total']);
+
+    // Break the lump `pricing.tax` total back down by type (GST, Transaction
+    // fee, etc.) using the order's own frozen taxSetting snapshot - same
+    // source and filter the legacy (pre-pricing-snapshot) branch below and
+    // CartScreen's bill both use, so a customer sees the same line items
+    // here that they saw at checkout instead of one opaque "Tax" total.
+    final double taxBase = (subtotalAmount - discountAmount - specialDiscountAmount).clamp(0.0, double.infinity);
+    List<TaxModel> taxesToDisplay = [];
+    if (orderModel.taxModel != null) {
+      for (var element in orderModel.taxModel!) {
+        bool shouldApplyTax = (orderModel.takeAway == false && (element.isTakeaway == false || element.isTakeaway == null)) ||
+            (orderModel.takeAway == true && element.isTakeaway == true);
+        if (shouldApplyTax) taxesToDisplay.add(element);
+      }
+    }
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      decoration: BoxDecoration(
+        color: isDarkMode(context) ? AppThemeData.darkBgPrimary : Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 16, offset: const Offset(0, 4))],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
+            child: Row(
+              children: [
+                Icon(Icons.receipt_long_outlined, size: 18, color: AppThemeData.primary500),
+                const SizedBox(width: 8),
+                Text(
+                  'Bill Details'.tr(),
+                  style: TextStyle(fontFamily: AppThemeData.semiBold, fontSize: 15, color: isDarkMode(context) ? Colors.white : const Color(0xFF1A1A2E)),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          Divider(height: 1, color: isDarkMode(context) ? AppThemeData.darkBgTertiary : const Color(0xFFF0F0F5)),
+          _billRow('Subtotal'.tr(), amountShow(amount: subtotalAmount.toString())),
+          if (orderModel.vendor.specialDiscountEnable && specialDiscountAmount > 0)
+            _billRow('Special Discount'.tr(), '- ${amountShow(amount: specialDiscountAmount.toString())}', valueColor: AppThemeData.primary500),
+          if (discountAmount > 0)
+            _billRow('Discount'.tr(), '- ${amountShow(amount: discountAmount.toString())}', valueColor: AppThemeData.primary500),
+          if (orderModel.takeAway == false && deliveryChargeAmount > 0)
+            _billRow('Delivery Charges'.tr(), amountShow(amount: deliveryChargeAmount.toString())),
+          if (orderModel.takeAway == false && tipAmount > 0)
+            _billRow('Tip Amount'.tr(), amountShow(amount: tipAmount.toString())),
+          if (taxesToDisplay.isNotEmpty)
+            ...taxesToDisplay.map((taxModel) => _billRow(
+                  taxModel.title ?? 'Tax'.tr(),
+                  amountShow(amount: getTaxValue(amount: taxBase.toString(), taxModel: taxModel).toString()),
+                ))
+          else if (taxAmount > 0)
+            _billRow('Tax'.tr(), amountShow(amount: taxAmount.toString())),
+          if (orderModel.notes != null && orderModel.notes!.isNotEmpty)
+            _billRow(
+              'Remarks'.tr(),
+              '',
+              trailingWidget: GestureDetector(
+                onTap: () => showModalBottomSheet(
+                  isScrollControlled: true,
+                  isDismissible: true,
+                  context: context,
+                  backgroundColor: Colors.transparent,
+                  enableDrag: true,
+                  builder: (ctx) => viewNotesheet(orderModel.notes!),
+                ),
+                child: Text('View'.tr(), style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: AppThemeData.primary500)),
+              ),
+            ),
+          if (orderModel.couponCode!.trim().isNotEmpty)
+            _billRow('Coupon Code'.tr(), orderModel.couponCode!),
+          Divider(height: 1, color: isDarkMode(context) ? AppThemeData.darkBgTertiary : const Color(0xFFF0F0F5)),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 14),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  'Order Total'.tr(),
+                  style: AppTypography.labelLarge.copyWith(
+                    fontWeight: FontWeight.w700,
+                    color: AppThemeData.primary500,
+                  ),
+                ),
+                Text(
+                  amountShow(amount: totalAmount.toString()),
                   style: AppTypography.labelLarge.copyWith(
                     fontWeight: FontWeight.w700,
                     fontSize: 17,

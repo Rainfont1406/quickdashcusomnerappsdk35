@@ -533,22 +533,16 @@ class OnBoardingState extends State<OnBoarding> {
           );
         }
 
-        // Payment gateway methods use .then() internally and return
-        // immediately — kick them off now so their Firestore requests
-        // run in the background while we navigate to Home
-        FireStoreUtils.getRazorPayDemo();
-        FireStoreUtils.getPaypalSettingData();
-        FireStoreUtils.getStripeSettingData();
-        FireStoreUtils.getPayStackSettingData();
-        FireStoreUtils.getFlutterWaveSettingData();
-        FireStoreUtils.getPaytmSettingData();
-        FireStoreUtils.getPayFastSettingData();
+        // Payment gateway settings (Razorpay/Stripe/Paypal/Paytm/PhonePe/
+        // FlutterWave/Xendit/OrangeMoney/PayStack/PayFast/MercadoPago/
+        // MidTrans) are ONLY consumed by PaymentScreen.getPaymentSettingData()
+        // — every browsing session that never reaches checkout was paying
+        // for 12 Firestore reads it didn't need. Moved to CartScreen.initState
+        // (see CartScreen.dart), which still gives them the whole
+        // browse-cart-review lead time to resolve before PaymentScreen reads
+        // them. Wallet stays here — ContainerScreen/HomeScreen need it for
+        // the wallet drawer item regardless of whether the user ever checks out.
         FireStoreUtils.getWalletSettingData();
-        FireStoreUtils.getMercadoPagoSettingData();
-        FireStoreUtils.getOrangeMoneySettingData();
-        FireStoreUtils.getXenditSettingData();
-        FireStoreUtils.getMidTransSettingData();
-        FireStoreUtils.getPhonePaySettingData();
       }
 
       // Push to HomeScreen with drawer support
@@ -571,7 +565,19 @@ class OnBoardingState extends State<OnBoarding> {
   // if the account turns out to no longer be a valid active customer) clears
   // the cache so a future open doesn't keep fast-pathing into a stale state.
   // Deliberately does not re-navigate — the user is already on Home.
+  //
+  // The delay below is deliberate: this was already fire-and-forget
+  // (unawaited by both call sites) so it never blocked navigation, but
+  // firing it in the same tick as navigation still meant it competed for
+  // bandwidth with Home's own first-paint fetches (getAllStores, banners,
+  // cuisines, etc.) during exactly the window the user is waiting on those.
+  // A cached profile is already correct enough to browse with — there's no
+  // reason this refresh needs to win that race. Delaying it gives Home's
+  // own critical fetches a clear head start.
+  static const _kProfileRefreshDelay = Duration(seconds: 8);
+
   Future<void> _refreshUserProfileInBackground(String uid) async {
+    await Future.delayed(_kProfileRefreshDelay);
     try {
       final results = await Future.wait([
         FireStoreUtils.getCurrentUser(uid),

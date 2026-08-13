@@ -30,6 +30,7 @@ import 'package:emartconsumer/ui/container/ContainerScreen.dart';
 import 'package:emartconsumer/ui/cuisinesScreen/CuisinesScreen.dart';
 import 'package:emartconsumer/ui/deliveryAddressScreen/DeliveryAddressScreen.dart';
 import 'package:emartconsumer/ui/home/story_view.dart';
+import 'package:emartconsumer/ui/localOffers/LocalOffersListScreen.dart';
 import 'package:emartconsumer/ui/mapView/MapViewScreen.dart';
 import 'package:emartconsumer/ui/productDetailsScreen/ProductDetailsScreen.dart';
 import 'package:emartconsumer/ui/searchScreen/SearchScreen.dart';
@@ -140,7 +141,12 @@ class HomeScreen extends StatefulWidget {
         super(key: key);
 
   @override
-  _HomeScreenState createState() => _HomeScreenState();
+  _HomeScreenState createState() {
+    // TEMPORARY [LOGIN-PERF] - runs synchronously at construction time,
+    // effectively "HomeScreen constructor" for gap-tracing purposes.
+    debugPrint('[LOGIN-PERF][HOME] HomeScreen createState (${DateTime.now().toIso8601String()})');
+    return _HomeScreenState();
+  }
 }
 
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
@@ -639,6 +645,24 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     // every later call just returns the same in-flight/completed future.
     // ignore: unawaited_futures
     FireStoreUtils.loadRecommendationConfig();
+
+    // Payment gateway settings (Razorpay/Stripe/Paypal/Paytm/PhonePe/
+    // FlutterWave/Xendit/OrangeMoney/PayStack/PayFast/MercadoPago/MidTrans) -
+    // same reasoning as loadRecommendationConfig above: Cart/Wallet/Gift Card
+    // no longer trigger this themselves (many sessions never reach a
+    // payment screen at all), but virtually every session reaches Home, so
+    // firing it here - unawaited, well after Home's own critical fetches
+    // are already in flight - means the memoized cache is almost always
+    // already warm by the time the user does reach a payment screen,
+    // without costing browsing-only sessions anything or competing with
+    // Home's own first-paint fetches. PaymentScreen (and Wallet's/Gift
+    // Card's own payment-method loaders) still await the same call as a
+    // safety net for the rare case a user reaches payment before this
+    // resolves - see FireStoreUtils.ensurePaymentGatewaySettingsLoaded's doc
+    // comment. Safe to call more than once (Home revisited) - memoized,
+    // every later call just returns the same in-flight/completed future.
+    // ignore: unawaited_futures
+    FireStoreUtils.ensurePaymentGatewaySettingsLoaded();
   }
 
   void _onDeliveryGateChanged() {
@@ -3321,6 +3345,7 @@ class NewArrival extends StatelessWidget {
             child: InkWell(
               onTap: () {
                 BehaviorTracker.setNextEntrySource('Home');
+                precacheVendorHeroImage(context, vendorModel);
                 push(context,
                     NewVendorProductsScreen(vendorModel: vendorModel));
               },
@@ -4332,6 +4357,7 @@ class _RecommendForYouViewState
     return InkWell(
       onTap: () {
         BehaviorTracker.setNextEntrySource('Recommendation');
+        precacheVendorHeroImage(context, vendorModel!);
         push(context, NewVendorProductsScreen(vendorModel: vendorModel!));
       },
       borderRadius: BorderRadius.circular(14),
@@ -4678,7 +4704,15 @@ class _BannerViewState extends State<BannerView> {
     if (widget.bannerList.length <= 1) return;
     final next = (index + 1) % widget.bannerList.length;
     if (_settledPages.contains(next)) return;
-    precacheCarouselImage(context, widget.bannerList[next].photo.toString());
+    // Must match the width NetworkImageWidget actually requests below
+    // (~92% of screen width) - otherwise this precaches a different,
+    // wrong-sized Bunny URL that the real render never reuses, wasting
+    // the fetch entirely instead of warming the cache.
+    precacheCarouselImage(
+      context,
+      widget.bannerList[next].photo.toString(),
+      width: MediaQuery.of(context).size.width * 0.92,
+    );
   }
 
   void _startAutoScroll() {
@@ -4810,6 +4844,7 @@ class _BannerViewState extends State<BannerView> {
                         await FireStoreUtils.getVendor(
                             bannerModel.redirect_id.toString());
                     ShowToastDialog.closeLoader();
+                    precacheVendorHeroImage(context, vendorModel!);
                     push(context,
                         NewVendorProductsScreen(vendorModel: vendorModel!));
                   } else if (bannerModel.redirect_type == "product") {
@@ -4821,6 +4856,7 @@ class _BannerViewState extends State<BannerView> {
                         await FireStoreUtils.getVendor(
                             productModel!.vendorID.toString());
                     ShowToastDialog.closeLoader();
+                    precacheVendorHeroImage(context, vendorModel!);
                     push(context,
                         NewVendorProductsScreen(vendorModel: vendorModel!));
                   } else if (bannerModel.redirect_type == "external_link") {
@@ -4831,6 +4867,30 @@ class _BannerViewState extends State<BannerView> {
                     } else {
                       ShowToastDialog.showToast("Could not launch");
                     }
+                  } else if (bannerModel.redirect_type == "local_offer") {
+                    // (2026-08-04) Goal is just "get the user to the Offers &
+                    // Discounts list", not any one specific offer's detail
+                    // page - no redirect_id/lookup needed, zero extra
+                    // Firestore reads, unlike the per-offer version this
+                    // replaced.
+                    //
+                    // LocalOffersListScreen has no AppBar/drawer icon of its
+                    // own - it's designed to be hosted inside ContainerScreen
+                    // (same as the drawer's own "Offers & Discounts" item),
+                    // not pushed bare. A plain push() showed the screen with
+                    // no way to open the drawer, so this pushes a fresh
+                    // ContainerScreen wrapping it instead, matching the
+                    // Cart-from-Home pattern a few lines above.
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (context) => ContainerScreen(
+                          user: MyAppState.currentUser,
+                          currentWidget: const LocalOffersListScreen(),
+                          appBarTitle: 'Offers & Discounts'.tr(),
+                          drawerSelection: DrawerSelection.localOffers,
+                        ),
+                      ),
+                    );
                   }
                 },
                 borderRadius: BorderRadius.circular(20),
@@ -4860,6 +4920,16 @@ class _BannerViewState extends State<BannerView> {
                           NetworkImageWidget(
                             imageUrl: bannerUrl,
                             fit: BoxFit.cover,
+                            // Without an explicit width, NetworkImageWidget's
+                            // Bunny resize falls back to a generic 15%-of-
+                            // screen default - but this banner actually
+                            // renders at ~92% width (viewportFraction 0.92
+                            // above), so the fallback silently requested a
+                            // far lower resolution than displayed, stretched
+                            // to fill - blurry. Match the real rendered size.
+                            width: MediaQuery.of(context).size.width * 0.92,
+                            height: (MediaQuery.of(context).size.width * 0.44)
+                                .clamp(140.0, 210.0),
                             cacheManager: perfDiagnosticCacheManager,
                             onLoaded: () {
                               _settledPages.add(index);

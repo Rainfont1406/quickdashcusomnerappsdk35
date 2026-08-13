@@ -13,6 +13,7 @@ import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/auth_screen/login_screen.dart';
+import 'package:emartconsumer/utils/network_image_widget.dart';
 import 'package:emartconsumer/widget/shimmer_box.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
@@ -299,6 +300,7 @@ class _ViewAllRestaurantState extends State<ViewAllRestaurant>
     return GestureDetector(
       onTap: () {
         BehaviorTracker.setNextEntrySource('Home');
+        precacheVendorHeroImage(context, vendorModel);
         push(context, NewVendorProductsScreen(vendorModel: vendorModel));
       },
       child: Padding(

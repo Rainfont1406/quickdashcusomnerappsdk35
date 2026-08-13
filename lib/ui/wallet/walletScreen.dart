@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show Platform;
 import 'dart:math';
@@ -101,16 +102,22 @@ class WalletScreenState extends State<WalletScreen> {
   final _flutterPaypalNativePlugin = FlutterPaypalNative.instance;
 
   showAlert(context, {required String response, required Color colors}) {
-    return ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text(response),
-      backgroundColor: colors,
-      duration: const Duration(seconds: 8),
-    ));
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+        content: Text(response),
+        backgroundColor: colors,
+        duration: const Duration(seconds: 8),
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ));
   }
 
   final userId = MyAppState.currentUser!.userID;
 
-  getPaymentSettingData() async {
+  // Wallet balance + top-up history need to be live the moment this screen
+  // opens — unrelated to payment gateways, so this stays in initState.
+  void _attachWalletListeners() {
     topupHistoryQuery = FireStoreUtils.firestore
         .collection(Wallet)
         .where('user_id', isEqualTo: userId)
@@ -121,42 +128,76 @@ class WalletScreenState extends State<WalletScreen> {
         .collection(USERS)
         .doc(MyAppState.currentUser!.userID)
         .snapshots();
+  }
 
-    await UserPreference.getStripeData().then((value) async {
-      stripeData = value;
-      if (stripeData != null &&
-          stripeData!.clientpublishableKey.isNotEmpty &&
-          stripeData!.clientpublishableKey != 'null') {
-        try {
-          stripe1.Stripe.publishableKey = stripeData!.clientpublishableKey;
-          stripe1.Stripe.merchantIdentifier = 'QuickDash';
-          await stripe1.Stripe.instance.applySettings();
-        } catch (e) {
-          // Stripe initialization failed, but continue with other payment methods
-        }
-      } else {
+  bool _gatewaySettingsLoadedForTopup = false;
+
+  // Deliberately NOT called from initState — this screen is reached just by
+  // opening the wallet, which many users never turn into a top-up. Gateway
+  // settings are only actually consumed by the payment-method tiles inside
+  // topUpBalance()'s modal, so this is called from there instead, right
+  // before that modal opens. Guarded so re-tapping "Add Money" in the same
+  // session doesn't re-run the UserPreference reads (ensurePaymentGatewaySettingsLoaded
+  // is already memoized, but the field assignments/Stripe init below aren't).
+  // Each gateway is fetched independently so a missing/unconfigured gateway
+  // (jsonData! crash inside UserPreference — several of these getters throw
+  // rather than return null when their SharedPreferences key was never
+  // populated, e.g. every non-Razorpay gateway now that only Razorpay is
+  // fetched) cannot abort the entire load. Mirrors PaymentScreen's own
+  // _safeLoad helper.
+  Future<T?> _safeLoad<T>(FutureOr<T?> Function() loader) async {
+    try {
+      return await loader();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _loadPaymentGatewaySettingsForTopup() async {
+    if (_gatewaySettingsLoadedForTopup) return;
+    _gatewaySettingsLoadedForTopup = true;
+
+    await FireStoreUtils.ensurePaymentGatewaySettingsLoaded();
+
+    stripeData = await _safeLoad(() => UserPreference.getStripeData());
+    if (stripeData != null &&
+        stripeData!.clientpublishableKey.isNotEmpty &&
+        stripeData!.clientpublishableKey != 'null') {
+      try {
+        stripe1.Stripe.publishableKey = stripeData!.clientpublishableKey;
+        stripe1.Stripe.merchantIdentifier = 'QuickDash';
+        await stripe1.Stripe.instance.applySettings();
+      } catch (e) {
+        // Stripe initialization failed, but continue with other payment methods
       }
-    });
+    }
 
-    razorPayData = await UserPreference.getRazorPayData();
-    paytmSettingData = await UserPreference.getPaytmData();
-    paypalSettingData = await UserPreference.getPayPalData();
-    payStackSettingData = await UserPreference.getPayStackData();
-    flutterWaveSettingData = await UserPreference.getFlutterWaveData();
-    payFastSettingData = await UserPreference.getPayFastData();
-    mercadoPagoSettingData = await UserPreference.getMercadoPago();
-    midTransModel = await UserPreference.getMidTransData();
-    orangeMoneyModel = await UserPreference.getOrangeData();
-    xenditModel = await UserPreference.getXenditData();
+    razorPayData = await _safeLoad(() => UserPreference.getRazorPayData());
+    paytmSettingData = await _safeLoad(() => UserPreference.getPaytmData());
+    paypalSettingData = await _safeLoad(() => UserPreference.getPayPalData());
+    payStackSettingData = await _safeLoad(() => UserPreference.getPayStackData());
+    flutterWaveSettingData = await _safeLoad(() => UserPreference.getFlutterWaveData());
+    payFastSettingData = await _safeLoad(() => UserPreference.getPayFastData());
+    mercadoPagoSettingData = await _safeLoad(() => UserPreference.getMercadoPago());
+    midTransModel = await _safeLoad(() => UserPreference.getMidTransData());
+    orangeMoneyModel = await _safeLoad(() => UserPreference.getOrangeData());
+    xenditModel = await _safeLoad(() => UserPreference.getXenditData());
 
-    initPayPal();
+    // Guarded — paypalSettingData is null whenever Paypal isn't fetched
+    // (i.e. always, right now), and initPayPal() force-unwraps it.
+    if (paypalSettingData != null) initPayPal();
   }
 
   @override
   void initState() {
     setRef();
-    getPaymentSettingData();
-    selectedRadioTile = "Stripe";
+    _attachWalletListeners();
+    // Was "Stripe" - wrong now that only Razorpay is enabled in production;
+    // Stripe's tile is hidden (stripeData is never fetched), so leaving the
+    // old default meant tapping Pay without first manually re-selecting
+    // Razorpay matched neither branch in the dispatch below and silently
+    // did nothing.
+    selectedRadioTile = "RazorPay";
 
     _razorPay.on(Razorpay.EVENT_PAYMENT_SUCCESS, _handlePaymentSuccess);
     _razorPay.on(Razorpay.EVENT_EXTERNAL_WALLET, _handleExternalWaller);
@@ -689,13 +730,15 @@ class WalletScreenState extends State<WalletScreen> {
             tractionId: wallet.id);
       }).whenComplete(() {
         if (_scaffoldKey.currentContext != null) {
-          ScaffoldMessenger.of(_scaffoldKey.currentContext!).showSnackBar(SnackBar(
-            content: Text('Wallet topped up via $paymentMethod'.tr()),
-            backgroundColor: Colors.green.shade600,
-            behavior: SnackBarBehavior.floating,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-            duration: const Duration(seconds: 4),
-          ));
+          ScaffoldMessenger.of(_scaffoldKey.currentContext!)
+            ..hideCurrentSnackBar()
+            ..showSnackBar(SnackBar(
+              content: Text('Wallet topped up via $paymentMethod'.tr()),
+              backgroundColor: Colors.green.shade600,
+              behavior: SnackBarBehavior.floating,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              duration: const Duration(seconds: 4),
+            ));
         }
       });
     });
@@ -1052,7 +1095,20 @@ class WalletScreenState extends State<WalletScreen> {
   }
 
   Future<void> topUpBalance() async {
-    if (!await DeviceSessionService.enforceActive(context)) return;
+    // (2026-08-11) Pure activity update, non-blocking — same treatment as
+    // Order/Wallet-paid-order/Bill Pay/Table Booking (see paymentIntents.js'
+    // checkDeviceSession() call sites). Ownership can only change/be
+    // enforced at login; a superseded-device result here must never
+    // prevent or cancel the top-up. checkActive() still refreshes
+    // last_active_at server-side (DeviceSessionController::checkSession)
+    // when this happens to still be the active device — its boolean
+    // result is deliberately discarded, never passed to
+    // handleSessionInvalidated the way enforceActive() used to.
+    // ignore: unawaited_futures
+    DeviceSessionService.checkActive();
+    // Loaded here, immediately before the payment-method modal opens, not
+    // in initState — see _loadPaymentGatewaySettingsForTopup's doc comment.
+    await _loadPaymentGatewaySettingsForTopup();
     final size = MediaQuery.of(context).size;
     bool isProcessingTopup = false;
     return showModalBottomSheet(
@@ -1342,11 +1398,15 @@ class WalletScreenState extends State<WalletScreen> {
                                   if (isDone) {
                                     await paymentCompleted(paymentMethod: "PayFast");
                                   } else {
-                                    ScaffoldMessenger.of(_scaffoldKey.currentContext!).showSnackBar(SnackBar(
-                                      content: Text("Payment Cancelled or Unsuccessful.".tr()),
-                                      backgroundColor: AppColors.error500,
-                                      duration: const Duration(seconds: 4),
-                                    ));
+                                    ScaffoldMessenger.of(_scaffoldKey.currentContext!)
+                                      ..hideCurrentSnackBar()
+                                      ..showSnackBar(SnackBar(
+                                        content: Text("Payment Cancelled or Unsuccessful.".tr()),
+                                        backgroundColor: AppColors.error500,
+                                        duration: const Duration(seconds: 4),
+                                        behavior: SnackBarBehavior.floating,
+                                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                      ));
                                   }
                                 } catch (e) {
                                   if (mounted) Navigator.pop(this.context);
@@ -1425,9 +1485,13 @@ class WalletScreenState extends State<WalletScreen> {
         });
   }
 
-  bool stripe = true;
+  // Was stripe=true/razorPay=false, matching the old selectedRadioTile
+  // default - flipped to match the new one now that only Razorpay is
+  // enabled, so the visible tile's card is actually shown pre-highlighted
+  // instead of looking unselected despite being the dispatch default.
+  bool stripe = false;
 
-  bool razorPay = false;
+  bool razorPay = true;
   bool payTm = false;
   bool paypal = false;
   bool payStack = false;
@@ -1479,13 +1543,15 @@ class WalletScreenState extends State<WalletScreen> {
     );
     if (!mounted) return;
     if (result.success) {
-      ScaffoldMessenger.of(_scaffoldKey.currentContext!).showSnackBar(SnackBar(
-        content: Text('Wallet topped up via RazorPay'.tr()),
-        backgroundColor: Colors.green.shade600,
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-        duration: const Duration(seconds: 4),
-      ));
+      ScaffoldMessenger.of(_scaffoldKey.currentContext!)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(
+          content: Text('Wallet topped up via RazorPay'.tr()),
+          backgroundColor: Colors.green.shade600,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          duration: const Duration(seconds: 4),
+        ));
     } else {
       showAlert(context,
           response: result.errorMessage?.tr() ?? 'Payment verification failed. Please contact support.'.tr(),
@@ -1496,13 +1562,17 @@ class WalletScreenState extends State<WalletScreen> {
   void _handleExternalWaller(ExternalWalletResponse response) {
     // Loading dialog is already dismissed before openCheckout() is called — do not pop here.
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text(
-        "Payment Processing Via".tr() + "\n" + response.walletName!,
-      ),
-      backgroundColor: Colors.blue.shade400,
-      duration: const Duration(seconds: 8),
-    ));
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+        content: Text(
+          "Payment Processing Via".tr() + "\n" + response.walletName!,
+        ),
+        backgroundColor: Colors.blue.shade400,
+        duration: const Duration(seconds: 8),
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ));
   }
 
   void _handlePaymentError(PaymentFailureResponse response) {
@@ -1516,11 +1586,15 @@ class WalletScreenState extends State<WalletScreen> {
         description = decoded['error']?['description']?.toString() ?? description;
       }
     } catch (_) {}
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text("Payment Failed!!".tr() + "\n" + description),
-      backgroundColor: AppThemeData.primary500,
-      duration: const Duration(seconds: 8),
-    ));
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+        content: Text("Payment Failed!!".tr() + "\n" + description),
+        backgroundColor: AppThemeData.primary500,
+        duration: const Duration(seconds: 8),
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ));
   }
 
   /// PayPal Payment Gateway
@@ -1603,10 +1677,14 @@ class WalletScreenState extends State<WalletScreen> {
       AppDialog.showError(context, message: 'Payment failed. Please try again.');
     } catch (e) {
       Navigator.pop(context);
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(
         content: Text("$e"),
         duration: const Duration(seconds: 8),
         backgroundColor: AppThemeData.primary500,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
       ));
     }
   }
@@ -1813,16 +1891,24 @@ class WalletScreenState extends State<WalletScreen> {
         if (isDone) {
           paymentCompleted(paymentMethod: "PayStack");
         } else {
-          ScaffoldMessenger.of(_scaffoldKey.currentContext!).showSnackBar(SnackBar(
+          ScaffoldMessenger.of(_scaffoldKey.currentContext!)
+            ..hideCurrentSnackBar()
+            ..showSnackBar(SnackBar(
             content: Text("Payment Cancelled or Unsuccessful.".tr()),
             backgroundColor: AppThemeData.primary500,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
           ));
         }
       } else {
         Navigator.pop(context);  // Dismiss loading dialog on URL generation failure
-        ScaffoldMessenger.of(_scaffoldKey.currentContext!).showSnackBar(SnackBar(
+        ScaffoldMessenger.of(_scaffoldKey.currentContext!)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(SnackBar(
           content: Text("Error while setting up payment. Please try again.".tr()),
           backgroundColor: AppThemeData.primary500,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
         ));
       }
     } catch (e) {

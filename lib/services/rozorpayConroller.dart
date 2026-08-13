@@ -282,11 +282,112 @@ class RazorPayController {
           errorMessage: DeviceSessionService.withRetryTime(baseMessage, retryAt),
         );
       }
+      if (data['error'] == 'order_draft_missing') {
+        // Should not happen from a current app build - the order is always
+        // staged right before this call. Safe to just retry from scratch.
+        return VerifiedPaymentOrderResult(
+            errorMessage: 'Could not prepare your order. Please try again.');
+      }
       return VerifiedPaymentOrderResult(
           errorMessage: data['error']?.toString() ?? 'Unable to complete wallet payment. Please try again later.');
     } catch (e) {
       debugPrint('[createVerifiedWalletOrder] $e');
       return VerifiedPaymentOrderResult(errorMessage: 'Unable to complete wallet payment. Please try again later.');
+    }
+  }
+
+  // Pre-order verification for a COD (Cash on Delivery) order — the server
+  // recomputes subtotal/coupon/special-discount/vendor-open status exactly
+  // like createVerifiedOrderPayment/createVerifiedWalletOrder and claims
+  // device ownership, but charges nothing (COD collects cash at delivery/
+  // pickup). Previously COD order creation never called any Cloud Function
+  // at all, so a modified client could skip the client-side
+  // DeviceSessionService.enforceActive() check entirely and still create a
+  // real order on a superseded device — this closes that gap the same way
+  // the gateway/wallet paths already were.
+  //
+  // `orderId` must be the same id the caller is about to write the
+  // vendor_orders document under (same generateOrderId() call already used
+  // for every order type) — it's what lets a retried/double-tapped call be
+  // recognised as already-verified instead of claiming device ownership twice.
+  Future<VerifiedPaymentOrderResult> createVerifiedCodOrder({
+    required String vendorID,
+    required List<CartProduct> products,
+    required String orderId,
+    String? couponId,
+    String? sectionId,
+    bool takeAway = false,
+    String? deliveryCharge,
+    String? tipValue,
+    List<TaxModel>? taxSetting,
+    // Bill Pay Accept & Pay only — see createVerifiedOrderPayment above.
+    String? billPayRequestId,
+    int? expectedBillVersion,
+  }) async {
+    final idToken = await _idToken();
+    if (idToken == null) {
+      return VerifiedPaymentOrderResult(errorMessage: 'Not signed in.');
+    }
+    try {
+      final deviceId = await DeviceSessionService.getDeviceId();
+      final fcmToken = await NotificationService.getToken();
+
+      final resp = await http
+          .post(
+            Uri.parse('$CloudFunctionsBaseURL/createVerifiedCodOrder'),
+            headers: {'Authorization': 'Bearer $idToken', 'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'vendorID': vendorID,
+              'products': products.map((p) => p.toJson()).toList(),
+              'orderId': orderId,
+              'couponId': couponId,
+              'sectionId': sectionId,
+              'takeAway': takeAway,
+              'deliveryCharge': deliveryCharge,
+              'tipValue': tipValue,
+              'taxSetting': taxSetting?.map((t) => t.toJson()).toList(),
+              'deviceId': deviceId,
+              'fcmToken': fcmToken,
+              'billPayRequestId': billPayRequestId,
+              'expectedBillVersion': expectedBillVersion,
+            }),
+          )
+          .timeout(const Duration(seconds: 30));
+
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      if (resp.statusCode == 200) {
+        return VerifiedPaymentOrderResult(
+          success: true,
+          amount: (data['verifiedTotal'] as num?)?.toDouble() ?? 0,
+          verifiedDiscount: (data['verifiedDiscount'] as num?)?.toDouble() ?? 0,
+          verifiedSpecialDiscount: (data['verifiedSpecialDiscount'] as num?)?.toDouble() ?? 0,
+        );
+      }
+      if (data['error'] == 'bill_updated') {
+        return VerifiedPaymentOrderResult(
+          billUpdated: true,
+          updatedTotal: (data['updatedTotal'] as num?)?.toDouble(),
+          errorMessage: 'The restaurant updated this bill. Please review it before paying.',
+        );
+      }
+      if (data['error'] == 'vendor_closed') {
+        return VerifiedPaymentOrderResult(errorMessage: 'This restaurant is currently closed.');
+      }
+      if (data['error'] == 'device_superseded') {
+        final retryAtRaw = data['retry_at'] as String?;
+        final retryAt = retryAtRaw != null ? DateTime.tryParse(retryAtRaw) : null;
+        final baseMessage = (data['message'] as String?) ??
+            'This account is active on another device. You can switch devices after 2 hours.';
+        return VerifiedPaymentOrderResult(
+          deviceSuperseded: true,
+          errorMessage: DeviceSessionService.withRetryTime(baseMessage, retryAt),
+        );
+      }
+      return VerifiedPaymentOrderResult(
+          errorMessage: data['error']?.toString() ?? 'Unable to verify order. Please try again later.');
+    } catch (e) {
+      debugPrint('[createVerifiedCodOrder] $e');
+      return VerifiedPaymentOrderResult(errorMessage: 'Unable to verify order. Please try again later.');
     }
   }
 

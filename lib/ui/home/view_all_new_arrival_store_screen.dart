@@ -13,6 +13,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../../constants.dart';
+import '../../utils/network_image_widget.dart';
 import '../../widget/road_distance_text.dart';
 import '../vendorProductsScreen/newVendorProductsScreen.dart';
 
@@ -127,6 +128,7 @@ class _ViewAllNewArrivalStoreScreenState extends State<ViewAllNewArrivalStoreScr
     return GestureDetector(
       onTap: () {
         BehaviorTracker.setNextEntrySource('Home');
+        precacheVendorHeroImage(context, vendorModel);
         push(
           context,
           NewVendorProductsScreen(vendorModel: vendorModel),

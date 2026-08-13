@@ -15,6 +15,7 @@ import 'package:emartconsumer/services/recommendation/recommendation_config.dart
 import 'package:emartconsumer/services/recommendation/recommendation_engine.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/vendorProductsScreen/newVendorProductsScreen.dart';
+import 'package:emartconsumer/utils/network_image_widget.dart';
 import 'package:emartconsumer/widget/coming_soon_view.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
@@ -1212,6 +1213,7 @@ class SearchScreenState extends State<SearchScreen> {
             tier == 'name' ? 'Restaurant' : (tier == 'cuisine' ? 'Cuisine' : 'Product'),
           );
         }
+        precacheVendorHeroImage(context, v);
         push(context, NewVendorProductsScreen(vendorModel: v));
       },
       child: Container(

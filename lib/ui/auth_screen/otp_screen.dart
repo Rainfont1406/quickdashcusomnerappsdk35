@@ -35,6 +35,15 @@ class OtpScreen extends StatefulWidget {
   /// Kept for API compatibility — not used in the MSG91 flow.
   final String? verificationId;
   final bool isSignup;
+  // (2026-08-04) PhoneNumberScreen's own pre-check (the "Checking your
+  // account..." step, before the OTP is even sent) already ran the exact
+  // same phoneNumber+countryCode+role query this screen's login branch used
+  // to run again from scratch - it already knows the account's userID when
+  // one exists. Passing it through turns that second lookup into a direct
+  // doc(id).get() instead of a 3-field indexed query. Still a live re-read
+  // (not a reused snapshot) - active/role are re-checked fresh right here,
+  // this only changes how the doc is found, not whether it's re-read.
+  final String? existingUserId;
 
   const OtpScreen({
     super.key,
@@ -42,6 +51,7 @@ class OtpScreen extends StatefulWidget {
     this.phoneNumber,
     this.verificationId,
     this.isSignup = false,
+    this.existingUserId,
   });
 
   @override
@@ -242,22 +252,35 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
         // Explicit <dynamic> because NotificationService.getToken() has no
         // declared return type.
         final userLookupSw = Stopwatch()..start();
+        final existingUserId = widget.existingUserId;
+        final userLookupFuture = existingUserId != null
+            ? FirebaseFirestore.instance.collection(USERS).doc(existingUserId).get()
+            : FirebaseFirestore.instance
+                .collection(USERS)
+                .where('phoneNumber', isEqualTo: phoneNumber)
+                .where('countryCode', isEqualTo: countryCode)
+                .where('role', isEqualTo: USER_ROLE_CUSTOMER)
+                .get();
         final loginResults = await Future.wait<dynamic>([
-          FirebaseFirestore.instance
-              .collection(USERS)
-              .where('phoneNumber', isEqualTo: phoneNumber)
-              .where('countryCode', isEqualTo: countryCode)
-              .where('role', isEqualTo: USER_ROLE_CUSTOMER)
-              .get(),
+          userLookupFuture,
           NotificationService.getToken(),
         ]);
-        debugPrint('[LOGIN-PERF] user lookup+getToken (parallel) — ${userLookupSw.elapsedMilliseconds}ms');
-        final snap = loginResults[0] as QuerySnapshot<Map<String, dynamic>>;
+        debugPrint('[LOGIN-PERF] user lookup+getToken (parallel) — ${userLookupSw.elapsedMilliseconds}ms'
+            '${existingUserId != null ? " (direct doc get)" : " (query fallback)"}');
         final fcmToken = loginResults[1] as String;
+
+        Map<String, dynamic>? userData;
+        if (existingUserId != null) {
+          final doc = loginResults[0] as DocumentSnapshot<Map<String, dynamic>>;
+          userData = doc.exists ? doc.data() : null;
+        } else {
+          final snap = loginResults[0] as QuerySnapshot<Map<String, dynamic>>;
+          userData = snap.docs.isNotEmpty ? snap.docs.first.data() : null;
+        }
 
         if (!mounted) return;
 
-        if (snap.docs.isEmpty) {
+        if (userData == null) {
           ShowToastDialog.closeLoader();
           if (mounted) setState(() => _isVerifying = false);
           ShowToastDialog.showToast(
@@ -266,7 +289,7 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
           return;
         }
 
-        final userModel = User.fromJson(snap.docs.first.data());
+        final userModel = User.fromJson(userData);
 
         if (userModel.role != USER_ROLE_CUSTOMER) {
           ShowToastDialog.closeLoader();
@@ -321,18 +344,23 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
           );
           if (defaultAddr.location != null) {
             MyAppState.selectedPosotion = defaultAddr;
-            pushAndRemoveUntil(context, ServiceListScreen());
+            debugPrint('[LOGIN-PERF] pushAndRemoveUntil(ServiceListScreen) — ${totalSw.elapsedMilliseconds}ms since tap');
+            pushAndRemoveUntil(context, ServiceListScreen(user: userModel));
           } else {
+            debugPrint('[LOGIN-PERF] pushAndRemoveUntil(LocationPermissionScreen) — ${totalSw.elapsedMilliseconds}ms since tap');
             pushAndRemoveUntil(context, LocationPermissionScreen());
           }
         } else {
+          debugPrint('[LOGIN-PERF] pushAndRemoveUntil(LocationPermissionScreen) — ${totalSw.elapsedMilliseconds}ms since tap');
           pushAndRemoveUntil(context, LocationPermissionScreen());
         }
         return;
       }
 
       // ── Step 4b: SIGNUP flow ───────────────────────────────────────
+      final signupTokenSw = Stopwatch()..start();
       final fcmToken = await NotificationService.getToken();
+      debugPrint('[LOGIN-PERF] getToken (FCM, signup) — ${signupTokenSw.elapsedMilliseconds}ms');
       final User userModel = User()
         ..userID = newUid!
         ..countryCode = countryCode
@@ -341,6 +369,7 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
 
       ShowToastDialog.closeLoader();
       if (!mounted) return;
+      debugPrint('[LOGIN-PERF] TOTAL (OTP verify -> push SignupScreen) — ${totalSw.elapsedMilliseconds}ms since tap');
       push(context, SignupScreen(type: 'mobileNumber', userModel: userModel));
     } catch (e) {
       ShowToastDialog.closeLoader();

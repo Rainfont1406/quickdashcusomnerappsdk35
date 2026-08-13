@@ -11,6 +11,7 @@ import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../../constants.dart';
+import '../../utils/network_image_widget.dart';
 import '../../widget/coming_soon_view.dart';
 import '../vendorProductsScreen/newVendorProductsScreen.dart';
 
@@ -146,6 +147,7 @@ class _FavouriteStoreScreenState extends State<FavouriteStoreScreen> with Single
       child: GestureDetector(
         onTap: () {
           BehaviorTracker.setNextEntrySource('Favourites');
+          precacheVendorHeroImage(context, vendorModel);
           push(
             context,
             NewVendorProductsScreen(vendorModel: vendorModel),

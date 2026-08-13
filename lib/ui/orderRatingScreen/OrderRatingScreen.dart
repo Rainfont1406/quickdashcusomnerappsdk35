@@ -165,6 +165,16 @@ class _OrderRatingScreenState extends State<OrderRatingScreen> {
         createdAt: Timestamp.now(),
         reviewAttributes: {},
       );
+      // The review doc itself is the one thing that actually matters here -
+      // _alreadyRated on the next screen load is keyed off its existence, so
+      // once this succeeds the submission is real regardless of what
+      // happens next. The aggregate count/sum updates below are best-effort
+      // housekeeping (product/vendor average rating display) - previously
+      // a failure in either of them threw all the way out to the outer
+      // catch, which reported "Failed to submit" and never set _submitted,
+      // even though the review had already been written. Going back and
+      // reopening this screen then showed it as already rated - the
+      // submission had actually succeeded the whole time.
       await FireStoreUtils.updateReviewbyId(rate);
       BehaviorTracker.track(kEvtRestaurantRated, {
         'vendorId': widget.orderModel.vendorID,
@@ -174,21 +184,36 @@ class _OrderRatingScreenState extends State<OrderRatingScreen> {
         'orderId': widget.orderModel.id,
       });
 
+      // updateProductReviewStats/updateVendorReviewStats both apply their
+      // arguments via FieldValue.increment - they take DELTAS (1 new review,
+      // +_stars to the sum), not absolute new totals. Passing the
+      // client-computed new total here (as this used to) made the actual
+      // server-side result old + (old + 1) instead of old + 1, which
+      // firestore.rules' "reviewsCount must increase by exactly 1" check
+      // then rejected for every rating after the very first one on a given
+      // vendor/product - see the outer catch's comment for why that
+      // surfaced as a false "Failed to submit" even though the review
+      // itself had already been saved.
       if (_productModel != null) {
-        final newCount = _reviewCount + 1;
-        final newSum = _reviewSum + _stars;
-        await FireStoreUtils.updateProductReviewStats(
-            _productModel!.id, newCount, newSum, _productModel!.reviewAttributes ?? {});
-        _productModel!.reviewsCount = newCount;
-        _productModel!.reviewsSum = newSum;
+        try {
+          await FireStoreUtils.updateProductReviewStats(
+              _productModel!.id, 1, _stars, _productModel!.reviewAttributes ?? {});
+          _productModel!.reviewsCount = _reviewCount + 1;
+          _productModel!.reviewsSum = _reviewSum + _stars;
+        } catch (e, s) {
+          // ignore: avoid_print
+          print('[REVIEW-DEBUG] updateProductReviewStats EXCEPTION (non-fatal): $e\n$s');
+        }
       }
       if (_vendorModel != null) {
-        final newVendorCount = _vendorReviewCount + 1;
-        final newVendorSum = _vendorReviewSum + _stars;
-        await FireStoreUtils.updateVendorReviewStats(
-            _vendorModel!.id, newVendorCount, newVendorSum);
-        _vendorModel!.reviewsCount = newVendorCount;
-        _vendorModel!.reviewsSum = newVendorSum;
+        try {
+          await FireStoreUtils.updateVendorReviewStats(_vendorModel!.id, 1, _stars);
+          _vendorModel!.reviewsCount = _vendorReviewCount + 1;
+          _vendorModel!.reviewsSum = _vendorReviewSum + _stars;
+        } catch (e, s) {
+          // ignore: avoid_print
+          print('[REVIEW-DEBUG] updateVendorReviewStats EXCEPTION (non-fatal): $e\n$s');
+        }
       }
 
       if (mounted) {

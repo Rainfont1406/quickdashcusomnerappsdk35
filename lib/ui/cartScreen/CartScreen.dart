@@ -1,9 +1,15 @@
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:dotted_border/dotted_border.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
+// Prefixed second import of the same file, solely to reach the GLOBAL
+// `taxList` (constants.dart) unambiguously — this screen's own `taxList`
+// field below shadows the unprefixed one, so `globalTaxList.taxList` is the
+// only way to actually read/write ContainerScreen's already-fetched copy.
+import 'package:emartconsumer/constants.dart' as globalTaxList;
 import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/AddressModel.dart';
 import 'package:emartconsumer/model/ProductModel.dart';
@@ -11,6 +17,7 @@ import 'package:emartconsumer/model/TaxModel.dart';
 import 'package:emartconsumer/model/User.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/model/offer_model.dart';
+import 'package:emartconsumer/utils/network_image_widget.dart';
 import 'package:emartconsumer/model/variant_info.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/behavior/behavior_event_types.dart';
@@ -28,6 +35,7 @@ import 'package:uuid/uuid.dart';
 import 'package:emartconsumer/ui/productDetailsScreen/ProductDetailsScreen.dart';
 import 'package:emartconsumer/ui/vendorProductsScreen/newVendorProductsScreen.dart';
 import 'package:emartconsumer/widget/product_options_dialog.dart';
+import 'package:emartconsumer/widget/savings_banner.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -140,6 +148,15 @@ class _CartScreenState extends State<CartScreen> {
   // Performance optimization: Cache product models
   final Map<String, ProductModel> _productCache = {};
 
+  // Guards the low-stock live re-check in the "+" stepper (2026-08-05):
+  // that button's onTap is async only for the <10-stock path, which a
+  // synchronous handler never needed to worry about - without this, two
+  // rapid taps before the first fetch resolves could both pass the same
+  // stale maxQty check and double-increment past the real limit. Keyed by
+  // product id so a check in flight for one cart line never blocks taps on
+  // a different line.
+  final Set<String> _stockCheckInFlight = {};
+
   // Cart skeleton: shows until first validation completes (or empty-cart confirmed)
   bool _isCartInitialized = false;
   // [CART-PERF] race-condition audit only: records whether the initState
@@ -227,6 +244,10 @@ class _CartScreenState extends State<CartScreen> {
       debugPrint('[CART-PERF] getAllCoupons END — ${initSw.elapsedMilliseconds}ms since initState');
       return value;
     });
+    // Deliberately NOT preloading payment gateway settings here. Many users
+    // open the cart and never proceed to checkout — PaymentScreen is the
+    // single point that calls FireStoreUtils.ensurePaymentGatewaySettingsLoaded()
+    // (see its doc comment), awaited, right when it actually needs the data.
     debugPrint('[CART-PERF] getFoodType START — ${initSw.elapsedMilliseconds}ms since initState');
     getFoodType().then((_) => debugPrint(
         '[CART-PERF] getFoodType END — ${initSw.elapsedMilliseconds}ms since initState'));
@@ -405,6 +426,28 @@ class _CartScreenState extends State<CartScreen> {
   // network path itself (getFoodType's one SharedPreferences read is a
   // separate, unrelated local value, not a cache of the Firestore call).
   Future<void> getTaxData() async {
+    // This screen's own `taxList` field (above) shadows the GLOBAL `taxList`
+    // in constants.dart that ContainerScreen.getTaxList() already populates
+    // once per session, before CartScreen ever mounts — unqualified
+    // `taxList` inside this class always meant the local field, so the
+    // previous version of this guard never actually reused Container's
+    // fetch, only CartScreen's own repeat calls (getDeliveyData,
+    // _populateFromBillPay). Checking `globalTaxList.taxList` explicitly
+    // (via the prefixed import above) is what actually closes that gap.
+    // getTaxList()'s query is section-wide, not order-type-scoped (confirmed
+    // against TaxModel.isTakeaway — the flag exists for consumers to filter
+    // by afterward, not something the fetch itself branches on), so the
+    // same global list is valid to reuse regardless of Delivery/Takeaway/
+    // Dineaway mode. Falls through to a real fetch if the global is still
+    // empty (nothing has populated it yet, or a section genuinely has zero
+    // enabled tax rates) or on a caught error below, so correctness never
+    // depends on call order — and a fresh fetch here also writes back to
+    // the global, so whichever screen fetches first benefits the other.
+    if (globalTaxList.taxList != null && globalTaxList.taxList!.isNotEmpty) {
+      taxList = globalTaxList.taxList;
+      debugPrint('[CART-PERF][getTaxData] skipped — reused ContainerScreen.getTaxList() (${taxList!.length} rates)');
+      return;
+    }
     final sw = Stopwatch()..start();
     debugPrint('[CART-PERF][getTaxData] source=Firestore(tax collection, '
         'compound where sectionId+enable) request START at ${DateTime.now().toIso8601String()}');
@@ -412,6 +455,7 @@ class _CartScreenState extends State<CartScreen> {
       final taxes = await FireStoreUtils().getTaxList(sectionConstantModel?.id);
       debugPrint('[CART-PERF][getTaxData] Firestore Future resolved — ${sw.elapsedMilliseconds}ms');
       taxList = taxes ?? [];
+      globalTaxList.taxList = taxList;
       debugPrint('[CART-PERF][getTaxData] model mapping done — ${sw.elapsedMilliseconds}ms');
       setState(() {});
       debugPrint('[CART-PERF][getTaxData] setState called — ${sw.elapsedMilliseconds}ms');
@@ -639,16 +683,15 @@ class _CartScreenState extends State<CartScreen> {
           .then((sp) => sp.setString('foodType', restoredOrderType));
     }
 
-    // Fetch fresh product data for all items in parallel.
-    final freshList = await Future.wait(
-      orderModel.products.map((cp) async {
-        try {
-          return await _fireStoreUtils.getProductByID(cp.id.split('~').first);
-        } catch (_) {
-          return null;
-        }
-      }),
-    );
+    // Fetch fresh product data in one batched query (2026-08-05) - see
+    // fetchProductsByIds' own doc comment; same fix as _validateCart's
+    // identical pattern below.
+    final reorderBaseIds =
+        orderModel.products.map((cp) => cp.id.split('~').first).toList();
+    final reorderProductsById =
+        await _fireStoreUtils.fetchProductsByIds(reorderBaseIds);
+    final freshList =
+        reorderBaseIds.map((id) => reorderProductsById[id]).toList();
 
     int skipped = 0;
     for (var i = 0; i < orderModel.products.length; i++) {
@@ -767,7 +810,9 @@ class _CartScreenState extends State<CartScreen> {
       }
       vendorModel = await _fireStoreUtils.getVendorByVendorID(order.vendorID);
       vendorID = order.vendorID;
-      await getTaxData();
+      // getTaxData() already ran unconditionally from initState — no need
+      // to call it again here; it's also now internally guarded against
+      // re-fetching once taxList is populated (see its own doc comment).
     } catch (_) {
       // Fall back to whatever partial state was populated — the item list
       // itself (already written above) is what matters for the locked UI.
@@ -853,38 +898,22 @@ class _CartScreenState extends State<CartScreen> {
       }
     }
 
-    // ── Fetch all products in parallel ────────────────────────────────────────
+    // ── Fetch all products in one batched query ───────────────────────────────
     // Snapshot the list so mutations during async work don't cause issues.
-    // TEMPORARY [CART-PERF] query-pattern audit: source=Firestore(PRODUCTS
-    // collection), one .doc(id).get() PER cart line item, all fired
-    // concurrently via Future.wait — NOT a true single Firestore batch read
-    // (whereIn/getAll would be one wire round-trip for all N; this is N
-    // round-trips overlapped in time, which shares network latency but still
-    // pays N× the per-request server-side/parsing overhead). Also: no dedup
-    // by base product id before firing — a cart with two variant line items
-    // of the SAME product (same id before the '~' split) fires two identical
-    // .doc(sameId).get() calls, a small but real redundant-read case.
+    // 2026-08-05: was one getProductByID() call per cart line (N round-trips,
+    // plus a redundant duplicate read for every extra variant line sharing
+    // the same base product) - now a single fetchProductsByIds() call,
+    // deduplicated internally and chunked into ceil(distinct/30)
+    // whereIn queries (Firestore's per-query limit), instead of N.
     final cartSnapshot = List<CartProduct>.from(cartProducts);
     final baseProductIds =
-        cartSnapshot.map((cp) => cp.id.split('~').first).toSet();
-    debugPrint('[CART-PERF][_validateCart] query pattern: '
-        '${cartSnapshot.length} line item(s), one Firestore doc read each '
-        '(Future.wait-parallel, not a whereIn/getAll batch), '
-        '${baseProductIds.length} distinct product id(s) '
-        '(${cartSnapshot.length - baseProductIds.length} redundant duplicate read(s) '
-        'if that number is > 0)');
+        cartSnapshot.map((cp) => cp.id.split('~').first).toList();
     final fetchProductsSw = Stopwatch()..start();
-    final freshProducts = await Future.wait<ProductModel?>(
-      cartSnapshot.map((cp) async {
-        try {
-          return await _fireStoreUtils.getProductByID(cp.id.split('~').first);
-        } catch (_) {
-          return null; // deleted or LateInitializationError
-        }
-      }),
-    );
-    debugPrint('[CART-PERF] getProductByID x${cartSnapshot.length} (parallel) — '
-        '${fetchProductsSw.elapsedMilliseconds}ms');
+    final productsById = await _fireStoreUtils.fetchProductsByIds(baseProductIds);
+    final freshProducts =
+        baseProductIds.map((id) => productsById[id]).toList();
+    debugPrint('[CART-PERF] fetchProductsByIds x${baseProductIds.toSet().length} distinct '
+        '(${cartSnapshot.length} line item(s)) — ${fetchProductsSw.elapsedMilliseconds}ms');
 
     // ── Process results (no more async Firestore calls inside this loop) ──────
     final List<String> idsToRemove = [];
@@ -2387,7 +2416,9 @@ class _CartScreenState extends State<CartScreen> {
         trailing: GestureDetector(
           onTap: () {
             if (vendorModel != null && !vendorModel!.reststatus) {
-              ScaffoldMessenger.of(context).showSnackBar(
+              ScaffoldMessenger.of(context)
+                ..hideCurrentSnackBar()
+                ..showSnackBar(
                 SnackBar(
                   content: Text(
                     "This restaurant is currently closed. Scheduled booking is not available right now."
@@ -2630,10 +2661,19 @@ class _CartScreenState extends State<CartScreen> {
                               ),
                             )
                           else
-                            Wrap(
-                              spacing: 10,
-                              runSpacing: 10,
-                              children: slots.map((slot) {
+                            GridView.builder(
+                              shrinkWrap: true,
+                              physics: const NeverScrollableScrollPhysics(),
+                              itemCount: slots.length,
+                              gridDelegate:
+                                  const SliverGridDelegateWithFixedCrossAxisCount(
+                                crossAxisCount: 3,
+                                crossAxisSpacing: 10,
+                                mainAxisSpacing: 10,
+                                childAspectRatio: 2.4,
+                              ),
+                              itemBuilder: (context, index) {
+                                final slot = slots[index];
                                 final bool sel = scheduleTime != null &&
                                     scheduleTime!.toDate().year == slot.year &&
                                     scheduleTime!.toDate().month ==
@@ -2656,8 +2696,7 @@ class _CartScreenState extends State<CartScreen> {
                                   child: AnimatedContainer(
                                     duration:
                                         const Duration(milliseconds: 180),
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 16, vertical: 10),
+                                    alignment: Alignment.center,
                                     decoration: BoxDecoration(
                                       color: sel
                                           ? AppThemeData.primary500
@@ -2692,7 +2731,7 @@ class _CartScreenState extends State<CartScreen> {
                                     ),
                                   ),
                                 );
-                              }).toList(),
+                              },
                             ),
                           const SizedBox(height: 24),
                         ],
@@ -2730,7 +2769,9 @@ class _CartScreenState extends State<CartScreen> {
                                       // Slot became stale while the picker was open
                                       setState(() => scheduleTime = null);
                                       setSheetState(() {});
-                                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                                      ScaffoldMessenger.of(context)
+                                        ..hideCurrentSnackBar()
+                                        ..showSnackBar(SnackBar(
                                         content: Text('Selected time is no longer available. Please choose a new slot.'.tr()),
                                         backgroundColor: AppThemeData.warning400,
                                         behavior: SnackBarBehavior.floating,
@@ -2888,7 +2929,9 @@ class _CartScreenState extends State<CartScreen> {
           txt.clear();
           _appliedCouponMinAmount = 0.0;
         });
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(SnackBar(
           content: Text(
             'Coupon removed — order total is now below its minimum of ${amountShow(amount: removedMinAmount.toStringAsFixed(2))}.'
                 .tr(),
@@ -3308,35 +3351,14 @@ class _CartScreenState extends State<CartScreen> {
                 : const SizedBox.shrink(),
           ),
           // ── Savings banner (always visible when discount is applied) ──
+          // Animated (not static) on purpose — a light "shine" sweeps across
+          // it on a loop and it gently breathes, so it keeps drawing the
+          // eye to the savings rather than sitting there as flat text.
           if (totalSavings > 0) ...[
             Divider(height: 1, color: dividerColor),
-            Container(
-              margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              decoration: BoxDecoration(
-                color: dark
-                    ? AppThemeData.success400.withValues(alpha: 0.15)
-                    : AppThemeData.success50,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(
-                    Icons.local_offer_rounded,
-                    color: AppThemeData.success400,
-                    size: 15,
-                  ),
-                  const SizedBox(width: 6),
-                  Text(
-                    '${'You saved'.tr()} ${amountShow(amount: totalSavings.toStringAsFixed(2))} ${'on this order'.tr()}',
-                    style: AppTypography.labelMedium.copyWith(
-                      color: AppThemeData.success400,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ],
-              ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+              child: SavingsBanner(totalSavings: totalSavings, dark: dark),
             ),
           ],
         ],
@@ -3590,6 +3612,23 @@ class _CartScreenState extends State<CartScreen> {
                     : (isDark ? AppThemeData.darkBorderSecondary : AppThemeData.neutral200),
             width: isSelected && enabled ? 2 : 1,
           ),
+          boxShadow: !enabled || isDark
+              ? null
+              : isSelected
+                  ? [
+                      BoxShadow(
+                        color: AppThemeData.primary500.withValues(alpha: 0.20),
+                        blurRadius: 16,
+                        offset: const Offset(0, 6),
+                      ),
+                    ]
+                  : [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.06),
+                        blurRadius: 12,
+                        offset: const Offset(0, 4),
+                      ),
+                    ],
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -4083,6 +4122,7 @@ class _CartScreenState extends State<CartScreen> {
               onTap: () {
                 if (vendorModel != null) {
                   BehaviorTracker.setNextEntrySource('Cart');
+                  precacheVendorHeroImage(context, vendorModel!);
                   Navigator.of(context).push(MaterialPageRoute(
                     builder: (_) =>
                         NewVendorProductsScreen(vendorModel: vendorModel!),
@@ -4638,48 +4678,78 @@ class _CartScreenState extends State<CartScreen> {
                       ),
                       // Plus button
                       GestureDetector(
-                        onTap: () {
+                        onTap: () async {
                           if (productModel == null) return;
-                          if (productModel!.itemAttributes != null) {
-                            final variantList =
-                                productModel!.itemAttributes!.variants!;
-                            Variants? matchingVariant;
+
+                          int computeMaxQty(ProductModel pm) {
+                            if (pm.itemAttributes != null) {
+                              final variantList =
+                                  pm.itemAttributes!.variants!;
+                              Variants? matchingVariant;
+                              try {
+                                matchingVariant = variantList.firstWhere(
+                                  (v) =>
+                                      v.variant_sku ==
+                                      variantInfo?.variant_sku,
+                                );
+                              } catch (_) {
+                                matchingVariant = null;
+                              }
+                              return matchingVariant != null
+                                  ? int.parse(matchingVariant
+                                      .variant_quantity
+                                      .toString())
+                                  : pm.quantity;
+                            }
+                            return pm.quantity;
+                          }
+
+                          var maxQty = computeMaxQty(productModel!);
+
+                          // Soft stock re-verification (2026-08-05):
+                          // productModel is cached from the last full cart
+                          // validation (_validateCart), not live - it can
+                          // be stale if the vendor's stock changed since.
+                          // Abundant stock (>=10) is never worth an extra
+                          // read to double-check before a single +1; scarce
+                          // stock (<10, where two customers racing for the
+                          // last few units is a real scenario) gets one
+                          // fresh check first, so the cap can't be stale
+                          // exactly when staleness would actually matter.
+                          // Client-side only - the definitive stock check
+                          // still happens wherever order verification
+                          // already re-checks the catalog server-side.
+                          if (maxQty != -1 && maxQty < 10) {
+                            if (_stockCheckInFlight.contains(productId)) {
+                              return; // a check for this line is already running
+                            }
+                            _stockCheckInFlight.add(productId);
                             try {
-                              matchingVariant = variantList.firstWhere(
-                                (v) =>
-                                    v.variant_sku ==
-                                    variantInfo?.variant_sku,
-                              );
+                              final fresh =
+                                  await _fireStoreUtils.getProductByID(productId);
+                              if (mounted) {
+                                setState(() => _productCache[productId] = fresh);
+                              }
+                              maxQty = computeMaxQty(fresh);
                             } catch (_) {
-                              matchingVariant = null;
+                              // Fetch failed - proceed with the cached
+                              // number rather than blocking the tap.
+                            } finally {
+                              _stockCheckInFlight.remove(productId);
                             }
-                            final maxQty = matchingVariant != null
-                                ? int.parse(matchingVariant
-                                    .variant_quantity
-                                    .toString())
-                                : productModel!.quantity;
-                            if (maxQty > quen || maxQty == -1) {
-                              quen++;
-                              addtocard(cartProduct, quen);
-                            } else {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                    content: Text(
-                                        "Product is out of Stock".tr())),
-                              );
-                            }
+                          }
+
+                          if (maxQty > quen || maxQty == -1) {
+                            quen++;
+                            addtocard(cartProduct, quen);
                           } else {
-                            if (productModel!.quantity > quen ||
-                                productModel!.quantity == -1) {
-                              quen++;
-                              addtocard(cartProduct, quen);
-                            } else {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                    content: Text(
-                                        "Product is out of Stock".tr())),
-                              );
-                            }
+                            ScaffoldMessenger.of(context)
+                              ..hideCurrentSnackBar()
+                              ..showSnackBar(
+                              SnackBar(
+                                  content: Text(
+                                      "Product is out of Stock".tr())),
+                            );
                           }
                         },
                         child: Container(
@@ -4930,7 +5000,9 @@ class _CartScreenState extends State<CartScreen> {
       });
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(SnackBar(
           content: Text("Failed to update quantity".tr()),
           backgroundColor: AppThemeData.error500,
         ));
@@ -4967,7 +5039,9 @@ class _CartScreenState extends State<CartScreen> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(SnackBar(
           content: Text("Failed to update quantity".tr()),
           backgroundColor: AppThemeData.error500,
         ));
@@ -5449,10 +5523,22 @@ class _CartScreenState extends State<CartScreen> {
     final minAmt = double.tryParse(offer.applicableAmount ?? '0') ?? 0;
     final hasMinAmt = minAmt > 0;
 
+    // Locked (not-yet-applicable) cards get a soft red glow under the
+    // bottom edge, matching the reference design's "still out of reach"
+    // treatment - only when there's actually an unlock hint to draw
+    // attention to, not on every non-applicable card indiscriminately.
+    final isLocked = !applicable && hasMinAmt;
+
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
       decoration: BoxDecoration(
-        color: dark ? AppThemeData.darkBgTertiary : AppThemeData.neutral50,
+        // Applicable cards get a light purple/lavender tint (primary50) to
+        // match the reference design, instead of a plain neutral grey -
+        // non-applicable/locked cards keep the neutral grey since they're
+        // deliberately de-emphasized either way.
+        color: dark
+            ? AppThemeData.darkBgTertiary
+            : (applicable ? AppThemeData.primary50 : AppThemeData.neutral50),
         borderRadius: BorderRadius.circular(16),
         border: Border.all(
           color: isApplied
@@ -5464,6 +5550,16 @@ class _CartScreenState extends State<CartScreen> {
                       : AppThemeData.neutral200)),
           width: isApplied ? 1.5 : 1,
         ),
+        boxShadow: isLocked
+            ? [
+                BoxShadow(
+                  color: AppThemeData.danger300.withValues(alpha: 0.35),
+                  blurRadius: 12,
+                  spreadRadius: -4,
+                  offset: const Offset(0, 6),
+                ),
+              ]
+            : null,
       ),
       child: Padding(
         padding: const EdgeInsets.all(14),
@@ -5519,19 +5615,24 @@ class _CartScreenState extends State<CartScreen> {
                       fontWeight: FontWeight.w500,
                     ),
                   ),
-                  // Unlock hint for non-applicable coupons
-                  if (!applicable && hasMinAmt) ...[
+                  // Unlock hint for non-applicable coupons — danger300 (not
+                  // warning400) to match the reference design's vivid red
+                  // treatment for "still locked", and bold per the
+                  // reference rather than regular weight.
+                  if (isLocked) ...[
                     const SizedBox(height: 6),
                     Row(
                       children: [
                         const Icon(Icons.lock_outline_rounded,
-                            size: 12, color: AppThemeData.warning400),
+                            size: 12, color: AppThemeData.danger300),
                         const SizedBox(width: 4),
                         Flexible(
                           child: Text(
                             "Add ${amountShow(amount: (minAmt - subTotal).toStringAsFixed(2))} more to unlock",
                             style: AppTypography.caption.copyWith(
-                                color: AppThemeData.warning400),
+                              color: AppThemeData.danger300,
+                              fontWeight: FontWeight.w700,
+                            ),
                           ),
                         ),
                       ],
@@ -5582,17 +5683,25 @@ class _CartScreenState extends State<CartScreen> {
         ? "Get ${discountValue.toStringAsFixed(0)}% OFF"
         : "Flat ${amountShow(amount: discountValue.toStringAsFixed(2))} OFF";
 
+    // Only the best (isBest) discount is the one actually auto-applied to
+    // the total (see _getActiveSpecialDiscounts' caller) - every other
+    // entry here is shown for transparency only, so it's styled grey/muted
+    // rather than sharing the applied card's orange treatment, matching
+    // the "unapplied = neutral, applied = colored" convention already used
+    // for coupon cards (_couponCard's applicable/non-applicable styling).
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
       decoration: BoxDecoration(
-        color: dark ? AppThemeData.darkBgTertiary : AppThemeData.warning50,
+        color: dark
+            ? AppThemeData.darkBgTertiary
+            : (isBest ? AppThemeData.warning50 : AppThemeData.neutral50),
         borderRadius: BorderRadius.circular(16),
         border: Border.all(
           color: isBest
               ? AppThemeData.warning300
               : (dark
                   ? AppThemeData.darkBorderPrimary
-                  : AppThemeData.warning200),
+                  : AppThemeData.neutral200),
           width: isBest ? 1.5 : 1,
         ),
       ),
@@ -5605,10 +5714,19 @@ class _CartScreenState extends State<CartScreen> {
               width: 36,
               height: 36,
               decoration: BoxDecoration(
-                color: AppThemeData.warning400.withValues(alpha: 0.15),
+                color: isBest
+                    ? AppThemeData.warning400.withValues(alpha: 0.15)
+                    : (dark
+                        ? AppThemeData.darkBorderPrimary
+                        : AppThemeData.neutral200),
                 borderRadius: BorderRadius.circular(10),
               ),
               child: Center(
+                // Emoji glyphs render in their own fixed color regardless of
+                // TextStyle.color, so the flame itself can't be desaturated
+                // for the unapplied state - the grey chip background above
+                // and the grey card/border are what actually signal
+                // "unapplied" here.
                 child: Text(
                   isBest ? "🏆" : "🔥",
                   style: const TextStyle(fontSize: 18),
@@ -5682,20 +5800,34 @@ class _CartScreenState extends State<CartScreen> {
                 ],
               ),
             ),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-              decoration: BoxDecoration(
-                color: AppThemeData.success400.withValues(alpha: 0.12),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Text(
-                "Auto",
-                style: AppTypography.caption.copyWith(
-                  color: AppThemeData.success400,
-                  fontWeight: FontWeight.w700,
+            // Only the auto-picked best discount is actually applied to the
+            // total (see the max-discount selection above _getActiveSpecialDiscounts
+            // is called from) - every other entry here is shown for
+            // transparency only and isn't independently selectable, so it
+            // gets no badge at all rather than a misleading "Apply" button.
+            if (isBest)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: AppThemeData.warning400.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.check_circle_rounded,
+                        size: 14, color: AppThemeData.warning400),
+                    const SizedBox(width: 4),
+                    Text(
+                      "Applied".tr(),
+                      style: AppTypography.caption.copyWith(
+                        color: AppThemeData.warning400,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
                 ),
               ),
-            ),
           ],
         ),
       ),
@@ -5721,7 +5853,9 @@ class _CartScreenState extends State<CartScreen> {
 
   void _applyManualCoupon(List<OfferModel> coupons, BuildContext sheetCtx) async {
     if (txt.text.trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(
         content: Text("Please enter a coupon code".tr()),
         backgroundColor: const Color(0xFFF59E0B),
         behavior: SnackBarBehavior.floating,
@@ -5748,7 +5882,9 @@ class _CartScreenState extends State<CartScreen> {
     }
 
     if (found == null) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(
         content: Text(
             "Invalid coupon code or not applicable for this store".tr()),
         backgroundColor: AppThemeData.error500,
@@ -5762,7 +5898,9 @@ class _CartScreenState extends State<CartScreen> {
     final minAmt = double.tryParse(found.applicableAmount ?? '0') ?? 0;
     if (subTotal < minAmt) {
       Navigator.pop(sheetCtx);
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(
         content: Text(
             "Add ${amountShow(amount: (minAmt - subTotal).toStringAsFixed(2))} more to use this coupon.".tr()),
         backgroundColor: const Color(0xFFF59E0B),
@@ -5822,7 +5960,9 @@ class _CartScreenState extends State<CartScreen> {
         txt.text = offer.offerCode ?? '';
         _appliedCouponMinAmount = couponMinAmount;
       });
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(
         content: Text(
           'Coupon applied. Combined with the special discount, savings are '
           'capped at ${maxCombinedDiscountPercent.toStringAsFixed(0)}% of your order total.'
@@ -5851,12 +5991,22 @@ class _CartScreenState extends State<CartScreen> {
       _appliedCouponMinAmount = couponMinAmount;
     });
     Navigator.pop(sheetCtx);
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text("Coupon applied successfully!".tr()),
-      backgroundColor: Colors.green,
-      behavior: SnackBarBehavior.floating,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-    ));
+    _showCouponAppliedBanner(code: offer.offerCode ?? '', savedAmount: couponEffective);
+  }
+
+  // Coupon-applied confirmation modal — a green percent badge with a
+  // continuously-bursting confetti backdrop behind it, the code + savings
+  // copy, a green progress line that runs over 4s, and a "YAY!" button.
+  // The dialog auto-dismisses itself when the progress line completes, but
+  // X / YAY! / tapping the scrim still dismiss it early.
+  void _showCouponAppliedBanner({required String code, required double savedAmount}) {
+    showDialog(
+      context: context,
+      barrierDismissible: true,
+      barrierColor: Colors.black.withValues(alpha: 0.5),
+      builder: (dialogCtx) =>
+          _CouponAppliedBanner(code: code, savedAmount: savedAmount),
+    );
   }
 
   Notesheet(BuildContext sheetCtx) {
@@ -6229,6 +6379,356 @@ class _CartScreenState extends State<CartScreen> {
     sp.setString("musics_key", "");
     sp.setString("addsize", "");
   }
+}
+
+// Coupon-applied dialog content: a green percent badge sitting in front of
+// a backdrop of small confetti "crackers" that boom (burst outward from a
+// point, flash, then fade) on a stagger, plus a green line under the copy
+// that fills over 4s and auto-dismisses the dialog when it completes.
+class _CouponAppliedBanner extends StatefulWidget {
+  final String code;
+  final double savedAmount;
+
+  const _CouponAppliedBanner({required this.code, required this.savedAmount});
+
+  @override
+  State<_CouponAppliedBanner> createState() => _CouponAppliedBannerState();
+}
+
+class _CouponAppliedBannerState extends State<_CouponAppliedBanner>
+    with TickerProviderStateMixin {
+  static const _autoDismissDuration = Duration(seconds: 4);
+
+  late final AnimationController _progressController;
+  late final AnimationController _burstController;
+
+  @override
+  void initState() {
+    super.initState();
+    _progressController = AnimationController(
+      vsync: this,
+      duration: _autoDismissDuration,
+    )
+      ..addStatusListener((status) {
+        if (status == AnimationStatus.completed && mounted) {
+          Navigator.of(context).pop();
+        }
+      })
+      ..forward();
+    // One full lap = one round of crackers booming across the backdrop;
+    // it repeats for as long as the dialog is on screen.
+    _burstController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1300),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _progressController.dispose();
+    _burstController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final dark = isDarkMode(context);
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      insetPadding: const EdgeInsets.symmetric(horizontal: 32),
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Container(
+            padding: const EdgeInsets.fromLTRB(24, 44, 24, 20),
+            decoration: BoxDecoration(
+              color: dark ? AppThemeData.darkBgSecondary : Colors.white,
+              borderRadius: BorderRadius.circular(24),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.2),
+                  blurRadius: 30,
+                  offset: const Offset(0, 14),
+                ),
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _boomingConfettiBadge(),
+                const SizedBox(height: 14),
+                Text(
+                  "'${widget.code}' applied".tr(),
+                  textAlign: TextAlign.center,
+                  style: AppTypography.bodyMedium.copyWith(
+                    color: dark
+                        ? AppThemeData.darkTextSecondary
+                        : AppThemeData.neutral700,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  "${amountShow(amount: widget.savedAmount.toStringAsFixed(2))} savings with this coupon."
+                      .tr(),
+                  textAlign: TextAlign.center,
+                  style: AppTypography.h5.copyWith(
+                    fontWeight: FontWeight.w800,
+                    height: 1.25,
+                    color: dark
+                        ? AppThemeData.darkTextPrimary
+                        : AppThemeData.neutral900,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  "Woohoo! Your coupon is successfully applied".tr(),
+                  textAlign: TextAlign.center,
+                  style: AppTypography.bodySmall.copyWith(
+                    color: dark
+                        ? AppThemeData.darkTextTertiary
+                        : AppThemeData.neutral500,
+                  ),
+                ),
+                const SizedBox(height: 18),
+                _autoDismissLine(dark),
+                const SizedBox(height: 14),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppThemeData.success400,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14)),
+                      elevation: 0,
+                    ),
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: Text(
+                      "YAY!".tr(),
+                      style: AppTypography.labelLarge.copyWith(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Positioned(
+            top: 8,
+            right: 8,
+            child: GestureDetector(
+              onTap: () => Navigator.of(context).pop(),
+              child: Container(
+                padding: const EdgeInsets.all(6),
+                decoration: BoxDecoration(
+                  color: dark
+                      ? AppThemeData.darkBgTertiary
+                      : AppThemeData.neutral100,
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(Icons.close_rounded,
+                    size: 16,
+                    color: dark
+                        ? AppThemeData.darkTextSecondary
+                        : AppThemeData.neutral600),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Thin green line that fills left-to-right over exactly _autoDismissDuration,
+  // tied to the same controller that closes the dialog — so the dialog is
+  // always gone right as the line finishes filling.
+  Widget _autoDismissLine(bool dark) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(3),
+      child: SizedBox(
+        height: 4,
+        child: AnimatedBuilder(
+          animation: _progressController,
+          builder: (_, __) => LinearProgressIndicator(
+            value: _progressController.value,
+            backgroundColor:
+                dark ? AppThemeData.darkBgTertiary : AppThemeData.neutral200,
+            valueColor:
+                const AlwaysStoppedAnimation(AppThemeData.success400),
+            minHeight: 4,
+          ),
+        ),
+      ),
+    );
+  }
+
+  // Several small "cracker" bursts scattered around the percent badge, each
+  // popping — particles flash out from their own origin then fade — on its
+  // own staggered timing so it reads as crackers booming in the background
+  // rather than one single firework.
+  Widget _boomingConfettiBadge() {
+    return SizedBox(
+      width: 130,
+      height: 130,
+      child: AnimatedBuilder(
+        animation: _burstController,
+        builder: (_, __) {
+          final v = _burstController.value;
+          return Stack(
+            alignment: Alignment.center,
+            children: [
+              for (final burst in _bursts) ..._buildBurst(burst, v),
+              Container(
+                width: 58,
+                height: 58,
+                decoration: BoxDecoration(
+                  color: AppThemeData.success400,
+                  shape: BoxShape.circle,
+                  boxShadow: [
+                    BoxShadow(
+                      color: AppThemeData.success400.withValues(alpha: 0.35),
+                      blurRadius: 18,
+                      spreadRadius: 2,
+                    ),
+                  ],
+                ),
+                child: const Icon(Icons.percent_rounded,
+                    color: Colors.white, size: 26),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  List<Widget> _buildBurst(_CrackerBurst burst, double v) {
+    // Each burst only "booms" for a short window of the loop, then sits
+    // invisible until its next turn — the pop, not a smooth continuous
+    // drift, is what reads as a firecracker rather than falling confetti.
+    const window = 0.45;
+    double raw = v - burst.phase;
+    raw -= raw.floorToDouble();
+    final active = raw <= window;
+    final bt = active ? (raw / window).clamp(0.0, 1.0) : 1.0;
+    final dist = Curves.easeOutCubic.transform(bt);
+    final opacity = active
+        ? (bt < 0.2 ? bt / 0.2 : (1 - (bt - 0.2) / 0.8)).clamp(0.0, 1.0)
+        : 0.0;
+
+    if (opacity <= 0) return const [];
+
+    return [
+      // Flash/spark at the origin to sell the "boom".
+      Positioned(
+        left: burst.origin.dx - 10,
+        top: burst.origin.dy - 10,
+        child: Opacity(
+          opacity: (opacity * 0.8).clamp(0.0, 1.0),
+          child: Container(
+            width: 20,
+            height: 20,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: AppThemeData.warning300.withValues(alpha: 0.6),
+            ),
+          ),
+        ),
+      ),
+      for (final p in burst.pieces)
+        Positioned(
+          left: burst.origin.dx + p.dx * dist - 4,
+          top: burst.origin.dy + p.dy * dist - 4,
+          child: Opacity(
+            opacity: opacity,
+            child: Transform.rotate(
+              angle: p.angle + bt * math.pi * 1.5,
+              child: p.circle
+                  ? Container(
+                      width: 7,
+                      height: 7,
+                      decoration:
+                          BoxDecoration(color: p.color, shape: BoxShape.circle),
+                    )
+                  : Container(
+                      width: 6,
+                      height: 11,
+                      decoration: BoxDecoration(
+                        color: p.color,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+            ),
+          ),
+        ),
+    ];
+  }
+
+  // Fixed (not math.Random) burst layout so it's identical on every dialog
+  // open instead of jittering — three cracker origins scattered around the
+  // badge, staggered so they boom one after another on a loop.
+  static final List<_CrackerBurst> _bursts = [
+    _CrackerBurst(
+      origin: const Offset(38, 40),
+      phase: 0.0,
+      pieces: const [
+        _ConfettiPiece(dx: -30, dy: -22, angle: -0.35, color: AppThemeData.warning300, circle: false),
+        _ConfettiPiece(dx: -6, dy: -34, angle: 0.2, color: AppThemeData.danger300, circle: true),
+        _ConfettiPiece(dx: -34, dy: 6, angle: 0.5, color: AppThemeData.accent500, circle: false),
+        _ConfettiPiece(dx: -14, dy: 30, angle: -0.4, color: AppThemeData.primary400, circle: true),
+      ],
+    ),
+    _CrackerBurst(
+      origin: const Offset(92, 34),
+      phase: 0.33,
+      pieces: const [
+        _ConfettiPiece(dx: 30, dy: -20, angle: 0.35, color: AppThemeData.info300, circle: false),
+        _ConfettiPiece(dx: 8, dy: -32, angle: -0.25, color: AppThemeData.success300, circle: true),
+        _ConfettiPiece(dx: 34, dy: 10, angle: -0.5, color: AppThemeData.warning300, circle: false),
+        _ConfettiPiece(dx: 16, dy: 28, angle: 0.4, color: AppThemeData.accent400, circle: true),
+      ],
+    ),
+    _CrackerBurst(
+      origin: const Offset(65, 96),
+      phase: 0.66,
+      pieces: const [
+        _ConfettiPiece(dx: -28, dy: 16, angle: 0.3, color: AppThemeData.accent500, circle: true),
+        _ConfettiPiece(dx: -8, dy: 30, angle: -0.4, color: AppThemeData.danger300, circle: false),
+        _ConfettiPiece(dx: 20, dy: 26, angle: 0.45, color: AppThemeData.info300, circle: true),
+        _ConfettiPiece(dx: 30, dy: 2, angle: -0.3, color: AppThemeData.primary400, circle: false),
+      ],
+    ),
+  ];
+}
+
+class _CrackerBurst {
+  final Offset origin;
+  final double phase;
+  final List<_ConfettiPiece> pieces;
+
+  const _CrackerBurst({
+    required this.origin,
+    required this.phase,
+    required this.pieces,
+  });
+}
+
+class _ConfettiPiece {
+  final double dx, dy, angle;
+  final Color color;
+  final bool circle;
+
+  const _ConfettiPiece({
+    required this.dx,
+    required this.dy,
+    required this.angle,
+    required this.color,
+    required this.circle,
+  });
 }
 
 Widget _buildChip(String label, int attributesOptionIndex,

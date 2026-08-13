@@ -93,6 +93,19 @@ class OrderModel {
   // behavior_batches collection) - see that class' own doc comment.
   Map<String, dynamic>? analyticsSnapshot;
 
+  // Immutable pricing snapshot (2026-08-04) - written ONCE, a few seconds
+  // after order creation, by the verifyOrderOnCreate Cloud Function, after
+  // it has re-verified subtotal/discount/specialDiscount/tax/deliveryCharge
+  // against server-side data (the special discount is a time-window check
+  // that trigger can silently correct post-creation). This is the single
+  // source of truth for "what did this order actually cost" - every screen
+  // displaying an ALREADY-PLACED order's total should read from here instead
+  // of recomputing from raw order fields. Absent on orders created before
+  // this backend change deployed, and briefly absent (a few seconds) right
+  // after a brand-new order is created before the trigger has run - screens
+  // MUST fall back to their existing recompute logic when this is null.
+  Map<String, dynamic>? pricing;
+
   OrderModel({
     this.address,
     author,
@@ -133,6 +146,7 @@ class OrderModel {
     this.billPayRequestId,
     this.razorpayOrderId,
     this.analyticsSnapshot,
+    this.pricing,
   })  : author = author ?? User(),
         createdAt = createdAt ?? Timestamp.now(),
         vendor = vendor ?? VendorModel();
@@ -205,6 +219,7 @@ class OrderModel {
       analyticsSnapshot: parsedJson["analyticsSnapshot"] == null
           ? null
           : Map<String, dynamic>.from(parsedJson["analyticsSnapshot"]),
+      pricing: parsedJson["pricing"] == null ? null : Map<String, dynamic>.from(parsedJson["pricing"]),
     );
   }
 
@@ -248,6 +263,7 @@ class OrderModel {
       "billPayRequestId": this.billPayRequestId,
       "razorpayOrderId": this.razorpayOrderId,
       "analyticsSnapshot": this.analyticsSnapshot,
+      "pricing": this.pricing,
     };
   }
 }

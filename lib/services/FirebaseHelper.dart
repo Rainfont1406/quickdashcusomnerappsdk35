@@ -31,6 +31,8 @@ import 'package:emartconsumer/model/TaxModel.dart';
 import 'package:emartconsumer/model/User.dart';
 import 'package:emartconsumer/model/VehicleType.dart';
 import 'package:emartconsumer/model/VendorCategoryModel.dart';
+import 'package:emartconsumer/model/LocalOfferModel.dart';
+import 'package:emartconsumer/model/LocalOfferCategoryModel.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/model/conversation_model.dart';
 import 'package:emartconsumer/model/email_template_model.dart';
@@ -660,24 +662,29 @@ class FireStoreUtils {
       final now = DateTime.now();
       // Retention extended 3 -> 12 months (2026-07-18, kBehaviorSummaryRetentionMonths)
       // for Cross-Session Search Interest - a deliberate, confirmed 4x
-      // increase in reads for this fetch (12 individual .get() calls
-      // instead of 3), cached 10 minutes per user session via
-      // _behaviorSummaryCache below. Must stay in sync with
-      // BehaviorTracker._pruneOldSummariesIfNeeded's own retention window.
+      // increase in document reads for this fetch (12 months instead of 3),
+      // cached 10 minutes per user session via _behaviorSummaryCache below.
+      // Must stay in sync with BehaviorTracker._pruneOldSummariesIfNeeded's
+      // own retention window.
       final yearMonths = List.generate(kBehaviorSummaryRetentionMonths, (i) {
         final d = DateTime(now.year, now.month - i, 1);
         return '${d.year}-${d.month.toString().padLeft(2, '0')}';
       });
-      final docs = await Future.wait(yearMonths.map((ym) => firestore
+      // Single whereIn query instead of 12 individual .doc(id).get() calls -
+      // same document-read cost (Firestore bills per document either way),
+      // but one round trip instead of twelve competing for connection
+      // bandwidth. whereIn supports up to 30 values; comfortably covers
+      // kBehaviorSummaryRetentionMonths (12). A query only ever returns
+      // existing docs, so no separate exists-check is needed here (unlike
+      // the old per-doc-get version, where a missing month still produced a
+      // non-existent snapshot that had to be filtered out).
+      final snapshot = await firestore
           .collection(USERS)
           .doc(uid)
           .collection('behavior_summary')
-          .doc(ym)
-          .get()));
-      final data = docs
-          .where((d) => d.exists && d.data() != null)
-          .map((d) => d.data()!)
-          .toList();
+          .where(FieldPath.documentId, whereIn: yearMonths)
+          .get();
+      final data = snapshot.docs.map((d) => d.data()).toList();
       return BehaviorSummarySnapshot.merge(data);
     } catch (_) {
       return BehaviorSummarySnapshot.empty();
@@ -1173,6 +1180,47 @@ class FireStoreUtils {
     });
   }
 
+  // Atomic replacement for the old get-then-.set()-the-whole-document stock
+  // decrement duplicated in CheckoutScreen._placeOrder and
+  // PaymentScreen._buildAndPlaceOrder. That pattern read the product,
+  // decremented quantity/variant_quantity in memory, then wrote the whole
+  // document back with a plain .set() - a read-modify-write race: two
+  // concurrent orders on the same product could each read the same stale
+  // quantity, both decrement from it, and the second write would silently
+  // erase the first order's decrement (and overwrite whatever else - price,
+  // publish, etc. - a vendor happened to be editing on that doc at the same
+  // moment). Firestore transactions detect any conflicting write to the
+  // document made during the transaction and retry the whole callback with
+  // fresh data, so wrapping the exact same mutation logic in one makes it
+  // safe under concurrency without changing what gets written or how the
+  // -1 "unlimited stock" sentinel is handled.
+  static Future<void> decrementProductStock({
+    required String productId,
+    required int quantity,
+    String? variantId,
+  }) async {
+    final docRef = firestore.collection(PRODUCTS).doc(productId);
+    try {
+      await firestore.runTransaction((tx) async {
+        final snap = await tx.get(docRef);
+        if (!snap.exists || snap.data() == null) return;
+        final productModel = ProductModel.fromJson(snap.data()!);
+        if (variantId != null && productModel.itemAttributes?.variants != null) {
+          for (final v in productModel.itemAttributes!.variants!) {
+            if (v.variant_id == variantId && v.variant_quantity != '-1') {
+              v.variant_quantity = (int.parse(v.variant_quantity.toString()) - quantity).toString();
+            }
+          }
+        } else if (productModel.quantity != -1) {
+          productModel.quantity -= quantity;
+        }
+        tx.set(docRef, productModel.toJson());
+      });
+    } catch (stockErr) {
+      print('Stock update error for $productId: $stockErr');
+    }
+  }
+
   static Future<VendorModel?> updateVendor(VendorModel vendor) async {
     return await firestore.collection(VENDORS).doc(vendor.id).set(vendor.toJson()).then((document) {
       return vendor;
@@ -1321,130 +1369,126 @@ class FireStoreUtils {
     });
   }
 
-  static getPayFastSettingData() async {
-    firestore.collection(Setting).doc("payFastSettings").get().then((payFastData) {
-      try {
-        PayFastSettingData payFastSettingData = PayFastSettingData.fromJson(payFastData.data() ?? {});
-        UserPreference.setPayFastData(payFastSettingData);
-      } catch (error) {
-        print(error.toString());
-      }
-    });
+  static Future<void> getPayFastSettingData() async {
+    try {
+      final payFastData = await firestore.collection(Setting).doc("payFastSettings").get();
+      final payFastSettingData = PayFastSettingData.fromJson(payFastData.data() ?? {});
+      UserPreference.setPayFastData(payFastSettingData);
+    } catch (error) {
+      print(error.toString());
+    }
   }
 
-  static getPaypalSettingData() async {
-    firestore.collection(Setting).doc("paypalSettings").get().then((paypalData) {
-      try {
-        PaypalSettingData payplaDataModel = PaypalSettingData.fromJson(paypalData.data() ?? {});
-        UserPreference.setPayPalData(payplaDataModel);
-      } catch (error) {
-        print(error.toString());
-      }
-    });
+  static Future<void> getPaypalSettingData() async {
+    try {
+      final paypalData = await firestore.collection(Setting).doc("paypalSettings").get();
+      final payplaDataModel = PaypalSettingData.fromJson(paypalData.data() ?? {});
+      UserPreference.setPayPalData(payplaDataModel);
+    } catch (error) {
+      print(error.toString());
+    }
   }
 
-  static getMercadoPagoSettingData() async {
-    firestore.collection(Setting).doc("MercadoPago").get().then((mercadoPago) {
-      try {
-        MercadoPagoSettingData mercadoPagoDataModel = MercadoPagoSettingData.fromJson(mercadoPago.data() ?? {});
-        UserPreference.setMercadoPago(mercadoPagoDataModel);
-      } catch (error) {
-        print(error.toString());
-      }
-    });
+  static Future<void> getMercadoPagoSettingData() async {
+    try {
+      final mercadoPago = await firestore.collection(Setting).doc("MercadoPago").get();
+      final mercadoPagoDataModel = MercadoPagoSettingData.fromJson(mercadoPago.data() ?? {});
+      UserPreference.setMercadoPago(mercadoPagoDataModel);
+    } catch (error) {
+      print(error.toString());
+    }
   }
 
-  static getStripeSettingData() async {
-    firestore.collection(Setting).doc("stripeSettings").get().then((stripeData) {
-      try {
-        StripeSettingData stripeSettingData = StripeSettingData.fromJson(stripeData.data() ?? {});
-        UserPreference.setStripeData(stripeSettingData);
-      } catch (error) {
-        print(error.toString());
-      }
-    });
+  static Future<void> getStripeSettingData() async {
+    try {
+      final stripeData = await firestore.collection(Setting).doc("stripeSettings").get();
+      final stripeSettingData = StripeSettingData.fromJson(stripeData.data() ?? {});
+      UserPreference.setStripeData(stripeSettingData);
+    } catch (error) {
+      print(error.toString());
+    }
   }
 
-  static getFlutterWaveSettingData() async {
-    firestore.collection(Setting).doc("flutterWave").get().then((flutterWaveData) {
-      try {
-        FlutterWaveSettingData flutterWaveSettingData = FlutterWaveSettingData.fromJson(flutterWaveData.data() ?? {});
-
-        UserPreference.setFlutterWaveData(flutterWaveSettingData);
-      } catch (error) {}
-    });
+  static Future<void> getFlutterWaveSettingData() async {
+    try {
+      final flutterWaveData = await firestore.collection(Setting).doc("flutterWave").get();
+      final flutterWaveSettingData = FlutterWaveSettingData.fromJson(flutterWaveData.data() ?? {});
+      UserPreference.setFlutterWaveData(flutterWaveSettingData);
+    } catch (error) {}
   }
 
-  static getPayStackSettingData() async {
-    firestore.collection(Setting).doc("payStack").get().then((payStackData) {
-      try {
-        PayStackSettingData payStackSettingData = PayStackSettingData.fromJson(payStackData.data() ?? {});
-        UserPreference.setPayStackData(payStackSettingData);
-      } catch (error) {
-        print(error.toString());
-      }
-    });
+  static Future<void> getPayStackSettingData() async {
+    try {
+      final payStackData = await firestore.collection(Setting).doc("payStack").get();
+      final payStackSettingData = PayStackSettingData.fromJson(payStackData.data() ?? {});
+      UserPreference.setPayStackData(payStackSettingData);
+    } catch (error) {
+      print(error.toString());
+    }
   }
 
-
-  static getOrangeMoneySettingData() async {
-    firestore.collection(Setting).doc("orange_money_settings").get().then((payStackData) {
-      try {
-        OrangeMoney payStackSettingData = OrangeMoney.fromJson(payStackData.data() ?? {});
-        UserPreference.setOrangeData(payStackSettingData);
-      } catch (error) {
-        print(error.toString());
-      }
-    });
+  static Future<void> getOrangeMoneySettingData() async {
+    try {
+      final orangeData = await firestore.collection(Setting).doc("orange_money_settings").get();
+      final orangeMoneyData = OrangeMoney.fromJson(orangeData.data() ?? {});
+      UserPreference.setOrangeData(orangeMoneyData);
+    } catch (error) {
+      print(error.toString());
+    }
   }
 
-  static getXenditSettingData() async {
-    firestore.collection(Setting).doc("xendit_settings").get().then((payStackData) {
-      try {
-        Xendit payStackSettingData = Xendit.fromJson(payStackData.data() ?? {});
-
-        UserPreference.setXenditData(payStackSettingData);
-      } catch (error) {
-        print(error.toString());
-      }
-    });
+  static Future<void> getXenditSettingData() async {
+    try {
+      final xenditData = await firestore.collection(Setting).doc("xendit_settings").get();
+      final xenditModel = Xendit.fromJson(xenditData.data() ?? {});
+      UserPreference.setXenditData(xenditModel);
+    } catch (error) {
+      print(error.toString());
+    }
   }
 
-  static getMidTransSettingData() async {
-    firestore.collection(Setting).doc("midtrans_settings").get().then((payStackData) {
-      try {
-        MidTrans payStackSettingData = MidTrans.fromJson(payStackData.data() ?? {});
-        UserPreference.setMidTransData(payStackSettingData);
-      } catch (error) {
-        print(error.toString());
-      }
-    });
+  static Future<void> getMidTransSettingData() async {
+    try {
+      final midTransData = await firestore.collection(Setting).doc("midtrans_settings").get();
+      final midTransModel = MidTrans.fromJson(midTransData.data() ?? {});
+      UserPreference.setMidTransData(midTransModel);
+    } catch (error) {
+      print(error.toString());
+    }
   }
 
-  static getPhonePaySettingData() async {
-    firestore.collection(Setting).doc("phonepe_settings").get().then((data) {
-      try {
-        PhonePaySettingData settingData = PhonePaySettingData.fromJson(data.data() ?? {});
-        UserPreference.setPhonePayData(settingData);
-      } catch (error) {
-        print(error.toString());
-      }
-    });
+  static Future<void> getPhonePaySettingData() async {
+    try {
+      final data = await firestore.collection(Setting).doc("phonepe_settings").get();
+      final settingData = PhonePaySettingData.fromJson(data.data() ?? {});
+      UserPreference.setPhonePayData(settingData);
+    } catch (error) {
+      print(error.toString());
+    }
   }
 
-  static getPaytmSettingData() async {
-    firestore.collection(Setting).doc("PaytmSettings").get().then((paytmData) {
-      try {
-        PaytmSettingData paytmSettingData = PaytmSettingData.fromJson(paytmData.data() ?? {});
-        UserPreference.setPaytmData(paytmSettingData);
-      } catch (error) {
-        print(error.toString());
-      }
-    });
+  static Future<void> getPaytmSettingData() async {
+    try {
+      final paytmData = await firestore.collection(Setting).doc("PaytmSettings").get();
+      final paytmSettingData = PaytmSettingData.fromJson(paytmData.data() ?? {});
+      UserPreference.setPaytmData(paytmSettingData);
+    } catch (error) {
+      print(error.toString());
+    }
   }
 
   static getWalletSettingData() {
+    // TEMPORARY [FIRESTORE-PERF] - round-trip timing for the app-open-speed
+    // investigation. This is called from multiple sites (main.dart splash
+    // flow, ContainerScreen.initState, service_list_screen,
+    // location_permission_screen) — the absolute ISO8601 timestamp is what
+    // lets a given call be matched back to its caller in the logs. Remove
+    // once done.
+    final sw = Stopwatch()..start();
+    debugPrint('[FIRESTORE-PERF] getWalletSettingData() dispatched (${DateTime.now().toIso8601String()})');
     firestore.collection(Setting).doc('walletSettings').get().then((walletSetting) {
+      debugPrint('[FIRESTORE-PERF] getWalletSettingData() Firestore round-trip — '
+          '${sw.elapsedMilliseconds}ms (${DateTime.now().toIso8601String()})');
       try {
         bool walletEnable = walletSetting.data()!['isEnabled'];
         UserPreference.setWalletData(walletEnable);
@@ -1454,19 +1498,64 @@ class FireStoreUtils {
     });
   }
 
-  static getRazorPayDemo() async {
+  // Only Razorpay is enabled in production (confirmed 2026-08-02) - Stripe/
+  // Paypal/PayStack/FlutterWave/Paytm/PayFast/MercadoPago/OrangeMoney/
+  // Xendit/MidTrans/PhonePe are NOT fetched here anymore, so their
+  // UserPreference cache stays null and their payment tiles simply don't
+  // render (same as if disabled in admin) wherever they're read
+  // (PaymentScreen, walletScreen, gift_card_purchase_screen). Their fetch
+  // functions are left intact below, unused - re-add a gateway to the
+  // Future.wait list (or back to a plain await if it's the only other one)
+  // the day it's actually turned on in production, rather than deleting the
+  // integration entirely.
+  //
+  // Consumed by three payment-entry points that read UserPreference's local
+  // cache directly: PaymentScreen (the food-order path, reached only via
+  // CartScreen -> Place Order), walletScreen's topUpBalance() ("Add Money"
+  // tap), and gift_card_purchase_screen (reached only after the user picks a
+  // specific gift-card amount to buy). None of Cart/Wallet/GiftCard preload
+  // this on screen-open anymore — many sessions open the cart or check
+  // their wallet balance without ever paying. Splash/startup never calls
+  // this either.
+  //
+  // Instead, HomeScreen.initState() fires this unawaited, in the
+  // background, once Home's own critical fetches are already in flight
+  // (see the identical reasoning on loadRecommendationConfig above) — since
+  // virtually every session reaches Home, this is a one-time cost paid in
+  // the background well before checkout, so the *first* real checkout of
+  // the session still feels instant. The three payment-entry points above
+  // still `await` this call themselves as a safety net for the rare case a
+  // user reaches payment before Home's background call resolves — in
+  // almost every session that await returns immediately, since the cache
+  // is already warm by then.
+  //
+  // Memoized like loadRecommendationConfig above: the first caller in a
+  // session kicks off the real fetch and returns the in-flight Future;
+  // every caller after that — whether the fetch already finished or is
+  // still running — awaits that SAME Future rather than re-firing it or
+  // resolving instantly.
+  static Completer<void>? _paymentGatewaySettingsLoad;
+  static Future<void> ensurePaymentGatewaySettingsLoaded() {
+    final existing = _paymentGatewaySettingsLoad;
+    if (existing != null) return existing.future;
+    final completer = Completer<void>();
+    _paymentGatewaySettingsLoad = completer;
+    getRazorPayDemo().whenComplete(() {
+      if (!completer.isCompleted) completer.complete();
+    });
+    return completer.future;
+  }
+
+  static Future<void> getRazorPayDemo() async {
     // Reads the safe-fields-only mirror, not the real (now admin-only)
     // settings doc - see getRazorPay()'s comment above.
-    RazorPayModel userModel;
-    firestore.collection(SettingPublic).doc("razorpaySettings").get().then((user) {
-      try {
-        userModel = RazorPayModel.fromJson(user.data() ?? {});
-        UserPreference.setRazorPayData(userModel);
-        RazorPayModel fhg = UserPreference.getRazorPayData();
-      } catch (e) {
-        print('FireStoreUtils.getUserByID failed to parse user object ${user.id}');
-      }
-    });
+    try {
+      final user = await firestore.collection(SettingPublic).doc("razorpaySettings").get();
+      final userModel = RazorPayModel.fromJson(user.data() ?? {});
+      UserPreference.setRazorPayData(userModel);
+    } catch (e) {
+      print('FireStoreUtils.getUserByID failed to parse user object');
+    }
 
     //yield* razorPayStreamController.stream;
   }
@@ -1555,6 +1644,77 @@ class FireStoreUtils {
     _productsCachedAt[cacheKey] = now;
     return products;
   }
+
+  // ── Offers & Discounts (2026-08-03) ────────────────────────────────────────
+  // Categories are few and admin-curated, so a whole-list TTL cache is fine.
+  // Offers are fetched in full per category (see getAllActiveLocalOffers
+  // below, 2026-08-07) so no whole-list cache is kept for them - each
+  // category switch is its own fresh query.
+  static List<LocalOfferCategoryModel>? _localOfferCategoriesCache;
+  static DateTime? _localOfferCategoriesCachedAt;
+  static const Duration _localOffersCacheTtl = Duration(minutes: 10);
+
+  static void clearLocalOffersCache() {
+    _localOfferCategoriesCache = null;
+    _localOfferCategoriesCachedAt = null;
+  }
+
+  static Future<List<LocalOfferCategoryModel>> getLocalOfferCategories() async {
+    final now = DateTime.now();
+    if (_localOfferCategoriesCache != null &&
+        _localOfferCategoriesCachedAt != null &&
+        now.difference(_localOfferCategoriesCachedAt!) < _localOffersCacheTtl) {
+      return _localOfferCategoriesCache!;
+    }
+    final List<LocalOfferCategoryModel> categories = [];
+    try {
+      final snapshot = await firestore
+          .collection(LOCAL_OFFER_CATEGORIES)
+          .where('isActive', isEqualTo: true)
+          .orderBy('sortOrder')
+          .get();
+      for (final doc in snapshot.docs) {
+        categories.add(LocalOfferCategoryModel.fromJson(doc.data()));
+      }
+    } catch (e) {
+      log('FireStoreUtils.getLocalOfferCategories $e');
+    }
+    _localOfferCategoriesCache = categories;
+    _localOfferCategoriesCachedAt = now;
+    return categories;
+  }
+
+  /// All currently-active offers, optionally filtered to one category.
+  /// (2026-08-07) Replaced the old createdAt-cursor pagination - the list
+  /// screen's sort now depends on distance (computed client-side from live
+  /// GPS) and an admin-recommended flag, neither of which Firestore can
+  /// order by server-side, so ordering has to happen after everything is
+  /// fetched. [limit] is a safety cap, not a page size - at this app's
+  /// current business count this pulls the whole active set in one call;
+  /// revisit with real geo-bounded pagination if that count grows large.
+  static Future<List<LocalOfferModel>> getAllActiveLocalOffers({
+    String? categoryId,
+    int limit = 300,
+  }) async {
+    List<LocalOfferModel> offers = [];
+    try {
+      Query<Map<String, dynamic>> query = firestore.collection(LOCAL_OFFERS).where('isActive', isEqualTo: true);
+      if (categoryId != null && categoryId.isNotEmpty) {
+        query = query.where('categoryId', isEqualTo: categoryId);
+      }
+      final snapshot = await query.limit(limit).get();
+      // (2026-08-05) One document = one business now - every result here is
+      // its own standalone business, nothing to filter out (previously a
+      // business's extra offers were separate sibling documents that had to
+      // be excluded from this feed; now they live inside the same doc's own
+      // offers[] array instead - see LocalOfferModel.primary).
+      offers = snapshot.docs.map((d) => LocalOfferModel.fromJson(d.data())).toList();
+    } catch (e) {
+      log('FireStoreUtils.getAllActiveLocalOffers $e');
+    }
+    return offers;
+  }
+
 
   Future<List<ProductModel>> getAllProducts() async {
     final key = '${sectionConstantModel!.id}_all';
@@ -2183,16 +2343,20 @@ class FireStoreUtils {
 
   static List<OfferModel>? _allCouponsCache;
   static DateTime? _allCouponsCachedAt;
-  static const Duration _couponsCacheTtl = Duration(minutes: 30);
+  // 2026-08-05: shortened from 30 to 5 minutes at explicit request - coupons
+  // are admin-editable (enable/disable, expiry) and a 30-minute window meant
+  // a customer could keep seeing/applying a coupon the admin had already
+  // disabled for up to half an hour after the change went live.
+  static const Duration _couponsCacheTtl = Duration(minutes: 5);
 
   // Lets manual pull-to-refresh force a fresh coupon fetch instead of
-  // waiting out the 30-minute TTL, same pattern as clearVendorProductsCache.
+  // waiting out the 5-minute TTL, same pattern as clearVendorProductsCache.
   static void clearAllCouponsCache() {
     _allCouponsCache = null;
     _allCouponsCachedAt = null;
   }
 
-  /// Returns all enabled, non-expired coupons. Cached for 30 minutes.
+  /// Returns all enabled, non-expired coupons. Cached for 5 minutes.
   Future<List<OfferModel>> getAllCoupons() async {
     final now = DateTime.now();
     if (_allCouponsCache != null && _allCouponsCachedAt != null &&
@@ -2343,6 +2507,33 @@ class FireStoreUtils {
     );
   }
 
+  // Reuses Home's already-fetched whole-section catalog
+  // (getAllDelevryProducts/getAllTakeAWayProducts, cached under
+  // '${sectionId}_delivery'/'${sectionId}_takeaway') when it's warm,
+  // filtering client-side by vendorID instead of re-querying Firestore for
+  // data Home already has in memory — this is the common case, since
+  // reaching a vendor's product screen almost always means Home rendered
+  // first. Falls back to the original per-vendor query
+  // (getVendorProductsDelivery/TakeAWay, which populates its own
+  // '${vendorID}_vendor_all' cache key) on a genuine cache miss — e.g. the
+  // user reaches this screen before Home's background catalog fetch has
+  // resolved, or the section-wide TTL already expired — so correctness
+  // never depends on timing, only the read count does.
+  Future<List<ProductModel>> getVendorProductsPreferSectionCache(
+      String vendorID, {required bool takeAway}) async {
+    final sectionKey =
+        '${sectionConstantModel!.id}_${takeAway ? 'takeaway' : 'delivery'}';
+    final cached = _productsCache[sectionKey];
+    final cachedAt = _productsCachedAt[sectionKey];
+    if (cached != null && cachedAt != null &&
+        DateTime.now().difference(cachedAt) < _productsCacheTtl) {
+      return cached.where((p) => p.vendorID == vendorID).toList();
+    }
+    return takeAway
+        ? getVendorProductsTakeAWay(vendorID)
+        : getVendorProductsDelivery(vendorID);
+  }
+
   Future<List<ProductModel>> getVendorProductsTakeAWay(String vendorID) async {
     // Delivery/TakeAway filters are commented out server-side; filtering is
     // done client-side in newVendorProductsScreen. Same query → share cache.
@@ -2408,6 +2599,43 @@ class FireStoreUtils {
     return vendorCategoryModel;
   }
 
+  // Batches newVendorProductsScreen.dart's category cache-miss fallback into
+  // one query per chunk instead of one query per missing ID - same
+  // document-read cost per matched category, fewer round trips. whereIn
+  // caps at 30 values per Firestore's own limit; chunked defensively even
+  // though a single vendor's distinct category count is realistically
+  // always far below that, so this never silently drops categories if it
+  // ever isn't.
+  static Future<List<VendorCategoryModel>> getVendorCategoriesByIds(
+      List<String> vendorCategoryIds) async {
+    if (vendorCategoryIds.isEmpty) return [];
+    const chunkSize = 30;
+    final chunks = <List<String>>[];
+    for (var i = 0; i < vendorCategoryIds.length; i += chunkSize) {
+      final end = i + chunkSize < vendorCategoryIds.length
+          ? i + chunkSize
+          : vendorCategoryIds.length;
+      chunks.add(vendorCategoryIds.sublist(i, end));
+    }
+    final results = await Future.wait(chunks.map((chunk) async {
+      try {
+        final query = await firestore
+            .collection(CATEGORIES)
+            .where('id', whereIn: chunk)
+            .where('section_id', isEqualTo: sectionConstantModel!.id)
+            .where('publish', isEqualTo: true)
+            .get();
+        return query.docs
+            .map((d) => VendorCategoryModel.fromJson(d.data()))
+            .toList();
+      } catch (e) {
+        print('FireStoreUtils.getVendorCategoriesByIds Parse error $e');
+        return <VendorCategoryModel>[];
+      }
+    }));
+    return results.expand((r) => r).toList();
+  }
+
   Future<VendorCategoryModel?> getVendorCategoryByCategoryId(String vendorCategoryID) async {
     DocumentSnapshot<Map<String, dynamic>> documentReference = await firestore.collection(CATEGORIES).doc(vendorCategoryID).get();
     if (documentReference.data() != null && documentReference.exists) {
@@ -2465,6 +2693,67 @@ class FireStoreUtils {
       print('FireStoreUtils.getVendorByVendorID Parse error $e');
     }
     return productModel;
+  }
+
+  // Pure helper (2026-08-05, extracted for unit testing - see
+  // test/services/fetch_products_by_ids_test.dart) - dedupes then splits
+  // into chunks no larger than [chunkSize] (Firestore's whereIn limit,
+  // default 30). No Firestore/Firebase dependency, so this is testable in
+  // isolation from fetchProductsByIds' actual network calls, which this
+  // project has no mocking infrastructure for.
+  static List<List<String>> dedupeAndChunkIds(List<String> ids,
+      {int chunkSize = 30}) {
+    final uniqueIds = ids.toSet().toList();
+    if (uniqueIds.isEmpty) return [];
+    final chunks = <List<String>>[];
+    for (var i = 0; i < uniqueIds.length; i += chunkSize) {
+      final end =
+          i + chunkSize > uniqueIds.length ? uniqueIds.length : i + chunkSize;
+      chunks.add(uniqueIds.sublist(i, end));
+    }
+    return chunks;
+  }
+
+  // Batched product fetch (2026-08-05) - replaces N individual
+  // getProductByID() calls (previously one per cart line, fired in
+  // parallel via Future.wait but still N separate round-trips) with
+  // ceil(distinct/30) `where('id', whereIn: ...)` queries, chunked to
+  // Firestore's 30-value whereIn limit. IDs are deduplicated internally, so
+  // two cart lines that are different variants of the SAME base product
+  // (e.g. "Pizza - Large" and "Pizza - Medium", same id before the '~'
+  // split) only fetch that product once instead of twice. Filters on the
+  // 'id' field, not FieldPath.documentId(), to match getProductByID's own
+  // existing query exactly - not assumed to always equal the document ID.
+  //
+  // Returns a map keyed by product id. An id with no matching document
+  // (deleted product) is simply absent from the map - callers that already
+  // null-check a missing entry (both existing call sites did, for
+  // getProductByID's not-found-throws-then-caught-as-null behavior) need no
+  // other change.
+  Future<Map<String, ProductModel>> fetchProductsByIds(
+      List<String> productIds) async {
+    final result = <String, ProductModel>{};
+    final chunks = dedupeAndChunkIds(productIds);
+    if (chunks.isEmpty) return result;
+
+    await Future.wait(chunks.map((chunk) async {
+      try {
+        final snapshot =
+            await firestore.collection(PRODUCTS).where('id', whereIn: chunk).get();
+        for (final doc in snapshot.docs) {
+          try {
+            final product = ProductModel.fromJson(doc.data());
+            result[product.id] = product;
+          } catch (e) {
+            print('FireStoreUtils.fetchProductsByIds parse error $e');
+          }
+        }
+      } catch (e) {
+        print('FireStoreUtils.fetchProductsByIds chunk error $e');
+      }
+    }));
+
+    return result;
   }
 
   Future<RatingModel?> getReviewsbyID(String ordertId) async {
@@ -3339,9 +3628,15 @@ class FireStoreUtils {
     DocumentSnapshot? lastDoc,
     int limit = 20,
   }) async {
+    // orderBy(createdAt) - the review's own submission timestamp (set via
+    // Timestamp.now() at the moment the customer submits it in
+    // OrderRatingScreen.dart), not the underlying order's date. There was
+    // previously no orderBy at all here, so results came back in whatever
+    // arbitrary order Firestore happened to return them in.
     Query<Map<String, dynamic>> query = firestore
         .collection(Order_Rating)
         .where('VendorId', isEqualTo: vendorId)
+        .orderBy('createdAt', descending: true)
         .limit(limit);
     if (lastDoc != null) query = query.startAfterDocument(lastDoc);
     final snapshot = await query.get();

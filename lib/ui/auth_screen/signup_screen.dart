@@ -212,6 +212,10 @@ class _SignupScreenState extends State<SignupScreen> {
     if (mounted) setState(() => _isBusy = true);
     ShowToastDialog.showLoader('Creating your account...');
     final nameParts = _splitFullName(fullNameEditingController.text.toString());
+    // TEMPORARY [LOGIN-PERF] - timing instrumentation for the login/signup
+    // speed investigation, matching email_login_screen.dart/otp_screen.dart.
+    // Remove once done.
+    final totalSw = Stopwatch()..start();
     try {
       if (type == "mobileNumber") {
         // Phone uniqueness for signup is already enforced server-side
@@ -225,6 +229,7 @@ class _SignupScreenState extends State<SignupScreen> {
         // instead of paying for each strictly after the previous one
         // resolves. Explicit <dynamic> because NotificationService.getToken()
         // has no declared return type.
+        final batchSw = Stopwatch()..start();
         final signupResults = await Future.wait<dynamic>([
           _findExistingCustomerConflict(
             email: emailEditingController.text,
@@ -234,6 +239,7 @@ class _SignupScreenState extends State<SignupScreen> {
           NotificationService.getToken(),
           FireStoreUtils.getReferralUserByCode(referralCodeEditingController.text),
         ]);
+        debugPrint('[LOGIN-PERF] SIGNUP(phone) conflict+token+referral (parallel) — ${batchSw.elapsedMilliseconds}ms');
         final conflict = signupResults[0] as String?;
         final fcmToken = signupResults[1] as String;
         final referralUser = signupResults[2] as ReferralModel?;
@@ -250,7 +256,9 @@ class _SignupScreenState extends State<SignupScreen> {
         // device_id on file until its first subsequent login, leaving a
         // window where a second device could complete its own login-time
         // authorize() with nothing yet to conflict against.
+        final deviceSessionSw = Stopwatch()..start();
         final sessionResult = await DeviceSessionService.authorize(fcmToken: fcmToken);
+        debugPrint('[LOGIN-PERF] SIGNUP(phone) DeviceSessionService.authorize — ${deviceSessionSw.elapsedMilliseconds}ms');
         if (!sessionResult.allowed) {
           ShowToastDialog.showToast(sessionResult.message!);
           await auth.FirebaseAuth.instance.signOut();
@@ -268,18 +276,23 @@ class _SignupScreenState extends State<SignupScreen> {
         userModel.countryCode = countryCodeEditingController.text;
         userModel.createdAt = Timestamp.now();
 
+        final referralAddSw = Stopwatch()..start();
         await FireStoreUtils.referralAdd(ReferralModel(
           id: userModel.userID,
           referralBy: referralUser?.id ?? '',
           referralCode: getReferralCode(),
         ));
+        debugPrint('[LOGIN-PERF] SIGNUP(phone) referralAdd — ${referralAddSw.elapsedMilliseconds}ms');
 
+        final updateUserSw = Stopwatch()..start();
         await FireStoreUtils.updateCurrentUser(userModel);
+        debugPrint('[LOGIN-PERF] SIGNUP(phone) updateCurrentUser — ${updateUserSw.elapsedMilliseconds}ms');
         // Persist phone user ID so the session survives app restarts
         final signupPrefs = await SharedPreferences.getInstance();
         await signupPrefs.setString(PHONE_AUTH_USER_ID, userModel.userID);
         if (!mounted) return;
         ShowToastDialog.showToast('Welcome to QuickDash! Your account is ready.');
+        debugPrint('[LOGIN-PERF] SIGNUP(phone) TOTAL (tap to navigate) — ${totalSw.elapsedMilliseconds}ms');
         if (userModel.shippingAddress != null &&
             userModel.shippingAddress!.isNotEmpty) {
           if (userModel.shippingAddress!
@@ -291,8 +304,10 @@ class _SignupScreenState extends State<SignupScreen> {
           } else {
             MyAppState.selectedPosotion = userModel.shippingAddress!.first;
           }
-          pushAndRemoveUntil(context, ServiceListScreen());
+          debugPrint('[LOGIN-PERF] SIGNUP(phone) pushAndRemoveUntil(ServiceListScreen) — ${totalSw.elapsedMilliseconds}ms since tap');
+          pushAndRemoveUntil(context, ServiceListScreen(user: userModel));
         } else {
+          debugPrint('[LOGIN-PERF] SIGNUP(phone) pushAndRemoveUntil(LocationPermissionScreen) — ${totalSw.elapsedMilliseconds}ms since tap');
           pushAndRemoveUntil(context, LocationPermissionScreen());
         }
         return;
@@ -304,21 +319,25 @@ class _SignupScreenState extends State<SignupScreen> {
       // exact point it used to be requested.
       final fcmTokenFuture = NotificationService.getToken();
 
+      final conflictSw = Stopwatch()..start();
       final conflict = await _findExistingCustomerConflict(
         email: emailEditingController.text,
         phoneNumber: phoneNUmberEditingController.text,
         countryCode: countryCodeEditingController.text,
       );
+      debugPrint('[LOGIN-PERF] SIGNUP(email) _findExistingCustomerConflict — ${conflictSw.elapsedMilliseconds}ms');
       if (conflict != null) {
         ShowToastDialog.showToast(conflict);
         return;
       }
 
+      final createUserSw = Stopwatch()..start();
       final credential =
           await auth.FirebaseAuth.instance.createUserWithEmailAndPassword(
         email: emailEditingController.text.trim(),
         password: passwordEditingController.text.trim(),
       );
+      debugPrint('[LOGIN-PERF] SIGNUP(email) createUserWithEmailAndPassword — ${createUserSw.elapsedMilliseconds}ms');
       if (credential.user == null) {
         ShowToastDialog.showToast("Signup failed. Please try again.");
         return;
@@ -326,8 +345,12 @@ class _SignupScreenState extends State<SignupScreen> {
 
       // Same registration-at-signup fix as the mobileNumber branch above —
       // see its comment for why this can't just wait for the first login.
+      final fcmTokenSw = Stopwatch()..start();
       final fcmToken = await fcmTokenFuture;
+      debugPrint('[LOGIN-PERF] SIGNUP(email) getToken (FCM, awaited here) — ${fcmTokenSw.elapsedMilliseconds}ms');
+      final deviceSessionSw = Stopwatch()..start();
       final sessionResult = await DeviceSessionService.authorize(fcmToken: fcmToken);
+      debugPrint('[LOGIN-PERF] SIGNUP(email) DeviceSessionService.authorize — ${deviceSessionSw.elapsedMilliseconds}ms');
       if (!sessionResult.allowed) {
         ShowToastDialog.showToast(sessionResult.message!);
         await auth.FirebaseAuth.instance.signOut();
@@ -353,21 +376,28 @@ class _SignupScreenState extends State<SignupScreen> {
       userModel.countryCode = countryCodeEditingController.text;
       userModel.createdAt = Timestamp.now();
 
+      final referralAddSw = Stopwatch()..start();
       final referralUser = await referralFuture;
       await FireStoreUtils.referralAdd(ReferralModel(
         id: FireStoreUtils.getCurrentUid(),
         referralBy: referralUser?.id ?? '',
         referralCode: getReferralCode(),
       ));
+      debugPrint('[LOGIN-PERF] SIGNUP(email) referralFuture+referralAdd — ${referralAddSw.elapsedMilliseconds}ms');
 
+      final updateUserSw = Stopwatch()..start();
       await FireStoreUtils.updateCurrentUser(userModel);
+      debugPrint('[LOGIN-PERF] SIGNUP(email) updateCurrentUser — ${updateUserSw.elapsedMilliseconds}ms');
 
+      final emailVerifySw = Stopwatch()..start();
       try {
         await emailVerificationFuture;
+        debugPrint('[LOGIN-PERF] SIGNUP(email) sendEmailVerification — ${emailVerifySw.elapsedMilliseconds}ms');
       } catch (_) {}
 
       if (!mounted) return;
       ShowToastDialog.showToast('Welcome to QuickDash! Your account is ready.');
+      debugPrint('[LOGIN-PERF] SIGNUP(email) TOTAL (tap to navigate) — ${totalSw.elapsedMilliseconds}ms');
       if (userModel.shippingAddress != null &&
           userModel.shippingAddress!.isNotEmpty) {
         if (userModel.shippingAddress!
@@ -379,8 +409,10 @@ class _SignupScreenState extends State<SignupScreen> {
         } else {
           MyAppState.selectedPosotion = userModel.shippingAddress!.first;
         }
-        pushAndRemoveUntil(context, ServiceListScreen());
+        debugPrint('[LOGIN-PERF] SIGNUP(email) pushAndRemoveUntil(ServiceListScreen) — ${totalSw.elapsedMilliseconds}ms since tap');
+        pushAndRemoveUntil(context, ServiceListScreen(user: userModel));
       } else {
+        debugPrint('[LOGIN-PERF] SIGNUP(email) pushAndRemoveUntil(LocationPermissionScreen) — ${totalSw.elapsedMilliseconds}ms since tap');
         pushAndRemoveUntil(context, LocationPermissionScreen());
       }
     } on auth.FirebaseAuthException catch (e) {

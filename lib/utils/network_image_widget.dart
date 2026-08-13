@@ -1,7 +1,10 @@
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:emartconsumer/constants.dart';
+import 'package:emartconsumer/model/VendorModel.dart';
+import 'package:emartconsumer/services/perf_diagnostic_file_service.dart';
 import 'package:emartconsumer/theme/responsive.dart';
 import 'package:emartconsumer/widget/shimmer_box.dart';
 import 'package:flutter/material.dart';
@@ -54,10 +57,59 @@ String _preciseBunnyUrl(String url, BuildContext context, double? displayWidth) 
 /// what caused the brief shimmer/white flash on the incoming photo).
 /// Errors are swallowed — a failed precache just means that page falls back
 /// to its own normal loading state, same as if this was never called.
-void precacheCarouselImage(BuildContext context, String imageUrl, {double? width}) {
-  final resolvedUrl = _preciseBunnyUrl(imageUrl, context, width);
-  precacheImage(CachedNetworkImageProvider(resolvedUrl), context)
+/// [resizeWidth], if provided, must match whatever the corresponding
+/// NetworkImageWidget render call passes as its own `resizeWidth` (or
+/// `width`, if that render call doesn't override it) - otherwise this
+/// precaches a different-sized URL than the one that ends up on screen,
+/// and the cache silently misses.
+/// [cacheManager], if provided, must match the corresponding
+/// NetworkImageWidget render call's own `cacheManager` for the same reason -
+/// Flutter's in-memory image cache keys on the resolved URL regardless of
+/// which disk CacheManager fetched it, but a mismatched CacheManager still
+/// means a cold-start re-render (or a fresh CachedNetworkImage instance)
+/// re-downloads instead of hitting disk.
+void precacheCarouselImage(BuildContext context, String imageUrl,
+    {double? width, double? resizeWidth, BaseCacheManager? cacheManager}) {
+  final resolvedUrl = _preciseBunnyUrl(imageUrl, context, resizeWidth ?? width);
+  precacheImage(
+          CachedNetworkImageProvider(resolvedUrl, cacheManager: cacheManager),
+          context)
       .catchError((_) {});
+}
+
+/// Warms the vendor-details header image the instant a vendor is tapped
+/// (from Home, Search, QR scan, or anywhere else that opens
+/// NewVendorProductsScreen) - before that screen even starts building - so
+/// the larger hero-res fetch is already in flight, or finished, by the time
+/// its header actually renders. Without this, the header requests a bigger,
+/// precisely DPR-scaled image than the small thumbnail shown wherever the
+/// user tapped from, which is a guaranteed cache miss (different resolved
+/// URL) no matter how fast the network is - that gap is what reads as "the
+/// same image loading again, slowly".
+/// Mirrors newVendorProductsScreen.dart's own `_cardPhotos` getter and its
+/// header's width/resizeWidth math exactly, and shares its
+/// `perfDiagnosticCacheManager` cache store, so this is a genuine hit rather
+/// than landing in a different cache than the header reads from.
+void precacheVendorHeroImage(BuildContext context, VendorModel vendorModel) {
+  final allPhotos = vendorModel.photos
+      .map((e) => VendorModel.coverPhotoUrl(e))
+      .where((s) => s.isNotEmpty && s != 'null')
+      .toList();
+  final cardPhotos = allPhotos.length > 1 ? allPhotos.sublist(1) : <String>[];
+  final heroUrl =
+      cardPhotos.isNotEmpty ? cardPhotos.first : vendorModel.photo.toString();
+  if (heroUrl.isEmpty || heroUrl == 'null') return;
+
+  final heroWidth = Responsive.width(100, context);
+  final heroHeight = Responsive.height(40, context);
+  final heroResizeWidth = math.max(heroWidth, heroHeight * 16 / 9);
+  precacheCarouselImage(
+    context,
+    heroUrl,
+    width: heroWidth,
+    resizeWidth: heroResizeWidth,
+    cacheManager: perfDiagnosticCacheManager,
+  );
 }
 
 class NetworkImageWidget extends StatelessWidget {
@@ -78,6 +130,16 @@ class NetworkImageWidget extends StatelessWidget {
   // CachedNetworkImage uses its normal DefaultCacheManager — no behavior
   // change anywhere except the two HomeScreen sites under investigation.
   final BaseCacheManager? cacheManager;
+  // Optional override for the Bunny resize computation only - `width`
+  // continues to drive the widget's own layout size unchanged. Needed
+  // when `width` alone isn't a reliable proxy for how large the image will
+  // actually render under BoxFit.cover: if the display box is taller
+  // (relative to its width) than the source photo's own aspect ratio,
+  // cover scales the image up based on HEIGHT, not width, so a resize
+  // request sized off `width` alone fetches an image smaller than what
+  // ends up on screen - visible as blur from upscaling. Null (every
+  // existing call site) preserves the previous width-only behavior.
+  final double? resizeWidth;
 
   const NetworkImageWidget({
     super.key,
@@ -91,12 +153,13 @@ class NetworkImageWidget extends StatelessWidget {
     this.onLoaded,
     this.onError,
     this.cacheManager,
+    this.resizeWidth,
   });
 
   @override
   Widget build(BuildContext context) {
     return CachedNetworkImage(
-      imageUrl: _preciseBunnyUrl(imageUrl, context, width),
+      imageUrl: _preciseBunnyUrl(imageUrl, context, resizeWidth ?? width),
       cacheManager: cacheManager,
       fit: fit ?? BoxFit.fitWidth,
       height: height ?? Responsive.height(8, context),

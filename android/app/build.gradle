@@ -60,7 +60,7 @@ android {
     }
 
     defaultConfig {
-        applicationId "com.quickdash.customer"
+        applicationId "com.quickdash.hadeveloper"
         minSdkVersion 26
         multiDexEnabled = true
         targetSdkVersion 36
@@ -92,6 +92,25 @@ android {
             shrinkResources true // Enable resource shrinking
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
+    }
+
+    // razorpay_flutter pulls in com.razorpay:checkout, which bundles the
+    // card.io "scan your card with the camera" SDK (+ its OpenCV
+    // dependency) as prebuilt .so files compiled with an old, buggy NDK
+    // version — Play Console flags these specifically as a 16 KB-device
+    // crash risk (Test and release > "Your app could crash on 16 KB
+    // devices"). Razorpay hasn't published a fixed checkout build in 2+
+    // years (latest on Maven Central is still 1.6.41), so there's no
+    // version bump that fixes this. The app never enables card-scanning
+    // (Razorpay's checkout UI just shows the camera icon automatically
+    // when these libs are present) — manual card entry and all payments
+    // are unaffected by removing them.
+    packagingOptions {
+        exclude 'lib/*/libcardioDecider.so'
+        exclude 'lib/*/libcardioRecognizer.so'
+        exclude 'lib/*/libcardioRecognizer_tegra2.so'
+        exclude 'lib/*/libopencv_core.so'
+        exclude 'lib/*/libopencv_imgproc.so'
     }
 }
 configurations.all {

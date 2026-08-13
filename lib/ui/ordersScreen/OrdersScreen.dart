@@ -13,6 +13,7 @@ import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
+import 'package:emartconsumer/utils/network_image_widget.dart';
 import 'package:emartconsumer/ui/orderDetailsScreen/OrderDetailsScreen.dart';
 import 'package:emartconsumer/ui/billPayRequest/BillPayRequestScreen.dart';
 import 'package:emartconsumer/ui/orderRatingScreen/OrderRatingScreen.dart';
@@ -96,13 +97,32 @@ class _OrdersScreenState extends State<OrdersScreen> {
                   ),
                 );
               }
+              final allOrders = snapshot.data ?? [];
+
               // Delivery is off: hide only Delivery-type orders from
               // history (Dineaway/Takeaway order history stays visible),
               // same per-order isTakeaway check CartScreen uses for tax.
-              final visibleOrders = (snapshot.data ?? []).where((order) {
+              final visibleOrders = allOrders.where((order) {
                 final bool isDeliveryOrder =
                     order.takeAway == false || order.takeAway == null;
                 return !(isDeliveryOrder && !deliveryActive);
+              }).where((order) {
+                // A Bill Pay request the vendor sent (initiatedBy=='vendor')
+                // that gets accepted is NOT updated in place — Accept & Pay
+                // creates a brand-new order doc via the normal checkout flow
+                // (with the customer's own coupon/discount applied) linked
+                // back via billPayRequestId, and a Cloud Function reconciles
+                // the original request doc afterward. Both docs land in this
+                // same stream, so without this filter the customer sees the
+                // same bill twice — once at the pre-discount amount from
+                // when the vendor sent it, once at the final paid amount.
+                // Hide the original request once its paid twin exists; it
+                // stays visible on its own (Pending/Declined/Expired/
+                // Cancelled) whenever no such twin was ever created.
+                if (order.initiatedBy != 'vendor') return true;
+                final hasSupersedingOrder =
+                    allOrders.any((o) => o.billPayRequestId == order.id);
+                return !hasSupersedingOrder;
               }).toList();
 
               if (visibleOrders.isEmpty) {
@@ -132,6 +152,19 @@ class _OrdersScreenState extends State<OrdersScreen> {
   }
 
   double _calculateOrderTotal(OrderModel orderModel) {
+    // ── Pricing-verified path (2026-08-04) ──────────────────────────────
+    // order.pricing is the immutable, server-verified snapshot written by
+    // verifyOrderOnCreate a few seconds after order creation. Use its total
+    // directly when present so this row can never disagree with Order
+    // Details for the same order. Absent on pre-existing orders and briefly
+    // absent right after a brand-new order is created (before the trigger
+    // has run) — fall through to the original recompute below, unchanged.
+    final pricing = orderModel.pricing;
+    if (pricing != null && pricing['total'] != null) {
+      final dynamic totalVal = pricing['total'];
+      return totalVal is num ? totalVal.toDouble() : double.tryParse(totalVal.toString()) ?? 0.0;
+    }
+
     double total = 0.0;
     for (var element in orderModel.products) {
       try {
@@ -632,6 +665,7 @@ class _OrdersScreenState extends State<OrdersScreen> {
                   behavior: HitTestBehavior.opaque,
                   onTap: () {
                     BehaviorTracker.setNextEntrySource('Reorder');
+                    precacheVendorHeroImage(context, orderModel.vendor);
                     push(
                       context,
                       NewVendorProductsScreen(vendorModel: orderModel.vendor),

@@ -15,6 +15,7 @@ import 'package:emartconsumer/model/ProductModel.dart';
 import 'package:emartconsumer/model/Ratingmodel.dart';
 import 'package:emartconsumer/model/ReviewAttributeModel.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
+import 'package:emartconsumer/utils/network_image_widget.dart';
 import 'package:emartconsumer/model/variant_info.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/Indicator.dart';
@@ -1654,6 +1655,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                       child: InkWell(
                                         onTap: () async {
                                           BehaviorTracker.setNextEntrySource('ProductDetails');
+                                          precacheVendorHeroImage(context, widget.vendorModel);
                                           push(
                                             context,
                                             NewVendorProductsScreen(vendorModel: widget.vendorModel),

@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/model/BookTableModel.dart';
+import 'package:emartconsumer/services/device_session_service.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:flutter/foundation.dart';
@@ -73,6 +74,14 @@ class _TableOrderDetailsScreenState extends State<TableOrderDetailsScreen> {
   void initState() {
     super.initState();
     if (kDebugMode) print('Booking ID: ${widget.bookTableModel.id}');
+
+    // (2026-08-03) Device-session verification redesign - this confirmation
+    // is "shown at the restaurant" the same way an order/QR gate pass is,
+    // so it gets the same session-scoped fallback check as
+    // OrderDetailsScreen (see DeviceSessionService.enforceActiveForOrder's
+    // doc comment). Fire-and-forget; must never delay rendering the
+    // confirmation for the common (still-active) case.
+    DeviceSessionService.enforceActiveForOrder(context);
 
     if (widget.bookTableModel.status == ORDER_STATUS_ACCEPTED) {
       _polylinesFuture = PolylinePoints().getRouteBetweenCoordinates(

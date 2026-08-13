@@ -13,6 +13,7 @@ import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:flutter/material.dart';
 
 import '../vendorProductsScreen/newVendorProductsScreen.dart';
+import '../../utils/network_image_widget.dart';
 
 // import '../vendorProductsScreen/NewVendorProductsScreen.dart';
 
@@ -278,6 +279,7 @@ class _OffersScreenState extends State<OffersScreen> {
                                         InkWell(
                                           onTap: () {
                                             BehaviorTracker.setNextEntrySource('Offer');
+                                            precacheVendorHeroImage(context, vendorModel);
                                             push(
                                               context,
                                               NewVendorProductsScreen(vendorModel: vendorModel),

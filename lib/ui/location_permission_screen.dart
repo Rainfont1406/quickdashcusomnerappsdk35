@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:developer';
 
 import 'package:easy_localization/easy_localization.dart';
@@ -69,19 +70,17 @@ class _LocationPermissionScreenState extends State<LocationPermissionScreen> {
         return;
       }
 
-      await FireStoreUtils.getRazorPayDemo();
-      await FireStoreUtils.getPaypalSettingData();
-      await FireStoreUtils.getStripeSettingData();
-      await FireStoreUtils.getPayStackSettingData();
-      await FireStoreUtils.getFlutterWaveSettingData();
-      await FireStoreUtils.getPaytmSettingData();
-      await FireStoreUtils.getPayFastSettingData();
-      await FireStoreUtils.getWalletSettingData();
-      await FireStoreUtils.getMercadoPagoSettingData();
-      await FireStoreUtils.getOrangeMoneySettingData();
-      await FireStoreUtils.getXenditSettingData();
-      await FireStoreUtils.getMidTransSettingData();
-      await FireStoreUtils.getPhonePaySettingData();
+      // Was 12 sequential `await`ed calls (13 with wallet) — harmless when
+      // these functions were fire-and-forget internally, but since they were
+      // converted to real awaited Future<void>s this session (for the
+      // Cart/Wallet/GiftCard fix), that made this screen block on 12
+      // back-to-back round trips. Nothing below this point actually reads
+      // gateway settings — they're only consumed later by
+      // Cart/Payment/Wallet/GiftCard — so this can be unawaited like
+      // CartScreen's own call, and routed through the memoized guard so it
+      // also stops bypassing the session-wide dedup.
+      unawaited(FireStoreUtils.ensurePaymentGatewaySettingsLoaded());
+      FireStoreUtils.getWalletSettingData();
 
       SectionModel firstSection = sectionList[0];
       AppThemeData.primary300 =

@@ -9,6 +9,7 @@ import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/dineInScreen/dine_in_restaurant_details_screen.dart';
 import 'package:emartconsumer/ui/vendorProductsScreen/newVendorProductsScreen.dart';
+import 'package:emartconsumer/utils/network_image_widget.dart';
 import 'package:emartconsumer/widget/coming_soon_view.dart';
 import 'package:flutter/material.dart';
 
@@ -221,6 +222,7 @@ class _CategoryDetailsScreenState extends State<CategoryDetailsScreen>
           push(context,
               DineInRestaurantDetailsScreen(vendorModel: vendorModel));
         } else {
+          precacheVendorHeroImage(context, vendorModel);
           push(context, NewVendorProductsScreen(vendorModel: vendorModel));
         }
       },

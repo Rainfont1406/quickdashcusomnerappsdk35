@@ -148,11 +148,17 @@ class _PlaceOrderScreenState extends State<PlaceOrderScreen>
         await Future.delayed(const Duration(milliseconds: 2000));
       }
 
+      // Vendor push + customer email must fire regardless of whether this
+      // screen is still around - the order already exists server-side by
+      // this point, and neither call needs a BuildContext, so there is no
+      // reason to let a `mounted` check silently drop them.
+      _sendNotificationsBackground();
+
       if (!mounted) return;
 
-      // Clear cart and send notifications now that we have a resolved order
+      // Cart-clear does need a live context (Provider.of), so it stays
+      // gated here.
       Provider.of<CartDatabase>(context, listen: false).deleteAllProducts();
-      _sendNotificationsBackground();
 
       _stepTimer?.cancel();
       _pulseCtrl.stop();

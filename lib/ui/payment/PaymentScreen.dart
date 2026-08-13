@@ -14,7 +14,6 @@ import 'package:emartconsumer/model/FlutterWaveSettingDataModel.dart';
 import 'package:emartconsumer/model/PayFastSettingData.dart';
 import 'package:emartconsumer/model/PayStackSettingsModel.dart';
 import 'package:emartconsumer/model/PhonePaySettingData.dart';
-import 'package:emartconsumer/model/ProductModel.dart';
 import 'package:emartconsumer/model/createRazorPayOrderModel.dart';
 import 'package:emartconsumer/model/payStackURLModel.dart';
 import 'package:emartconsumer/model/payment_model/mid_trans.dart';
@@ -190,6 +189,13 @@ class PaymentScreenState extends State<PaymentScreen> {
         .doc(MyAppState.currentUser!.userID)
         .snapshots();
 
+    // CartScreen already triggered this on the way in here, but that call
+    // is fire-and-forget — awaiting the same memoized Future is what
+    // guarantees UserPreference's cache below is actually populated by the
+    // time we read it, whether CartScreen's call already finished or is
+    // still in flight.
+    await FireStoreUtils.ensurePaymentGatewaySettingsLoaded();
+
     // Each gateway is fetched independently so a missing/unconfigured gateway
     // (jsonData! crash inside UserPreference) cannot abort the entire load.
     razorPayData = await _safeLoad(() => UserPreference.getRazorPayData());
@@ -271,11 +277,19 @@ class PaymentScreenState extends State<PaymentScreen> {
     );
   }
 
-  showAlert(context, {required String response, required Color colors}) {
-    return ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text(response),
-      backgroundColor: colors,
-    ));
+  showAlert(context,
+      {required String response,
+      required Color colors,
+      Duration duration = const Duration(seconds: 4)}) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+        content: Text(response),
+        backgroundColor: colors,
+        duration: duration,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ));
   }
 
   @override
@@ -881,6 +895,19 @@ class PaymentScreenState extends State<PaymentScreen> {
       final appOrderId = await generateOrderId();
       debugPrint('[ORDER-PERF] generateOrderId — ${genIdSw.elapsedMilliseconds}ms');
       _pendingOrderId = appOrderId;
+
+      // Stage a complete draft BEFORE any payment happens, mirroring the
+      // wallet flow's order_drafts mechanism - if the app dies after
+      // Razorpay charges the customer but before this client's own order
+      // write completes, razorpayWebhook (server-side, payment.captured)
+      // promotes this exact draft into vendor_orders/{appOrderId} instead of
+      // trying to reconstruct a full order from bare payment metadata.
+      final draftSw = Stopwatch()..start();
+      final draftOrderModel = await _buildOrderModel(appOrderId);
+      final draftRef = FirebaseFirestore.instance.collection('order_drafts').doc(appOrderId);
+      await draftRef.set(draftOrderModel.toJson());
+      debugPrint('[ORDER-PERF] build+stage razorpay draft — ${draftSw.elapsedMilliseconds}ms');
+
       final verifySw = Stopwatch()..start();
       final result = await RazorPayController().createVerifiedOrderPayment(
         vendorID: widget.products.first.vendorID,
@@ -896,12 +923,17 @@ class PaymentScreenState extends State<PaymentScreen> {
       );
       debugPrint('[ORDER-PERF] createVerifiedOrderPayment — ${verifySw.elapsedMilliseconds}ms '
           '(TOTAL so far ${proceedSw.elapsedMilliseconds}ms)');
-      setState(() => _isLoadingDialogShowing = false);
+      // Dialog must come down regardless of widget lifecycle - a bare
+      // `mounted` guard here previously left it stuck forever whenever the
+      // widget happened to unmount between the await and this line.
+      dismissLoadingAndClearProcessing();
       if (!context.mounted) return;
-      Navigator.pop(context);
       if (result.success) {
         openCheckout(amount: result.amount, orderId: result.razorpayOrderId!, appOrderId: appOrderId);
       } else {
+        // No Razorpay order was even created - nothing to recover from.
+        // Clean up so order_drafts doesn't accumulate abandoned attempts.
+        draftRef.delete().catchError((_) {});
         _handleVerifiedPaymentFailure(result);
       }
     } else if (payFast) {
@@ -918,12 +950,23 @@ class PaymentScreenState extends State<PaymentScreen> {
           } else {
             toCheckOutScreen(true, _scaffoldKey.currentContext!, oid: orderId);
           }
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-              content: Text('Payment Successful!!'.tr() + '\n'), backgroundColor: Colors.green.shade400, duration: const Duration(seconds: 6)));
+          ScaffoldMessenger.of(context)
+            ..hideCurrentSnackBar()
+            ..showSnackBar(SnackBar(
+              content: Text('Payment Successful!!'.tr() + '\n'), backgroundColor: Colors.green.shade400, duration: const Duration(seconds: 6),
+              behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))));
         } else {
           Navigator.pop(context);
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-              content: Text('Payment Unsuccessful!!'.tr() + '\n'), backgroundColor: AppThemeData.primary500, duration: const Duration(seconds: 6)));
+          // showLoadingAlert() above set isProcessingOrder=true and it's
+          // never touched again on this path — without resetting it here,
+          // Pay Now stays permanently disabled after a failed/cancelled
+          // PayFast payment, with no way to retry short of leaving the screen.
+          if (mounted) setState(() => isProcessingOrder = false);
+          ScaffoldMessenger.of(context)
+            ..hideCurrentSnackBar()
+            ..showSnackBar(SnackBar(
+              content: Text('Payment Unsuccessful!!'.tr() + '\n'), backgroundColor: AppThemeData.primary500, duration: const Duration(seconds: 6),
+              behavior: SnackBarBehavior.floating, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))));
         }
       });
     } else if (wallet && walletBalanceError == true) {
@@ -940,6 +983,28 @@ class PaymentScreenState extends State<PaymentScreen> {
         final genIdSw = Stopwatch()..start();
         final orderId = await generateOrderId();
         debugPrint('[ORDER-PERF] generateOrderId — ${genIdSw.elapsedMilliseconds}ms');
+
+        // Root-cause fix (2026-08-06) for "wallet deducted but order never
+        // placed": the order this money is for is now built and staged as a
+        // draft BEFORE the wallet is touched. createVerifiedWalletOrder
+        // promotes that exact draft into the real vendor_orders/{orderId}
+        // doc INSIDE the same Firestore transaction as the wallet deduction
+        // (see paymentIntents.js), so the two can never happen one without
+        // the other — by the time this call returns success, the order is
+        // guaranteed to already exist server-side, regardless of anything
+        // that happens on the client afterwards (crash, lost connectivity).
+        // Because the order already exists, _finishAlreadyPlacedWalletOrder
+        // below deliberately does NOT go through placeOrder()/
+        // toCheckOutScreen's normal write path - a customer-side rewrite of
+        // an already-created order is correctly rejected by vendor_orders'
+        // security rules (2026-08-06 finding: this was actually happening,
+        // silently downgrading every wallet order into a "failed, retry"
+        // loop that then created a duplicate order on retry).
+        final draftSw = Stopwatch()..start();
+        final orderModel = await _buildOrderModel(orderId);
+        final draftRef = FirebaseFirestore.instance.collection('order_drafts').doc(orderId);
+        await draftRef.set(orderModel.toJson());
+        debugPrint('[ORDER-PERF] build+stage order draft — ${draftSw.elapsedMilliseconds}ms');
 
         // Server verifies price/coupon/special-discount/vendor-status,
         // claims device ownership, and atomically deducts the verified
@@ -962,30 +1027,80 @@ class PaymentScreenState extends State<PaymentScreen> {
         );
         debugPrint('[ORDER-PERF] createVerifiedWalletOrder — ${verifySw.elapsedMilliseconds}ms '
             '(TOTAL so far ${proceedSw.elapsedMilliseconds}ms)');
-        if (!context.mounted) return;
-        Navigator.pop(_scaffoldKey.currentContext!);
+        // Unconditional dismiss - the wallet has already been charged (or
+        // not) server-side by this point regardless of whether this screen
+        // is still on top; the dialog must never be able to outlive that.
+        dismissLoadingAndClearProcessing();
 
         if (!result.success) {
+          // Nothing was charged - the draft was never promoted. Clean it up
+          // so order_drafts doesn't accumulate abandoned attempts.
+          draftRef.delete().catchError((_) {});
           _handleVerifiedPaymentFailure(result);
           return;
         }
 
-        setState(() { isOrderPlaced = true; });
-        showAlert(_scaffoldKey.currentContext!, response: 'Payment Successful Via'.tr() + ' Wallet', colors: Colors.green);
-        if (widget.take_away!) {
-          placeOrder(_scaffoldKey.currentContext!, oid: orderId);
-        } else {
-          toCheckOutScreen(true, context, oid: orderId);
+        if (!context.mounted) return;
+        // dismissLoadingAndClearProcessing() above already cleared
+        // isProcessingOrder (it has to — that's what also dismisses the
+        // loading dialog), but the wallet is already debited at this point
+        // and there's still real work left (stock decrement, then
+        // navigating away) — re-set it so Pay Now stays disabled/spinning
+        // instead of being tappable again while the success banner is up.
+        setState(() { isOrderPlaced = true; isProcessingOrder = true; });
+        // Best-effort only (2026-08-06): the live wallet-balance
+        // StreamBuilder above can rebuild/detach _scaffoldKey's Element at
+        // almost this exact instant when the balance it's watching changes
+        // (which this very payment just caused) - a transient race that
+        // must never be allowed to stop the order confirmation/stock
+        // decrement below, which is what actually matters.
+        try {
+          showAlert(context, response: 'Payment Successful Via'.tr() + ' Wallet', colors: Colors.green, duration: const Duration(seconds: 2));
+        } catch (e) {
+          debugPrint('[ORDER-BUILD] showAlert (wallet success) failed, continuing anyway: $e');
         }
+        await _finishAlreadyPlacedWalletOrder(context, orderModel);
       }
     } else if (codPay) {
       paymentType = 'cod';
       paymentOption = 'Pay Via Cash On delivery'.tr();
-      setState(() { isOrderPlaced = true; });
+      showLoadingAlert();
       final genIdSw = Stopwatch()..start();
       final orderId = await generateOrderId();
       debugPrint('[ORDER-PERF] generateOrderId (COD) — ${genIdSw.elapsedMilliseconds}ms '
           '(TOTAL so far ${proceedSw.elapsedMilliseconds}ms)');
+
+      // Server verifies price/coupon/special-discount/vendor-status and
+      // claims device ownership before any order is created - see
+      // createVerifiedCodOrder in paymentIntents.js. COD itself charges
+      // nothing; this call blocks order creation the same way the
+      // gateway/wallet paths already do, closing the gap where COD
+      // previously never called any Cloud Function at all.
+      final verifySw = Stopwatch()..start();
+      final result = await RazorPayController().createVerifiedCodOrder(
+        vendorID: widget.products.first.vendorID,
+        products: widget.products,
+        orderId: orderId,
+        couponId: widget.couponId,
+        sectionId: sectionConstantModel?.id,
+        takeAway: widget.take_away ?? false,
+        deliveryCharge: widget.deliveryCharge,
+        tipValue: widget.tipValue,
+        taxSetting: widget.taxModel,
+        billPayRequestId: widget.billPayRequestId,
+        expectedBillVersion: widget.expectedBillVersion,
+      );
+      debugPrint('[ORDER-PERF] createVerifiedCodOrder — ${verifySw.elapsedMilliseconds}ms '
+          '(TOTAL so far ${proceedSw.elapsedMilliseconds}ms)');
+      dismissLoadingAndClearProcessing();
+      if (!context.mounted) return;
+
+      if (!result.success) {
+        _handleVerifiedPaymentFailure(result);
+        return;
+      }
+
+      setState(() { isOrderPlaced = true; });
       if (widget.take_away!) {
         placeOrder(_scaffoldKey.currentContext!, oid: orderId);
       } else {
@@ -993,21 +1108,33 @@ class PaymentScreenState extends State<PaymentScreen> {
       }
     } else if (Midtrans) {
       paymentType = 'midtrans';
+      // Unlike the other gateway branches above, these three never called
+      // showLoadingAlert()/isProcessingOrder=true before doing async work
+      // (payment-link/invoice creation) ahead of opening their WebView — Pay
+      // Now stayed tappable for that whole gap, letting a double-tap fire
+      // off multiple concurrent payment attempts.
+      setState(() => isProcessingOrder = true);
       midtransMakePayment(context: context, amount: widget.total.toString());
     } else if (orange) {
       paymentType = 'orangepay';
+      setState(() => isProcessingOrder = true);
       orangeMakePayment(context: context, amount: widget.total.toString());
     } else if (xendit) {
       paymentType = 'xendit';
+      setState(() => isProcessingOrder = true);
       xenditPayment(context, widget.total);
     } else if (phonePay) {
       paymentType = 'phonepe';
       _phonePayMakePayment(context: context, amount: widget.total);
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('Select Payment Method'.tr(), textAlign: TextAlign.center, style: const TextStyle(color: Colors.white)),
-        backgroundColor: AppThemeData.primary500,
-      ));
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(
+          content: Text('Select Payment Method'.tr(), textAlign: TextAlign.center, style: const TextStyle(color: Colors.white)),
+          backgroundColor: AppThemeData.primary500,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ));
     }
   }
 
@@ -1066,7 +1193,7 @@ class PaymentScreenState extends State<PaymentScreen> {
     // calling _handlePaymentSuccess / _handlePaymentError).
     if (_isLoadingDialogShowing) {
       setState(() => _isLoadingDialogShowing = false);
-      Navigator.pop(_scaffoldKey.currentContext!);
+      Navigator.of(_scaffoldKey.currentContext!, rootNavigator: true).pop();
     }
   }
 
@@ -1139,6 +1266,9 @@ class PaymentScreenState extends State<PaymentScreen> {
     showLoadingAlert();
     final appOrderId = await generateOrderId();
     _pendingOrderId = appOrderId;
+    final draftOrderModel = await _buildOrderModel(appOrderId);
+    final draftRef = FirebaseFirestore.instance.collection('order_drafts').doc(appOrderId);
+    await draftRef.set(draftOrderModel.toJson());
     final result = await RazorPayController().createVerifiedOrderPayment(
       vendorID: widget.products.first.vendorID,
       products: widget.products,
@@ -1151,12 +1281,12 @@ class PaymentScreenState extends State<PaymentScreen> {
       billPayRequestId: widget.billPayRequestId,
       expectedBillVersion: widget.expectedBillVersion,
     );
-    setState(() => _isLoadingDialogShowing = false);
+    dismissLoadingAndClearProcessing();
     if (!mounted) return;
-    Navigator.pop(_scaffoldKey.currentContext!);
     if (result.success) {
       openCheckoutUpi(amount: result.amount, orderId: result.razorpayOrderId!, appOrderId: appOrderId);
     } else {
+      draftRef.delete().catchError((_) {});
       _handleVerifiedPaymentFailure(result);
     }
   }
@@ -1166,6 +1296,9 @@ class PaymentScreenState extends State<PaymentScreen> {
     showLoadingAlert();
     final appOrderId = await generateOrderId();
     _pendingOrderId = appOrderId;
+    final draftOrderModel = await _buildOrderModel(appOrderId);
+    final draftRef = FirebaseFirestore.instance.collection('order_drafts').doc(appOrderId);
+    await draftRef.set(draftOrderModel.toJson());
     final result = await RazorPayController().createVerifiedOrderPayment(
       vendorID: widget.products.first.vendorID,
       products: widget.products,
@@ -1178,12 +1311,12 @@ class PaymentScreenState extends State<PaymentScreen> {
       billPayRequestId: widget.billPayRequestId,
       expectedBillVersion: widget.expectedBillVersion,
     );
-    setState(() => _isLoadingDialogShowing = false);
+    dismissLoadingAndClearProcessing();
     if (!mounted) return;
-    Navigator.pop(_scaffoldKey.currentContext!);
     if (result.success) {
       openCheckoutCard(amount: result.amount, orderId: result.razorpayOrderId!, appOrderId: appOrderId);
     } else {
+      draftRef.delete().catchError((_) {});
       _handleVerifiedPaymentFailure(result);
     }
   }
@@ -1195,6 +1328,21 @@ class PaymentScreenState extends State<PaymentScreen> {
   // redirect to login), not left as an inline error toast on a screen the
   // user is no longer actually authorized to be transacting from.
   void _handleVerifiedPaymentFailure(VerifiedPaymentOrderResult result) {
+    // (2026-08-08) Every call site above already pops the "Processing
+    // Payment" dialog before reaching here, but none of them reset the flag
+    // that dialog set (isProcessingOrder/_isLoadingDialogShowing) - so a
+    // single rejected wallet/gateway attempt (insufficient balance, vendor
+    // closed, bill updated, anything) permanently disabled the Pay Now
+    // button for the rest of this screen's lifetime, since its onPressed is
+    // gated on isProcessingOrder. Reset here, once, for every failure path
+    // that funnels through this shared handler, instead of relying on each
+    // call site to remember it individually.
+    if (mounted) {
+      setState(() {
+        isProcessingOrder = false;
+        _isLoadingDialogShowing = false;
+      });
+    }
     if (result.deviceSuperseded) {
       DeviceSessionService.handleSessionInvalidated(
         _scaffoldKey.currentContext,
@@ -1259,7 +1407,14 @@ class PaymentScreenState extends State<PaymentScreen> {
     final orderId = await generateOrderId();
 
     // Same server-verified, atomic path as the other wallet handler (see
-    // _onProceed) — no client-side wallet write on this path either.
+    // _onProceed) — no client-side wallet write on this path either. Same
+    // order-draft staging too (see the comment at the other call site) so
+    // this entry point closes the same "wallet charged, order never
+    // created" gap.
+    final orderModel = await _buildOrderModel(orderId);
+    final draftRef = FirebaseFirestore.instance.collection('order_drafts').doc(orderId);
+    await draftRef.set(orderModel.toJson());
+
     final result = await RazorPayController().createVerifiedWalletOrder(
       vendorID: widget.products.first.vendorID,
       products: widget.products,
@@ -1273,8 +1428,56 @@ class PaymentScreenState extends State<PaymentScreen> {
       billPayRequestId: widget.billPayRequestId,
       expectedBillVersion: widget.expectedBillVersion,
     );
+    dismissLoadingAndClearProcessing();
     if (!mounted) return;
-    Navigator.pop(_scaffoldKey.currentContext!);
+
+    if (!result.success) {
+      draftRef.delete().catchError((_) {});
+      _handleVerifiedPaymentFailure(result);
+      return;
+    }
+
+    if (!mounted) return;
+    // See the identical comment at the other wallet call site (_onProceed)
+    // — re-set isProcessingOrder so Pay Now stays disabled/spinning through
+    // the success banner and stock-decrement/navigation, instead of being
+    // tappable again right after the wallet's already been charged.
+    setState(() { isOrderPlaced = true; isProcessingOrder = true; });
+    // Best-effort only - see the identical comment at the other wallet
+    // call site (_onProceed) for why this must never block the
+    // confirmation/stock-decrement step below.
+    try {
+      showAlert(context, response: 'Payment Successful Via'.tr() + ' Wallet', colors: Colors.green, duration: const Duration(seconds: 2));
+    } catch (e) {
+      debugPrint('[ORDER-BUILD] showAlert (wallet success) failed, continuing anyway: $e');
+    }
+    await _finishAlreadyPlacedWalletOrder(context, orderModel);
+  }
+
+  void _handleCodSelected() async {
+    paymentType = 'cod';
+    paymentOption = 'Pay Via Cash On delivery'.tr();
+    showLoadingAlert();
+    final orderId = await generateOrderId();
+
+    // See the identical comment at the other createVerifiedCodOrder call
+    // site above (the codPay branch) - same server-side verification and
+    // device-ownership claim, required before any order is created.
+    final result = await RazorPayController().createVerifiedCodOrder(
+      vendorID: widget.products.first.vendorID,
+      products: widget.products,
+      orderId: orderId,
+      couponId: widget.couponId,
+      sectionId: sectionConstantModel?.id,
+      takeAway: widget.take_away ?? false,
+      deliveryCharge: widget.deliveryCharge,
+      tipValue: widget.tipValue,
+      taxSetting: widget.taxModel,
+      billPayRequestId: widget.billPayRequestId,
+      expectedBillVersion: widget.expectedBillVersion,
+    );
+    dismissLoadingAndClearProcessing();
+    if (!mounted) return;
 
     if (!result.success) {
       _handleVerifiedPaymentFailure(result);
@@ -1282,19 +1485,6 @@ class PaymentScreenState extends State<PaymentScreen> {
     }
 
     setState(() { isOrderPlaced = true; });
-    showAlert(_scaffoldKey.currentContext!, response: 'Payment Successful Via'.tr() + ' Wallet', colors: Colors.green);
-    if (widget.take_away!) {
-      placeOrder(_scaffoldKey.currentContext!, oid: orderId);
-    } else {
-      toCheckOutScreen(true, _scaffoldKey.currentContext!, oid: orderId);
-    }
-  }
-
-  void _handleCodSelected() async {
-    paymentType = 'cod';
-    paymentOption = 'Pay Via Cash On delivery'.tr();
-    setState(() { isOrderPlaced = true; });
-    final orderId = await generateOrderId();
     if (widget.take_away!) {
       placeOrder(_scaffoldKey.currentContext!, oid: orderId);
     } else {
@@ -1399,7 +1589,7 @@ class PaymentScreenState extends State<PaymentScreen> {
     paymentInProgressNotifier.value = false;
     if (_isLoadingDialogShowing) {
       setState(() => _isLoadingDialogShowing = false);
-      Navigator.pop(_scaffoldKey.currentContext!);
+      Navigator.of(_scaffoldKey.currentContext!, rootNavigator: true).pop();
     }
 
     // Money is now debited — lock back navigation.
@@ -1431,14 +1621,18 @@ class PaymentScreenState extends State<PaymentScreen> {
 
   void _handleExternalWaller(ExternalWalletResponse response) {
     paymentInProgressNotifier.value = false;
-    Navigator.pop(_scaffoldKey.currentContext!);
-    ScaffoldMessenger.of(_scaffoldKey.currentContext!).showSnackBar(SnackBar(
-      content: Text(
-        "Payment Processing!! via".tr() + "\n" + response.walletName!,
-      ),
-      backgroundColor: Colors.blue.shade400,
-      duration: const Duration(seconds: 8),
-    ));
+    Navigator.of(_scaffoldKey.currentContext!, rootNavigator: true).pop();
+    ScaffoldMessenger.of(_scaffoldKey.currentContext!)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+        content: Text(
+          "Payment Processing!! via".tr() + "\n" + response.walletName!,
+        ),
+        backgroundColor: Colors.blue.shade400,
+        duration: const Duration(seconds: 8),
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ));
   }
 
   void _handlePaymentError(PaymentFailureResponse response) {
@@ -1452,11 +1646,15 @@ class PaymentScreenState extends State<PaymentScreen> {
         description = lom.error.description;
       }
     } catch (_) {}
-    ScaffoldMessenger.of(_scaffoldKey.currentContext!).showSnackBar(SnackBar(
-      content: Text("Payment Failed!!".tr() + "\n" + description),
-      backgroundColor: AppThemeData.primary500,
-      duration: const Duration(seconds: 8),
-    ));
+    ScaffoldMessenger.of(_scaffoldKey.currentContext!)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+        content: Text("Payment Failed!!".tr() + "\n" + description),
+        backgroundColor: AppThemeData.primary500,
+        duration: const Duration(seconds: 8),
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ));
   }
 
   ///Stripe payment function
@@ -1512,30 +1710,37 @@ class PaymentScreenState extends State<PaymentScreen> {
         }
 
         ScaffoldMessenger.of(_scaffoldKey.currentContext!)
-            .showSnackBar(SnackBar(
-          content: Text("Payment Successful!!".tr()),
-          duration: const Duration(seconds: 8),
-          backgroundColor: Colors.green,
-        ));
+          ..hideCurrentSnackBar()
+          ..showSnackBar(SnackBar(
+            content: Text("Payment Successful!!".tr()),
+            duration: const Duration(seconds: 8),
+            backgroundColor: Colors.green,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          ));
         paymentIntentData = null;
       }).onError((error, stackTrace) {
-        Navigator.pop(_scaffoldKey.currentContext!);
+        Navigator.of(_scaffoldKey.currentContext!, rootNavigator: true).pop();
         var lo1 = jsonEncode(error);
         var lo2 = jsonDecode(lo1);
         AppDialog.showError(context, message: 'Payment failed. Please try again.');
       });
     } on stripe1.StripeException catch (e) {
-      Navigator.pop(_scaffoldKey.currentContext!);
+      Navigator.of(_scaffoldKey.currentContext!, rootNavigator: true).pop();
       var lo1 = jsonEncode(e);
       var lo2 = jsonDecode(lo1);
       AppDialog.showError(context, message: 'Payment failed. Please try again.');
     } catch (e) {
-      Navigator.pop(_scaffoldKey.currentContext!);
-      ScaffoldMessenger.of(_scaffoldKey.currentContext!).showSnackBar(SnackBar(
-        content: Text("$e"),
-        duration: const Duration(seconds: 8),
-        backgroundColor: AppThemeData.primary500,
-      ));
+      Navigator.of(_scaffoldKey.currentContext!, rootNavigator: true).pop();
+      ScaffoldMessenger.of(_scaffoldKey.currentContext!)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(
+          content: Text("$e"),
+          duration: const Duration(seconds: 8),
+          backgroundColor: AppThemeData.primary500,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ));
     }
   }
 
@@ -1640,7 +1845,7 @@ class PaymentScreenState extends State<PaymentScreen> {
   //             print(value);
   //             payPalCurrModel.PayPalCurrencyCodeErrorModel settleResult =
   //                 payPalCurrModel.PayPalCurrencyCodeErrorModel.fromJson(value);
-  //             Navigator.pop(_scaffoldKey.currentContext!);
+  //             Navigator.of(_scaffoldKey.currentContext!, rootNavigator: true).pop();
   //             ScaffoldMessenger.of(context).showSnackBar(SnackBar(
   //               content:
   //                   Text("Status :".tr() + " ${settleResult.data.message}"),
@@ -1651,7 +1856,7 @@ class PaymentScreenState extends State<PaymentScreen> {
   //         } else {
   //           PayPalErrorSettleModel settleResult =
   //               PayPalErrorSettleModel.fromJson(value);
-  //           Navigator.pop(_scaffoldKey.currentContext!);
+  //           Navigator.of(_scaffoldKey.currentContext!, rootNavigator: true).pop();
   //           ScaffoldMessenger.of(_scaffoldKey.currentContext!)
   //               .showSnackBar(SnackBar(
   //             content: Text("Status :".tr() + " ${settleResult.data.message}"),
@@ -1661,7 +1866,7 @@ class PaymentScreenState extends State<PaymentScreen> {
   //         }
   //       });
   //     } else {
-  //       Navigator.pop(_scaffoldKey.currentContext!);
+  //       Navigator.of(_scaffoldKey.currentContext!, rootNavigator: true).pop();
   //       ScaffoldMessenger.of(_scaffoldKey.currentContext!)
   //           .showSnackBar(SnackBar(
   //         content: Text("Status :".tr() + "Payment Unsuccessful!!".tr()),
@@ -1835,20 +2040,20 @@ class PaymentScreenState extends State<PaymentScreen> {
         }
       }).catchError((onError) {
         if (onError is PlatformException) {
-          Navigator.pop(_scaffoldKey.currentContext!);
+          Navigator.of(_scaffoldKey.currentContext!, rootNavigator: true).pop();
 
           result = onError.message.toString() + " \n  " + onError.code.toString();
           showAlert(_scaffoldKey.currentContext!, response: onError.message.toString(), colors: AppThemeData.primary500);
         } else {
 
           result = onError.toString();
-          Navigator.pop(_scaffoldKey.currentContext!);
+          Navigator.of(_scaffoldKey.currentContext!, rootNavigator: true).pop();
           showAlert(_scaffoldKey.currentContext!, response: result, colors: AppThemeData.primary500);
         }
       });
     } catch (err) {
       result = err.toString();
-      Navigator.pop(_scaffoldKey.currentContext!);
+      Navigator.of(_scaffoldKey.currentContext!, rootNavigator: true).pop();
       showAlert(_scaffoldKey.currentContext!, response: result, colors: AppThemeData.primary500);
     }*/
   }
@@ -1898,7 +2103,7 @@ class PaymentScreenState extends State<PaymentScreen> {
     final data = jsonDecode(response.body);
     if (data["body"]["txnToken"] == null ||
         data["body"]["txnToken"].toString().isEmpty) {
-      Navigator.pop(_scaffoldKey.currentContext!);
+      Navigator.of(_scaffoldKey.currentContext!, rootNavigator: true).pop();
       showAlert(_scaffoldKey.currentContext!,
           response: "something went wrong, please contact admin.".tr(),
           colors: AppThemeData.primary500);
@@ -1933,20 +2138,26 @@ class PaymentScreenState extends State<PaymentScreen> {
             toCheckOutScreen(true, _scaffoldKey.currentContext!, oid: orderId);
           }
           ScaffoldMessenger.of(_scaffoldKey.currentContext!)
-              .showSnackBar(SnackBar(
-            content: Text("Payment Successful!!".tr() + "\n"),
-            backgroundColor: Colors.green,
-          ));
+            ..hideCurrentSnackBar()
+            ..showSnackBar(SnackBar(
+              content: Text("Payment Successful!!".tr() + "\n"),
+              backgroundColor: Colors.green,
+              behavior: SnackBarBehavior.floating,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            ));
         } else {
-          Navigator.pop(_scaffoldKey.currentContext!);
+          Navigator.of(_scaffoldKey.currentContext!, rootNavigator: true).pop();
           ScaffoldMessenger.of(_scaffoldKey.currentContext!)
-              .showSnackBar(SnackBar(
-            content: Text("Payment UnSuccessful!!".tr() + "\n"),
-            backgroundColor: AppThemeData.primary500,
-          ));
+            ..hideCurrentSnackBar()
+            ..showSnackBar(SnackBar(
+              content: Text("Payment UnSuccessful!!".tr() + "\n"),
+              backgroundColor: AppThemeData.primary500,
+              behavior: SnackBarBehavior.floating,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            ));
         }
       } else {
-        Navigator.pop(_scaffoldKey.currentContext!);
+        Navigator.of(_scaffoldKey.currentContext!, rootNavigator: true).pop();
         showAlert(_scaffoldKey.currentContext!,
             response: "something went wrong, please contact admin.".tr(),
             colors: AppThemeData.primary500);
@@ -2101,8 +2312,12 @@ class PaymentScreenState extends State<PaymentScreen> {
             toCheckOutScreen(true, _scaffoldKey.currentContext!, oid: orderId);
           }
         } else {
+          if (mounted) setState(() => isProcessingOrder = false);
           ShowToastDialog.showToast("Payment Unsuccessful!!");
         }
+      } else {
+        if (mounted) setState(() => isProcessingOrder = false);
+        ShowToastDialog.showToast("Something went wrong, please contact admin.");
       }
     });
   }
@@ -2182,9 +2397,11 @@ class PaymentScreenState extends State<PaymentScreen> {
           toCheckOutScreen(true, _scaffoldKey.currentContext!, oid: orderId);
         }
       } else {
+        if (mounted) setState(() => isProcessingOrder = false);
         ShowToastDialog.showToast("Payment Unsuccessful!!");
       }
     } else {
+      if (mounted) setState(() => isProcessingOrder = false);
       ShowToastDialog.showToast("Payment Unsuccessful!!");
     }
   }
@@ -2300,8 +2517,12 @@ class PaymentScreenState extends State<PaymentScreen> {
             toCheckOutScreen(true, _scaffoldKey.currentContext!, oid: orderId);
           }
         } else {
+          if (mounted) setState(() => isProcessingOrder = false);
           ShowToastDialog.showToast("Payment Unsuccessful!!");
         }
+      } else {
+        if (mounted) setState(() => isProcessingOrder = false);
+        ShowToastDialog.showToast("Something went wrong, please contact admin.");
       }
     });
   }
@@ -2360,7 +2581,7 @@ class PaymentScreenState extends State<PaymentScreen> {
         false,
       );
 
-      Navigator.pop(_scaffoldKey.currentContext!); // dismiss loading
+      Navigator.of(_scaffoldKey.currentContext!, rootNavigator: true).pop(); // dismiss loading
 
       final response = await PhonePePaymentSdk.startTransaction(
         base64Body,
@@ -2375,7 +2596,7 @@ class PaymentScreenState extends State<PaymentScreen> {
         showLoadingAlert();
         final verified = await _checkPhonePayStatus(transactionId);
         if (Navigator.canPop(_scaffoldKey.currentContext!)) {
-          Navigator.pop(_scaffoldKey.currentContext!);
+          Navigator.of(_scaffoldKey.currentContext!, rootNavigator: true).pop();
         }
         if (verified) {
           ShowToastDialog.showToast('Payment Successful!!'.tr());
@@ -2397,7 +2618,7 @@ class PaymentScreenState extends State<PaymentScreen> {
     } catch (e) {
       debugPrint('PhonePe payment error: $e');
       if (Navigator.canPop(_scaffoldKey.currentContext!)) {
-        Navigator.pop(_scaffoldKey.currentContext!);
+        Navigator.of(_scaffoldKey.currentContext!, rootNavigator: true).pop();
       }
       setState(() => isProcessingOrder = false);
       ShowToastDialog.showToast(e.toString().replaceFirst('Exception: ', ''));
@@ -2485,7 +2706,17 @@ class PaymentScreenState extends State<PaymentScreen> {
 
   /// Core Firestore write — builds and saves the order, updates stock counts.
   /// Used by both [placeOrder] (COD/wallet) and [_handlePaymentSuccess] (Razorpay).
-  Future<OrderModel> _buildAndPlaceOrder(String oid) async {
+  // Pure construction, no Firestore write - split out of _buildAndPlaceOrder
+  // (2026-08-06) so the wallet payment flow can build the exact same
+  // OrderModel it would eventually write and stage it as a draft BEFORE the
+  // wallet is charged (see the wallet branch of onTapPaymentOption for why).
+  Future<OrderModel> _buildOrderModel(String oid) async {
+    // TEMPORARY [ORDER-PERF] - step-level instrumentation (2026-08-06) to
+    // pin down exactly which step throws/stalls in the intermittent
+    // "order failed after payment succeeded" reports. Remove once root
+    // cause is confirmed and fixed.
+    final buildSw = Stopwatch()..start();
+    debugPrint('[ORDER-BUILD] _buildOrderModel($oid) START');
     // For Razorpay orders, confirm the payment signature server-side before
     // ever writing the order doc — a spoofed/absent signature must not
     // result in an order (verifyOrderOnCreate would later flag it as fraud,
@@ -2495,12 +2726,14 @@ class PaymentScreenState extends State<PaymentScreen> {
     final pendingResponse = _pendingRazorpayResponse;
     _pendingRazorpayResponse = null;
     if (pendingResponse != null) {
+      debugPrint('[ORDER-BUILD] verifyPayment (razorpay) START — +${buildSw.elapsedMilliseconds}ms');
       final verifyResult = await RazorPayController().verifyPayment(
         razorpayOrderId: pendingResponse.orderId ?? '',
         razorpayPaymentId: pendingResponse.paymentId ?? '',
         razorpaySignature: pendingResponse.signature ?? '',
         purpose: 'order',
       );
+      debugPrint('[ORDER-BUILD] verifyPayment (razorpay) END — +${buildSw.elapsedMilliseconds}ms success=${verifyResult.success}');
       if (!verifyResult.success) {
         throw Exception(verifyResult.errorMessage ?? 'Payment verification failed. Please contact support.');
       }
@@ -2525,9 +2758,11 @@ class PaymentScreenState extends State<PaymentScreen> {
       tempProduc.add(tempCart);
     }
 
+    debugPrint('[ORDER-BUILD] getVendorByVendorID START — +${buildSw.elapsedMilliseconds}ms');
     VendorModel vendorModel = await FireStoreUtils()
         .getVendorByVendorID(widget.products.first.vendorID)
         .whenComplete(() => setPrefData());
+    debugPrint('[ORDER-BUILD] getVendorByVendorID END — +${buildSw.elapsedMilliseconds}ms');
 
     // Combo Purchase Learning (2026-07-24) - see CheckoutScreen.dart's
     // identical block for the full rationale (zero-extra-read cache
@@ -2620,7 +2855,24 @@ class PaymentScreenState extends State<PaymentScreen> {
       analyticsSnapshot: analyticsSnapshot,
     );
 
+    debugPrint('[ORDER-BUILD] _buildOrderModel($oid) END — +${buildSw.elapsedMilliseconds}ms TOTAL');
+    return orderModel;
+  }
+
+  Future<OrderModel> _buildAndPlaceOrder(String oid) async {
+    final placeSw = Stopwatch()..start();
+    debugPrint('[ORDER-BUILD] _buildAndPlaceOrder($oid) START');
+    final orderModel = await _buildOrderModel(oid);
+    debugPrint('[ORDER-BUILD] placeOrderWithTakeAWay START — +${placeSw.elapsedMilliseconds}ms');
     final placedOrder = await FireStoreUtils().placeOrderWithTakeAWay(orderModel);
+    debugPrint('[ORDER-BUILD] placeOrderWithTakeAWay END — +${placeSw.elapsedMilliseconds}ms');
+    // Order now durably exists in vendor_orders - the pre-checkout draft
+    // (staged in the razorpay branch of onTapPaymentOption/_handleUpiSelected/
+    // _handleCardSelected) has served its purpose. Best-effort: if this
+    // delete fails, razorpayWebhook's own existence-check against
+    // vendor_orders/{oid} still makes a leftover draft harmless (it just
+    // never gets read).
+    FirebaseFirestore.instance.collection('order_drafts').doc(oid).delete().catchError((_) {});
 
     // NOTE (2026-07-22): purchase-preference tracking (kEvtOrderCompleted/
     // kEvtProductOrdered) deliberately does NOT fire here anymore - a
@@ -2633,32 +2885,25 @@ class PaymentScreenState extends State<PaymentScreen> {
     // searched, cart add/remove) are untouched and still fire immediately,
     // same as always.
 
+    // Combo Purchase Learning is temporarily deferred (2026-07-22) - see
+    // PurchaseCompletionListener's doc comment for what's deferred and the
+    // planned follow-up.
+    //
+    // Stock decrement - atomic per-product transaction
+    // (FirebaseHelper.decrementProductStock) instead of a plain
+    // read-then-overwrite - see that method's doc comment for why the old
+    // pattern could silently lose a decrement under concurrent orders.
+    debugPrint('[ORDER-BUILD] decrementProductStock (${orderModel.products.length} items) START — +${placeSw.elapsedMilliseconds}ms');
     await Future.wait(
-      tempProduc.map((item) async {
-        try {
-          final productModel = await FireStoreUtils().getProductByID(item.id.split('~').first);
-          // Combo Purchase Learning is temporarily deferred (2026-07-22) -
-          // see PurchaseCompletionListener's doc comment for what's
-          // deferred and the planned follow-up. This per-item fetch stays
-          // (still needed for stock decrement below), just no longer
-          // fires kEvtComboOrdered from here.
-          if (item.variant_info != null && productModel.itemAttributes?.variants != null) {
-            for (final v in productModel.itemAttributes!.variants!) {
-              if (v.variant_id == item.id.split('~').last && v.variant_quantity != '-1') {
-                v.variant_quantity =
-                    (int.parse(v.variant_quantity.toString()) - item.quantity).toString();
-              }
-            }
-          } else if (productModel.quantity != -1) {
-            productModel.quantity -= item.quantity;
-          }
-          await FireStoreUtils.updateProduct(productModel);
-        } catch (stockErr) {
-          debugPrint('Stock update error for item ${item.id}: $stockErr');
-        }
-      }),
+      orderModel.products.map((item) => FireStoreUtils.decrementProductStock(
+            productId: item.id.split('~').first,
+            quantity: item.quantity,
+            variantId: item.variant_info != null ? item.id.split('~').last : null,
+          )),
     );
+    debugPrint('[ORDER-BUILD] decrementProductStock END — +${placeSw.elapsedMilliseconds}ms');
 
+    debugPrint('[ORDER-BUILD] _buildAndPlaceOrder($oid) END — +${placeSw.elapsedMilliseconds}ms TOTAL');
     return placedOrder;
   }
 
@@ -2693,7 +2938,12 @@ class PaymentScreenState extends State<PaymentScreen> {
         orderModel: placedOrder,
         isPaymentVerified: paymentType != 'cod',
       ));
-    } catch (e) {
+    } catch (e, s) {
+      // TEMPORARY [ORDER-PERF] - the actual exception was never logged
+      // before (only e.toString() reached the failure dialog, filtered
+      // into a generic bucket) - this is the one line that will tell us
+      // exactly what's throwing here. Remove once root cause is confirmed.
+      debugPrint('[ORDER-BUILD] placeOrder($oid) EXCEPTION: $e\n$s');
       hideProgress();
       setState(() {
         isProcessingOrder = false;
@@ -2785,7 +3035,30 @@ class PaymentScreenState extends State<PaymentScreen> {
     sp.setString("addsize", "");
   }
 
-  toCheckOutScreen(bool val, BuildContext context, {required String oid}) {
+  // Wallet payments only (2026-08-06): the order was already created
+  // atomically server-side, in the SAME transaction as the wallet
+  // deduction (see createVerifiedWalletOrder). Do the remaining
+  // side-effect (stock decrement) and go straight to the confirmation UI,
+  // using the order data already built for the draft - do NOT go through
+  // placeOrder()/_buildAndPlaceOrder or toCheckOutScreen's default write
+  // path, since the order document already exists and a customer-side
+  // rewrite of it is correctly rejected by vendor_orders' security rules
+  // (only status/billPayRespondedAt may be changed after creation).
+  Future<void> _finishAlreadyPlacedWalletOrder(BuildContext context, OrderModel orderModel) async {
+    await Future.wait(orderModel.products.map((item) => FireStoreUtils.decrementProductStock(
+          productId: item.id.split('~').first,
+          quantity: item.quantity,
+          variantId: item.variant_info != null ? item.id.split('~').last : null,
+        )));
+    if (!context.mounted) return;
+    if (widget.take_away ?? false) {
+      push(context, PlaceOrderScreen(orderModel: orderModel, isPaymentVerified: true));
+    } else {
+      toCheckOutScreen(true, context, oid: orderModel.id, alreadyPlacedOrder: orderModel);
+    }
+  }
+
+  toCheckOutScreen(bool val, BuildContext context, {required String oid, OrderModel? alreadyPlacedOrder}) {
     push(
       context,
       CheckoutScreen(
@@ -2808,12 +3081,27 @@ class PaymentScreenState extends State<PaymentScreen> {
         address: widget.addressModel,
         orderType: widget.orderType,
         billPayRequestId: widget.billPayRequestId,
+        alreadyPlacedOrder: alreadyPlacedOrder,
       ),
     );
   }
 
   @override
   void dispose() {
+    // Defense-in-depth: every concrete trigger for the stuck-dialog bug is
+    // already fixed at each call site above (dismissLoadingAndClearProcessing
+    // pops unconditionally once its await resolves). This only guards the
+    // narrow residual case where the screen itself gets disposed while a
+    // verification call is still in flight, so the dialog never gets a
+    // chance to be dismissed by any of those call sites at all.
+    if (_isLoadingDialogShowing) {
+      try {
+        final dialogContext = _scaffoldKey.currentContext;
+        if (dialogContext != null) {
+          Navigator.of(dialogContext, rootNavigator: true).pop();
+        }
+      } catch (_) {}
+    }
     _razorPay.clear();
     super.dispose();
   }

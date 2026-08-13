@@ -7,14 +7,12 @@ import 'package:emartconsumer/model/OrderModel.dart';
 import 'package:emartconsumer/send_notification.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/app_dialog.dart';
-import 'package:emartconsumer/services/device_session_service.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
-import 'package:emartconsumer/services/notification_service.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
-import 'package:emartconsumer/ui/auth_screen/login_screen.dart';
 import 'package:emartconsumer/ui/cartScreen/CartScreen.dart';
+import 'package:emartconsumer/widget/savings_banner.dart';
 import 'package:flutter/material.dart';
 
 /// Read-only approval screen for a Bill Pay request the VENDOR built and
@@ -57,40 +55,50 @@ class _BillPayRequestScreenState extends State<BillPayRequestScreen> {
     return diff.clamp(0, 1 << 30);
   }
 
-  double _calculateTotal(OrderModel order) {
-    double total = 0.0;
+  // Deliberately does NOT read order.pricing (2026-08-04 pricing-snapshot
+  // rollout), unlike OrderDetailsScreen/OrdersScreen. This screen shows the
+  // VENDOR'S ORIGINAL PENDING REQUEST document (see OrderModel's doc comment
+  // on initiatedBy/billPayExpiresAt/billPayRespondedAt), and that document
+  // can be edited in place by the vendor after creation (isVendorEditingBillPay
+  // in firestore.rules lets a vendor rewrite products/discount/taxSetting on
+  // the SAME doc, refreshing billPayExpiresAt). verifyOrderOnCreate is an
+  // onDocumentCreated trigger — it runs exactly once, at the request's
+  // original creation, before any such edit — so any order.pricing snapshot
+  // on this doc would reflect the ORIGINAL submitted bill, not a later
+  // vendor edit, and could show the customer a stale total to approve.
+  // The brand-new order Accept & Pay creates (a separate document, linked
+  // via billPayRequestId) gets its own fresh, trustworthy pricing snapshot
+  // and is displayed via OrderDetailsScreen/OrdersScreen instead — not here.
+  // Recomputing live from this doc's current raw fields (as below) is
+  // therefore the correct behavior for this screen, not a fallback.
+  //
+  // Returns every line that goes into the total (subtotal, discounts, each
+  // tax, tip) rather than just the final number — the items list alone
+  // doesn't add up to the total shown (discount/tax/tip make up the gap),
+  // and showing the total with no explanation reads as the platform quietly
+  // charging something extra. The full breakdown is what CartScreen already
+  // shows before payment; Bill Pay approval should show the same.
+  //
+  // Steps mirror CartScreen._modernSummarySection's exact order (subtotal ->
+  // +delivery/tip base -> -discount -> -special discount -> +tax computed on
+  // the discounted base), just reading from the vendor's locked doc fields
+  // instead of live cart/coupon state — see the class doc-comment above for
+  // why this screen deliberately doesn't re-derive discounts live the way
+  // the cart does. There's no combined-discount-cap step here: that cap only
+  // exists to referee a customer's live coupon pick against a stacked
+  // special discount, and there's no coupon on this locked, vendor-set bill.
+  _BillBreakdown _computeBreakdown(OrderModel order) {
+    // 1. Subtotal — sum of item price (+ extras) * quantity.
+    double subtotal = 0.0;
     for (final item in order.products) {
       try {
         if (item.extras_price != null &&
             item.extras_price!.isNotEmpty &&
             double.parse(item.extras_price!) != 0.0) {
-          total += item.quantity * double.parse(item.extras_price!);
+          subtotal += item.quantity * double.parse(item.extras_price!);
         }
-        total += item.quantity * double.parse(item.price);
+        subtotal += item.quantity * double.parse(item.price);
       } catch (_) {}
-    }
-
-    final num discount = order.discount ?? 0.0;
-    double specialDiscountAmount = 0.0;
-    if (order.specialDiscount != null && order.specialDiscount!.isNotEmpty) {
-      try {
-        specialDiscountAmount = double.parse(
-            order.specialDiscount!['special_discount'].toString());
-      } catch (_) {}
-    }
-
-    double totalTaxAmount = 0.0;
-    if (order.taxModel != null) {
-      // Bill Pay is a Dineaway flow (no delivery address) — only taxes
-      // tagged isTakeaway == true apply, same as Takeaway/Dining elsewhere.
-      // taxModel stores the FULL tax config; delivery-only charges (e.g.
-      // "cart charge") must be filtered out here, not at write time.
-      for (final tax in order.taxModel!.where((t) => t.isTakeaway == true)) {
-        totalTaxAmount += getTaxValue(
-          amount: (total - discount - specialDiscountAmount).toString(),
-          taxModel: tax,
-        );
-      }
     }
 
     final double tipValue = (order.tipValue == null || order.tipValue!.isEmpty)
@@ -101,12 +109,53 @@ class _BillPayRequestScreenState extends State<BillPayRequestScreen> {
             ? 0.0
             : double.parse(order.deliveryCharge!);
 
-    return deliveryCharge +
-        total +
-        totalTaxAmount +
-        tipValue -
-        discount -
-        specialDiscountAmount;
+    // 2. Base total before any discount or tax — items + delivery + tip.
+    double runningTotal = subtotal + deliveryCharge + tipValue;
+
+    // 3. Discount (the vendor's equivalent of a coupon on this bill).
+    final double discount = (order.discount ?? 0.0).toDouble();
+    runningTotal -= discount;
+
+    // 4. Special discount — already evaluated and fixed on the doc by the
+    // vendor, not re-run against a live day/timeslot schedule here.
+    double specialDiscountAmount = 0.0;
+    if (order.specialDiscount != null && order.specialDiscount!.isNotEmpty) {
+      try {
+        specialDiscountAmount = double.parse(
+            order.specialDiscount!['special_discount'].toString());
+      } catch (_) {}
+    }
+    runningTotal -= specialDiscountAmount;
+
+    // 5. Tax, computed on the discounted subtotal (clamped so a discount
+    // larger than the subtotal never produces negative tax), then added on
+    // top — same as CartScreen's taxBase/totalTaxAmount step.
+    final double taxBase =
+        (subtotal - discount - specialDiscountAmount).clamp(0.0, double.infinity);
+    final taxes = <BillTaxLine>[];
+    if (order.taxModel != null) {
+      // Bill Pay is a Dineaway flow (no delivery address) — only taxes
+      // tagged isTakeaway == true apply, same as Takeaway/Dining elsewhere.
+      // taxModel stores the FULL tax config; delivery-only charges (e.g.
+      // "cart charge") must be filtered out here, not at write time.
+      for (final tax in order.taxModel!.where((t) => t.isTakeaway == true)) {
+        final amount = getTaxValue(amount: taxBase.toString(), taxModel: tax);
+        if (amount > 0) {
+          taxes.add(BillTaxLine(title: tax.title ?? 'Tax'.tr(), amount: amount));
+        }
+      }
+    }
+    final double totalTaxAmount = taxes.fold(0.0, (sum, t) => sum + t.amount);
+    runningTotal += totalTaxAmount;
+
+    return _BillBreakdown(
+      subtotal: subtotal,
+      discount: discount,
+      specialDiscount: specialDiscountAmount,
+      taxes: taxes,
+      tipValue: tipValue,
+      total: runningTotal.clamp(0.0, double.infinity),
+    );
   }
 
   Future<void> _notifyVendorOfDecline(OrderModel order) async {
@@ -164,24 +213,21 @@ class _BillPayRequestScreenState extends State<BillPayRequestScreen> {
   // app's completely normal order-creation flow (see CartScreen's Bill Pay
   // mode). A Cloud Function reconciles this original request afterward.
   //
-  // This tap is the trusted-verification moment for Bill Pay: it claims
-  // device ownership (see DeviceSessionService.claim) rather than just
-  // passively checking it, so this device becomes the account's active one
-  // and any other device gets force-logged-out — but only once the user has
-  // actually committed to paying, not just from opening this screen.
+  // (2026-08-11) No standalone device-session check here anymore — it was a
+  // full extra HTTP round trip re-checking the exact same thing
+  // createVerifiedOrderPayment/createVerifiedWalletOrder already re-verify
+  // server-side one step later, inside PaymentScreen (see their
+  // 'device_superseded' handling in _handleVerifiedPaymentFailure). That
+  // server-side check is the actual binding gate — it runs immediately
+  // before the Razorpay order is created / wallet is debited, so a
+  // superseded device can never get a charge created regardless of whether
+  // this tap re-checked first. Same removal already applied to the regular
+  // Delivery/Takeaway place-order flow on 2026-08-03 (see
+  // CheckoutScreen._placeOrder's identical comment) — this was the one
+  // remaining flow still doing it twice.
   Future<void> _acceptAndPay(OrderModel order) async {
     setState(() => _isResponding = true);
     try {
-      final fcmToken = await NotificationService.getToken();
-      final result = await DeviceSessionService.claim(fcmToken: fcmToken);
-      if (!result.allowed) {
-        if (mounted) {
-          ShowToastDialog.showToast(result.message!);
-          pushAndRemoveUntil(context, const LoginScreen());
-        }
-        return;
-      }
-      if (!mounted) return;
       push(
         context,
         CartScreen(billPayRequestModel: order),
@@ -281,6 +327,36 @@ class _BillPayRequestScreenState extends State<BillPayRequestScreen> {
     );
   }
 
+  Widget _billBreakdownRow(String label, double amount, bool dark,
+      {Color? valueColor}) {
+    final negative = amount < 0;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(
+            label,
+            style: TextStyle(
+              fontFamily: AppThemeData.regular,
+              fontSize: 13,
+              color: dark ? AppThemeData.neutral400 : AppThemeData.neutral500,
+            ),
+          ),
+          Text(
+            '${negative ? '-' : ''}${amountShow(amount: amount.abs().toStringAsFixed(2))}',
+            style: TextStyle(
+              fontFamily: AppThemeData.medium,
+              fontSize: 13,
+              color: valueColor ??
+                  (dark ? Colors.white : const Color(0xFF1A1A2E)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final dark = isDarkMode(context);
@@ -289,6 +365,13 @@ class _BillPayRequestScreenState extends State<BillPayRequestScreen> {
       appBar: AppBar(
         elevation: 0,
         backgroundColor: dark ? AppThemeData.darkBgPrimary : Colors.white,
+        // Explicit iconTheme — Styles.dart's global light-mode AppBarTheme
+        // hardcodes iconTheme to Colors.white (every other screen uses a
+        // colored primary app bar, where that's correct). Flutter resolves
+        // AppBar.iconTheme from the WIDGET first, then the THEME, so without
+        // this the global white theme silently wins, rendering the back
+        // button white-on-white on this screen's white app bar.
+        iconTheme: IconThemeData(color: dark ? Colors.white : const Color(0xFF1A1A2E)),
         title: Text(
           'Bill Pay Request'.tr(),
           style: TextStyle(
@@ -424,27 +507,71 @@ class _BillPayRequestScreenState extends State<BillPayRequestScreen> {
                             const Divider(height: 20),
                             ...order.products.map((p) => _buildItemRow(p, dark)),
                             const Divider(height: 20),
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                Text(
-                                  'Total'.tr(),
-                                  style: TextStyle(
-                                    fontFamily: AppThemeData.semiBold,
-                                    fontSize: 15,
-                                    color: dark ? Colors.white : const Color(0xFF1A1A2E),
+                            // Bill breakdown — the items above sum to
+                            // `subtotal`, not `total`; without these rows the
+                            // customer sees a Total that doesn't match what
+                            // the items add up to, with no explanation.
+                            Builder(builder: (context) {
+                              final b = _computeBreakdown(order);
+                              return Column(
+                                children: [
+                                  _billBreakdownRow('Subtotal'.tr(),
+                                      b.subtotal, dark),
+                                  if (b.discount > 0)
+                                    _billBreakdownRow('Discount'.tr(),
+                                        -b.discount, dark,
+                                        valueColor: AppThemeData.primary500),
+                                  if (b.specialDiscount > 0)
+                                    _billBreakdownRow('Special Discount'.tr(),
+                                        -b.specialDiscount, dark,
+                                        valueColor: AppThemeData.primary500),
+                                  for (final tax in b.taxes)
+                                    _billBreakdownRow(
+                                        tax.title, tax.amount, dark),
+                                  if (b.tipValue > 0)
+                                    _billBreakdownRow('Tip amount'.tr(),
+                                        b.tipValue, dark,
+                                        valueColor: const Color(0xFFF59E0B)),
+                                  const Divider(height: 20),
+                                  Row(
+                                    mainAxisAlignment:
+                                        MainAxisAlignment.spaceBetween,
+                                    children: [
+                                      Text(
+                                        'Total'.tr(),
+                                        style: TextStyle(
+                                          fontFamily: AppThemeData.semiBold,
+                                          fontSize: 15,
+                                          color: dark
+                                              ? Colors.white
+                                              : const Color(0xFF1A1A2E),
+                                        ),
+                                      ),
+                                      Text(
+                                        b.total.toStringAsFixed(2),
+                                        style: TextStyle(
+                                          fontFamily: AppThemeData.semiBold,
+                                          fontSize: 16,
+                                          color: AppThemeData.primary500,
+                                        ),
+                                      ),
+                                    ],
                                   ),
-                                ),
-                                Text(
-                                  _calculateTotal(order).toStringAsFixed(2),
-                                  style: TextStyle(
-                                    fontFamily: AppThemeData.semiBold,
-                                    fontSize: 16,
-                                    color: AppThemeData.primary500,
-                                  ),
-                                ),
-                              ],
-                            ),
+                                  // Same combined discount + special-discount
+                                  // savings banner CartScreen shows before
+                                  // payment — Bill Pay should read the same
+                                  // way, not like a stripped-down screen.
+                                  if (b.discount + b.specialDiscount > 0) ...[
+                                    const Divider(height: 20),
+                                    SavingsBanner(
+                                      totalSavings:
+                                          b.discount + b.specialDiscount,
+                                      dark: dark,
+                                    ),
+                                  ],
+                                ],
+                              );
+                            }),
                           ],
                         ),
                       ),
@@ -459,6 +586,23 @@ class _BillPayRequestScreenState extends State<BillPayRequestScreen> {
                           ),
                         ),
                       ],
+                      // There's no coupon field on this review screen — it's
+                      // read-only. Special discount (if any) is already
+                      // computed into the breakdown above, same as it would
+                      // auto-apply in the cart; a coupon, unlike special
+                      // discount, is a manual pick and only offered one step
+                      // later on the locked CartScreen Accept & Pay hands off
+                      // to (see _isBillPayMode there) — say so here instead
+                      // of leaving the customer wondering where to enter one.
+                      if (canRespond) ...[
+                        const SizedBox(height: 12),
+                        _offerInfoNote(dark),
+                      ],
+                      // The bill is usually just a couple of items, leaving a
+                      // lot of empty space above the Decline/Accept buttons —
+                      // a small pulsing illustration keeps that gap from
+                      // reading as a blank/broken screen while they decide.
+                      if (canRespond) _waitingIllustration(dark),
                     ],
                   ),
                 ),
@@ -521,6 +665,59 @@ class _BillPayRequestScreenState extends State<BillPayRequestScreen> {
     );
   }
 
+  Widget _offerInfoNote(bool dark) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: dark
+            ? AppThemeData.primary500.withValues(alpha: 0.12)
+            : AppThemeData.primary500.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppThemeData.primary500.withValues(alpha: 0.25)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.local_offer_outlined, size: 16, color: AppThemeData.primary500),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'Accept & Pay to apply a coupon and get your discounts.'.tr(),
+              style: TextStyle(
+                fontFamily: AppThemeData.regular,
+                fontSize: 12,
+                height: 1.4,
+                color: dark ? AppThemeData.darkTextSecondary : AppThemeData.neutral600,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _waitingIllustration(bool dark) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 40),
+      child: Column(
+        children: [
+          const _PulsingWaitIcon(),
+          const SizedBox(height: 16),
+          Text(
+            'Take your time to review before you decide'.tr(),
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontFamily: AppThemeData.regular,
+              fontSize: 12,
+              color: AppThemeData.neutral400,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _banner({required IconData icon, required Color color, required String text}) {
     return Container(
       width: double.infinity,
@@ -545,6 +742,105 @@ class _BillPayRequestScreenState extends State<BillPayRequestScreen> {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class BillTaxLine {
+  final String title;
+  final double amount;
+
+  const BillTaxLine({required this.title, required this.amount});
+}
+
+class _BillBreakdown {
+  final double subtotal;
+  final double discount;
+  final double specialDiscount;
+  final List<BillTaxLine> taxes;
+  final double tipValue;
+  final double total;
+
+  const _BillBreakdown({
+    required this.subtotal,
+    required this.discount,
+    required this.specialDiscount,
+    required this.taxes,
+    required this.tipValue,
+    required this.total,
+  });
+}
+
+// A receipt icon with a soft ring pinging outward and fading, on a loop —
+// purely decorative, fills the vacant space while the customer is deciding.
+class _PulsingWaitIcon extends StatefulWidget {
+  const _PulsingWaitIcon();
+
+  @override
+  State<_PulsingWaitIcon> createState() => _PulsingWaitIconState();
+}
+
+class _PulsingWaitIconState extends State<_PulsingWaitIcon>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1800),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 88,
+      height: 88,
+      child: AnimatedBuilder(
+        animation: _controller,
+        builder: (_, __) {
+          final t = _controller.value;
+          final ringScale = 0.55 + 0.45 * t;
+          final ringOpacity = (1 - t).clamp(0.0, 1.0);
+          return Stack(
+            alignment: Alignment.center,
+            children: [
+              Transform.scale(
+                scale: ringScale,
+                child: Opacity(
+                  opacity: ringOpacity * 0.35,
+                  child: Container(
+                    width: 88,
+                    height: 88,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: AppThemeData.primary500,
+                    ),
+                  ),
+                ),
+              ),
+              Container(
+                width: 58,
+                height: 58,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: AppThemeData.primary500.withValues(alpha: 0.10),
+                ),
+                child: Icon(Icons.receipt_long_rounded,
+                    color: AppThemeData.primary500, size: 28),
+              ),
+            ],
+          );
+        },
       ),
     );
   }

@@ -94,6 +94,10 @@ class _PhoneNumberScreenState extends State<PhoneNumberScreen> {
     // ── Firestore: check whether this number has an existing account ───
     ShowToastDialog.showLoader('Checking your account...');
     bool isNewUser;
+    // (2026-08-04) Captured here so OtpScreen's own login-branch lookup
+    // (after the OTP is verified) can do a direct doc(id).get() instead of
+    // repeating this exact same 3-field query from scratch.
+    String? existingUserId;
     try {
       final snap = await FirebaseFirestore.instance
           .collection(USERS)
@@ -102,6 +106,7 @@ class _PhoneNumberScreenState extends State<PhoneNumberScreen> {
           .where('role', isEqualTo: USER_ROLE_CUSTOMER)
           .get();
       isNewUser = snap.docs.isEmpty;
+      if (!isNewUser) existingUserId = snap.docs.first.id;
     } catch (_) {
       ShowToastDialog.closeLoader();
       if (mounted) setState(() => _isSending = false);
@@ -158,6 +163,7 @@ class _PhoneNumberScreenState extends State<PhoneNumberScreen> {
         countryCode: _countryCode,
         phoneNumber: _phoneController.text.trim(),
         isSignup: widget.isSignup,
+        existingUserId: existingUserId,
       ),
     );
   }

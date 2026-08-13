@@ -10,12 +10,20 @@ import 'package:emartconsumer/services/show_toast_dialog.dart';
 import 'package:emartconsumer/ui/auth_screen/login_screen.dart';
 import 'package:firebase_auth/firebase_auth.dart' as auth;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 const _kApiBase = 'https://admin.quickdash.co.in';
 const _kDeviceIdPrefKey = 'device_session_device_id';
+
+/// See DeviceSessionService._checkActiveDetailed's doc comment.
+class _CheckResult {
+  final bool active;
+  final bool confirmed;
+  const _CheckResult(this.active, this.confirmed);
+}
 
 class DeviceSessionResult {
   final bool allowed;
@@ -74,17 +82,35 @@ class DeviceSessionService {
     return id;
   }
 
+  // (2026-08-03) Settings.Secure.ANDROID_ID via a native platform channel,
+  // NOT device_info_plus's AndroidDeviceInfo.id — that field is a direct
+  // passthrough of Build.ID (see device_info_plus's Android
+  // MethodCallHandlerImpl.kt), which is the OS firmware build tag, e.g.
+  // "UKQ1.230924.001" — identical across every physical device running that
+  // exact firmware build, not a per-device identifier at all. Confirmed on
+  // a real device: two different phones on the same ROM build would have
+  // collided on this value, letting the server mistake a second physical
+  // device for the same one and silently defeat the whole one-device gate.
+  // ANDROID_ID is scoped per app-signing-key + user + physical device — it
+  // stays stable across this app's own data clears/reinstalls (same signing
+  // key, verified 2026-08-03: value unchanged after a clean+re-login) but
+  // genuinely differs between two different physical devices, which is what
+  // this gate actually needs. device_info_plus doesn't expose ANDROID_ID in
+  // this app's pinned version (11.3.0), hence the native channel below.
+  static const MethodChannel _androidIdChannel =
+      MethodChannel('com.quickdash.customer/android_id');
+
   /// Reads the OS-level device identifier. Falls back to a random UUID
   /// (the old behavior) on any platform the plugin doesn't cover or if the
   /// read fails for any reason — never let device-id resolution itself
   /// block login.
   static Future<String> _readPlatformDeviceId() async {
     try {
-      final plugin = DeviceInfoPlugin();
       if (Platform.isAndroid) {
-        final info = await plugin.androidInfo;
-        if (info.id.isNotEmpty) return 'android_${info.id}';
+        final id = await _androidIdChannel.invokeMethod<String>('getAndroidId');
+        if (id != null && id.isNotEmpty) return 'android_$id';
       } else if (Platform.isIOS) {
+        final plugin = DeviceInfoPlugin();
         final info = await plugin.iosInfo;
         final vendorId = info.identifierForVendor;
         if (vendorId != null && vendorId.isNotEmpty) return 'ios_$vendorId';
@@ -110,6 +136,15 @@ class DeviceSessionService {
     if (user == null) {
       return const DeviceSessionResult.denied('Not signed in.', null);
     }
+
+    // A new login always starts a new session, regardless of whether the
+    // PREVIOUS session's Order Details flag ever got cleared (e.g. a
+    // voluntary logout, which doesn't itself go through this service) -
+    // resetting here, unconditionally, before this login is even verified,
+    // is what actually guarantees the "reset on new login" contract rather
+    // than relying on every logout call site to remember to clear it.
+    _orderVerifiedThisSession = false;
+    _lastVerifiedAt = null;
 
     try {
       final tokenSw = Stopwatch()..start();
@@ -178,67 +213,6 @@ class DeviceSessionService {
     return '$baseMessage Please try again after ${hours}h ${minutes}m.';
   }
 
-  /// Cooldown-gated device-ownership claim triggered by a trusted server
-  /// verification event — NOT a login. Currently called only from Vendor
-  /// Bill Pay's "Accept & Pay" tap (the normal Place Order flow's equivalent
-  /// claim happens server-side, inside createVerifiedOrderPayment, since
-  /// that's already a server-to-server trusted event). Must be called only
-  /// at the moment of a deliberate, verified action — never from passive
-  /// browsing/resume, or simply opening a screen would change session
-  /// ownership.
-  ///
-  /// Same allow/deny/switch semantics as [authorize]: on denial this signs
-  /// the caller out (a device denied here has just learned another device
-  /// is genuinely active) and the caller must stop and surface
-  /// [DeviceSessionResult.message], not proceed.
-  static Future<DeviceSessionResult> claim({required String fcmToken}) async {
-    final user = auth.FirebaseAuth.instance.currentUser;
-    if (user == null) {
-      return const DeviceSessionResult.denied('Not signed in.', null);
-    }
-
-    try {
-      final idToken = await user.getIdToken();
-      final deviceId = await getDeviceId();
-
-      final resp = await http
-          .post(
-            Uri.parse('$_kApiBase/api/auth/device-session/claim'),
-            headers: {
-              'Content-Type': 'application/json',
-              'Accept': 'application/json',
-              'Authorization': 'Bearer $idToken',
-            },
-            body: jsonEncode({'device_id': deviceId, 'fcm_token': fcmToken}),
-          )
-          .timeout(const Duration(seconds: 20));
-
-      final body = jsonDecode(resp.body) as Map<String, dynamic>;
-
-      if (resp.statusCode == 409 || body['allowed'] == false) {
-        await auth.FirebaseAuth.instance.signOut();
-        final retryAtRaw = body['retry_at'] as String?;
-        final retryAt = retryAtRaw != null ? DateTime.tryParse(retryAtRaw) : null;
-        final baseMessage = (body['message'] as String?) ??
-            'This account is active on another device. You can switch devices after 2 hours.';
-        return DeviceSessionResult.denied(withRetryTime(baseMessage, retryAt), retryAt);
-      }
-
-      if (resp.statusCode != 200) {
-        // Same fail-open trade-off as authorize() — an outage in this gate
-        // must not block every checkout, and the login-time gate already
-        // provides the main protection.
-        log('[DeviceSession] claim failed: HTTP ${resp.statusCode} ${resp.body}');
-        return const DeviceSessionResult.allowed();
-      }
-
-      return const DeviceSessionResult.allowed();
-    } catch (e) {
-      log('[DeviceSession] claim error: $e');
-      return const DeviceSessionResult.allowed();
-    }
-  }
-
   static DateTime? _lastCheckAt;
   static bool _lastCheckActive = true;
   static const _checkCacheWindow = Duration(seconds: 20);
@@ -253,13 +227,26 @@ class DeviceSessionService {
   /// Results are cached briefly so gating several actions in quick
   /// succession doesn't fire a network call per tap; fails open on
   /// network/server errors for the same availability reasons as [authorize].
-  static Future<bool> checkActive() async {
+  static Future<bool> checkActive() async => (await _checkActiveDetailed()).active;
+
+  /// Same check as [checkActive], but also reports whether `active` came
+  /// from a genuine server verdict (`confirmed: true`) or a fail-open
+  /// default (`confirmed: false` — no signed-in user, network error,
+  /// timeout, or non-200 response). [checkActive] collapses this down to
+  /// just the bool for its many existing callers; [enforceActiveForOrder]
+  /// needs the distinction so a network hiccup can't get cached as a real
+  /// verified order for a full TTL window (2026-08-03 fix).
+  static Future<_CheckResult> _checkActiveDetailed() async {
     final user = auth.FirebaseAuth.instance.currentUser;
-    if (user == null) return true; // nothing to invalidate — not this service's concern
+    if (user == null) {
+      return const _CheckResult(true, false); // nothing to invalidate — not this service's concern
+    }
 
     final now = DateTime.now();
     if (_lastCheckAt != null && now.difference(_lastCheckAt!) < _checkCacheWindow) {
-      return _lastCheckActive;
+      // Reusing a cached result - only ever populated by a genuine 200
+      // response below, so this is still a confirmed verdict, just cached.
+      return _CheckResult(_lastCheckActive, true);
     }
 
     try {
@@ -280,7 +267,7 @@ class DeviceSessionService {
 
       if (resp.statusCode != 200) {
         log('[DeviceSession] check failed: HTTP ${resp.statusCode} ${resp.body}');
-        return true; // fail open — see [authorize]
+        return const _CheckResult(true, false); // fail open — see [authorize]
       }
 
       final body = jsonDecode(resp.body) as Map<String, dynamic>;
@@ -292,17 +279,18 @@ class DeviceSessionService {
       log('[DEVICESESSION-DEBUG] checkActive() sent device_id=$deviceId -> server active=$active (session_version=${body['session_version']})');
       _lastCheckAt = now;
       _lastCheckActive = active;
-      return active;
+      return _CheckResult(active, true);
     } catch (e) {
       log('[DeviceSession] check error: $e');
-      return true; // fail open — see [authorize]
+      return const _CheckResult(true, false); // fail open — see [authorize]
     }
   }
 
   /// One-off, cache-bypassing re-check for the offline connectivity gate:
   /// called the instant connectivity returns after the device was offline.
-  /// Deliberately reuses the passive check endpoint (not [claim]) — merely
-  /// reconnecting must never change session ownership, only confirm it.
+  /// Deliberately reuses the passive check endpoint (never one that could
+  /// switch device ownership) — merely reconnecting must never change
+  /// session ownership, only confirm it.
   ///
   /// Distinguishes a confirmed "you've been superseded" (runs the normal
   /// force-logout flow and returns [ReconnectCheckResult.invalidated]) from
@@ -361,6 +349,13 @@ class DeviceSessionService {
     await auth.FirebaseAuth.instance.signOut();
     MyAppState.currentUser = null;
     _lastCheckAt = null;
+    // Also clear the session-verified flag (see enforceActiveForOrder) -
+    // without this, a stale "verified this session" latch survives past
+    // the very sign-out it should have been invalidated by, and would
+    // incorrectly skip a real check the next time anyone signs in on this
+    // device and opens Order Details.
+    _orderVerifiedThisSession = false;
+    _lastVerifiedAt = null;
     if (context != null && context.mounted) {
       ShowToastDialog.showToast(
           (message ?? 'You were logged out because your account was signed in on another device.').tr());
@@ -376,6 +371,57 @@ class DeviceSessionService {
     if (!active) {
       await handleSessionInvalidated(context);
       return false;
+    }
+    return true;
+  }
+
+  // (2026-08-03) Deliberately NOT keyed by orderId - the user explicitly
+  // asked for a session-scoped flag instead of a per-order cache. A single
+  // bool: the first Order Details/gate-pass open after sign-in (or an app
+  // restart, which clears this since it's in-memory only) does a real
+  // check; every later open - same order, a different order, any elapsed
+  // time - is skipped until the session actually ends (sign-out/
+  // invalidation, see handleSessionInvalidated). No TTL, unlike
+  // [checkActive]'s own blanket 20s window - "session" itself is the
+  // boundary here, not a timer.
+  //
+  // Trade-off worth knowing: a login session that's never restarted or
+  // signed out (Firebase Auth sessions can live for a long time) only ever
+  // re-verifies via THIS path once, at its very first Order Details open -
+  // after that, this specific fallback goes quiet for the rest of the
+  // session. FCM's force_logout push and the other sensitive-action gates
+  // (checkout, wallet, profile) remain the protection for anything after
+  // that first check.
+  static bool _orderVerifiedThisSession = false;
+  // Bookkeeping only (2026-08-03, per explicit request) - not read for any
+  // expiry/TTL decision, since this cache deliberately has none; kept for
+  // debugging/logging visibility into when the session's one check ran.
+  static DateTime? _lastVerifiedAt;
+
+  /// Order Details/QR/gate-pass verification gate. Same convenience-guard
+  /// contract as [enforceActive]: returns true if the caller may proceed;
+  /// on false it has already signed the user out and navigated to the login
+  /// screen.
+  static Future<bool> enforceActiveForOrder(BuildContext context) async {
+    if (_orderVerifiedThisSession) return true;
+
+    final result = await _checkActiveDetailed();
+    if (!result.active) {
+      await handleSessionInvalidated(context);
+      return false;
+    }
+    // Only latch the session flag on a genuinely server-confirmed result -
+    // a fail-open default (offline, timeout, non-200) must not mark the
+    // whole rest of the session as "verified" just because the network
+    // happened to hiccup on this one call; the next Order Details open
+    // should retry for real instead of trusting today's outage.
+    // Availability is still preserved either way - the caller can proceed
+    // regardless - only the LATCHING of that outcome is withheld.
+    if (result.confirmed) {
+      _orderVerifiedThisSession = true;
+      _lastVerifiedAt = DateTime.now();
+      log('[DeviceSession] Order Details verified for this session at $_lastVerifiedAt '
+          '- no further checks via this path until sign-out/new login/app restart.');
     }
     return true;
   }

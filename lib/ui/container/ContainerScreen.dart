@@ -6,7 +6,6 @@ import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/User.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
-import 'package:emartconsumer/services/device_session_service.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
@@ -22,6 +21,7 @@ import 'package:emartconsumer/ui/dineInScreen/my_booking_screen.dart';
 import 'package:emartconsumer/ui/home/HomeScreen.dart';
 import 'package:emartconsumer/ui/home/favourite_item.dart';
 import 'package:emartconsumer/ui/home/favourite_store.dart';
+import 'package:emartconsumer/ui/localOffers/LocalOffersListScreen.dart';
 import 'package:emartconsumer/ui/mapView/MapViewScreen.dart';
 import 'package:emartconsumer/ui/ordersScreen/OrdersScreen.dart';
 import 'package:emartconsumer/ui/privacy_policy/privacy_policy.dart';
@@ -57,7 +57,8 @@ enum DrawerSelection {
   privacyPolicy,
   LikedStore,
   LikedProduct,
-  giftCard
+  giftCard,
+  localOffers
 }
 
 class ContainerScreen extends StatefulWidget {
@@ -85,11 +86,15 @@ class ContainerScreen extends StatefulWidget {
 
   @override
   _ContainerScreen createState() {
+    // TEMPORARY [LOGIN-PERF] - createState() runs synchronously the
+    // instant this widget is constructed, so this timestamp is
+    // effectively "ContainerScreen constructor" for gap-tracing purposes.
+    debugPrint('[LOGIN-PERF][CONTAINER] ContainerScreen createState (${DateTime.now().toIso8601String()})');
     return _ContainerScreen();
   }
 }
 
-class _ContainerScreen extends State<ContainerScreen> with WidgetsBindingObserver {
+class _ContainerScreen extends State<ContainerScreen> {
   var key = GlobalKey<ScaffoldState>();
 
   late CartDatabase cartDatabase;
@@ -104,9 +109,24 @@ class _ContainerScreen extends State<ContainerScreen> with WidgetsBindingObserve
   late User user;
   late StreamSubscription eventBusStream;
 
+  // TEMPORARY [CONTAINER-PERF] - cold-start instrumentation for the
+  // app-open-speed investigation. Every step below is fire-and-forget
+  // (nothing here is awaited, so none of it blocks the first frame) — these
+  // marks exist to prove that empirically and to show completion order.
+  // Remove once the investigation is done.
   @override
   void initState() {
+    final coldStartSw = Stopwatch()..start();
+    void mark(String label) {
+      debugPrint('[CONTAINER-PERF][COLD] $label — +${coldStartSw.elapsedMilliseconds}ms '
+          '(${DateTime.now().toIso8601String()})');
+    }
+
+    mark('initState ENTER');
+
     FireStoreUtils.getWalletSettingData();
+    mark('getWalletSettingData() dispatched (see [FIRESTORE-PERF] for its own round-trip time)');
+
     if (widget.user != null) {
       user = widget.user!;
     } else {
@@ -127,6 +147,8 @@ class _ContainerScreen extends State<ContainerScreen> with WidgetsBindingObserve
     } else {
       _currentWidget = widget.currentWidget;
     }
+    mark('sync widget/user setup done');
+
     FireStoreUtils.firebaseMessaging.requestPermission(
       alert: true,
       announcement: false,
@@ -135,31 +157,32 @@ class _ContainerScreen extends State<ContainerScreen> with WidgetsBindingObserve
       criticalAlert: false,
       provisional: false,
       sound: true,
-    );
-    getTaxList();
+    ).then((_) => mark('firebaseMessaging.requestPermission() completed'));
+    mark('requestPermission() dispatched');
+
+    getTaxList().whenComplete(() => mark('getTaxList() completed'));
+    mark('getTaxList() dispatched (see [FIRESTORE-PERF] for its own round-trip time)');
+
     _listenDeliveryGate();
-    WidgetsBinding.instance.addObserver(this);
+    mark('_listenDeliveryGate() listener attach dispatched (see [FIRESTORE-PERF] for first-snapshot time)');
 
-    // A cold start (app fully relaunched, not just resumed from background)
-    // never fires didChangeAppLifecycleState(resumed) below — Firebase Auth
-    // restores the session locally and lands the user straight here with no
-    // device-session check at all until the next background/resume cycle or
-    // gated action. Closes that gap, especially relevant for a device that
-    // was force-killed while offline and relaunched later.
+    mark('initState EXIT (all work above is async/unawaited)');
+
+    // (2026-08-03) No cold-start/resume device-session check here anymore -
+    // per the verification redesign, browsing must generate zero
+    // device-session traffic. Verification now happens only where misuse
+    // actually matters: opening Order Details/QR (OrderDetailsScreen,
+    // table_order_details_screen.dart) and the existing sensitive-write
+    // gates (checkout's order-creation Cloud Functions, wallet top-up, Bill
+    // Pay, profile save). FCM's force_logout push remains the primary,
+    // immediate path; the Order Details check is the fallback for when that
+    // push is missed (offline, OEM-killed, notifications blocked, app was
+    // fully killed) - see DeviceSessionService.enforceActive's own doc
+    // comment. This also means WidgetsBindingObserver is no longer needed
+    // here - it existed only to drive the removed resume check.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) DeviceSessionService.enforceActive(context);
+      mark('FIRST FRAME rendered (postFrameCallback fired) — this is the first-interactive-frame marker');
     });
-  }
-
-  // A login-time device-session check alone misses the case where this
-  // device gets switched out by another login while the app is backgrounded
-  // or offline and never receives the FCM force-logout push. Re-checking on
-  // every resume closes that gap (see DeviceSessionService.checkActive).
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      DeviceSessionService.enforceActive(context);
-    }
   }
 
   // Single, app-wide live listener for the Delivery on/off toggle, feeding
@@ -174,11 +197,26 @@ class _ContainerScreen extends State<ContainerScreen> with WidgetsBindingObserve
     if (sectionId == null || sectionId.isEmpty) return;
     isDeliveryActiveNotifier.value = sectionConstantModel?.deliveryActive ?? true;
     deliveryOffMessageNotifier.value = sectionConstantModel?.deliveryOffMessage ?? '';
+    // TEMPORARY [FIRESTORE-PERF] - times the gap between attaching this
+    // listener and its first snapshot arriving, a proxy for whether the
+    // Firestore gRPC/TLS channel was already warm (near-instant) or had to
+    // be established fresh (visible delay) at this point in app startup.
+    // Remove once the app-open-speed investigation is done.
+    final gateSw = Stopwatch()..start();
+    bool firstSnapshotSeen = false;
+    debugPrint('[FIRESTORE-PERF] _listenDeliveryGate .snapshots().listen() attaching '
+        '(${DateTime.now().toIso8601String()})');
     _deliveryGateSub = FireStoreUtils.firestore
         .collection(SECTION)
         .doc(sectionId)
         .snapshots()
         .listen((snap) {
+      if (!firstSnapshotSeen) {
+        firstSnapshotSeen = true;
+        debugPrint('[FIRESTORE-PERF] _listenDeliveryGate FIRST snapshot received — '
+            '+${gateSw.elapsedMilliseconds}ms after listen() attached '
+            '(${DateTime.now().toIso8601String()})');
+      }
       if (!snap.exists) return;
       final data = snap.data();
       if (data == null) return;
@@ -189,17 +227,22 @@ class _ContainerScreen extends State<ContainerScreen> with WidgetsBindingObserve
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
     _deliveryGateSub?.cancel();
     super.dispose();
   }
 
   getTaxList() async {
     if (sectionConstantModel == null) return;
+    // TEMPORARY [FIRESTORE-PERF] - round-trip timing for the app-open-speed
+    // investigation. Remove once done.
+    final sw = Stopwatch()..start();
+    debugPrint('[FIRESTORE-PERF] getTaxList() dispatched (${DateTime.now().toIso8601String()})');
     try {
       await FireStoreUtils().getTaxList(sectionConstantModel!.id).then((value) {
         if (value != null) taxList = value;
       });
+      debugPrint('[FIRESTORE-PERF] getTaxList() Firestore round-trip — '
+          '${sw.elapsedMilliseconds}ms (${DateTime.now().toIso8601String()})');
     } catch (e) {
       debugPrint('getTaxList error: $e');
     }
@@ -290,6 +333,21 @@ class _ContainerScreen extends State<ContainerScreen> with WidgetsBindingObserve
                       DineInScreen(user: MyAppState.currentUser ?? User()),
                     ),
                   ),
+                // Offers & Discounts (2026-08-03) - admin-authored local-
+                // business promotion feed, pure visibility, no login
+                // required (same as Stores above) since it's not tied to
+                // any account-specific data.
+                _drawerItem(
+                  sel: DrawerSelection.localOffers,
+                  icon: Icons.local_offer_outlined,
+                  label: 'Offers & Discounts',
+                  dark: dark,
+                  onTap: () => _navigate(
+                    DrawerSelection.localOffers,
+                    'Offers & Discounts'.tr(),
+                    const LocalOffersListScreen(),
+                  ),
+                ),
 
                 _sectionGap(dark),
 

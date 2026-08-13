@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
-This project uses [FVM](https://fvm.app/) pinned to Flutter **3.27.3** (`fvm_config.json`). Prefix all Flutter commands with `fvm`:
+This project uses [FVM](https://fvm.app/) pinned to Flutter **3.35.1** (`fvm_config.json`). Prefix all Flutter commands with `fvm`:
 
 ```bash
 fvm flutter pub get          # Install dependencies

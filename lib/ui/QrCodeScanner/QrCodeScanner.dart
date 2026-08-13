@@ -11,6 +11,7 @@ import 'package:emartconsumer/services/show_toast_dialog.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/auth_screen/login_screen.dart';
 import 'package:emartconsumer/ui/container/ContainerScreen.dart';
+import 'package:emartconsumer/utils/network_image_widget.dart';
 import 'package:firebase_auth/firebase_auth.dart' as auth;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -210,6 +211,7 @@ class _QrCodeScannerState extends State<QrCodeScanner>
       if (mounted) setState(() => _isVerifying = false);
       final VendorModel vendor = VendorModel.fromJson(data);
       if (mounted) {
+        precacheVendorHeroImage(context, vendor);
         Navigator.pop(context);
         BehaviorTracker.setNextEntrySource('QRCode');
         push(context, NewVendorProductsScreen(vendorModel: vendor));

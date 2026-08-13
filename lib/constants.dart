@@ -145,6 +145,11 @@ const newOnDemandBook = "new_ondemand_book";
 
 const MENU_ITEM = 'banner_items';
 
+// Offers & Discounts (2026-08-03) - admin-authored local-business
+// promotion feed, not tied to any real vendor/order.
+const LOCAL_OFFERS = 'local_offers';
+const LOCAL_OFFER_CATEGORIES = 'local_offer_categories';
+
 const USER_ROLE_DRIVER = 'driver';
 const USER_ROLE_CUSTOMER = 'customer';
 const USER_ROLE_VENDOR = 'vendor';

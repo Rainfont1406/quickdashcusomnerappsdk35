@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
@@ -74,6 +75,12 @@ class _GiftCardPurchaseScreenState extends State<GiftCardPurchaseScreen> {
   void initState() {
     giftCardModel = widget.giftCardModel;
     gradTotal = widget.price;
+    // Reached only after the user taps a specific gift-card amount on
+    // gift_card_screen.dart (browsing that screen never touches payment
+    // gateways) — this screen IS the payment-entry point for gift cards, so
+    // loading here is already "immediately before it's needed". No separate
+    // fire-and-forget trigger — getPaymentSettingData() below is the single
+    // call site, and it awaits ensurePaymentGatewaySettingsLoaded() itself.
     getPaymentSettingData();
     super.initState();
   }
@@ -91,30 +98,58 @@ class _GiftCardPurchaseScreenState extends State<GiftCardPurchaseScreen> {
   OrangeMoney? orangeMoneyModel;
   Xendit? xenditModel;
 
+  // Each gateway is fetched independently so a missing/unconfigured gateway
+  // (jsonData! crash inside UserPreference — several of these getters throw
+  // rather than return null when their SharedPreferences key was never
+  // populated, e.g. every non-Razorpay gateway now that only Razorpay is
+  // fetched) cannot abort the entire load. Mirrors PaymentScreen's own
+  // _safeLoad helper.
+  Future<T?> _safeLoad<T>(FutureOr<T?> Function() loader) async {
+    try {
+      return await loader();
+    } catch (_) {
+      return null;
+    }
+  }
+
   getPaymentSettingData() async {
-    await UserPreference.getStripeData().then((value) async {
-      stripeData = value;
-      stripe1.Stripe.publishableKey = stripeData!.clientpublishableKey;
-      stripe1.Stripe.merchantIdentifier = 'Foodie';
-      await stripe1.Stripe.instance.applySettings();
-    });
+    // This screen's own initState already kicked this off — awaiting the
+    // same memoized Future here (rather than reading UserPreference
+    // straight away) guarantees the cache below is actually populated,
+    // whether that call already finished or is still in flight.
+    await FireStoreUtils.ensurePaymentGatewaySettingsLoaded();
+
+    stripeData = await _safeLoad(() => UserPreference.getStripeData());
+    if (stripeData != null &&
+        stripeData!.clientpublishableKey.isNotEmpty &&
+        stripeData!.clientpublishableKey != 'null') {
+      try {
+        stripe1.Stripe.publishableKey = stripeData!.clientpublishableKey;
+        stripe1.Stripe.merchantIdentifier = 'Foodie';
+        await stripe1.Stripe.instance.applySettings();
+      } catch (e) {
+        // Stripe initialization failed, but continue with other payment methods
+      }
+    }
 
     _razorPay.on(Razorpay.EVENT_PAYMENT_SUCCESS, _handlePaymentSuccess);
     _razorPay.on(Razorpay.EVENT_EXTERNAL_WALLET, _handleExternalWaller);
     _razorPay.on(Razorpay.EVENT_PAYMENT_ERROR, _handlePaymentError);
 
-    razorPayData = await UserPreference.getRazorPayData();
-    paytmSettingData = await UserPreference.getPaytmData();
-    paypalSettingData = await UserPreference.getPayPalData();
-    payStackSettingData = await UserPreference.getPayStackData();
-    flutterWaveSettingData = await UserPreference.getFlutterWaveData();
-    payFastSettingData = await UserPreference.getPayFastData();
-    mercadoPagoSettingData = await UserPreference.getMercadoPago();
-    midTransModel = await UserPreference.getMidTransData();
-    orangeMoneyModel = await UserPreference.getOrangeData();
-    xenditModel = await UserPreference.getXenditData();
+    razorPayData = await _safeLoad(() => UserPreference.getRazorPayData());
+    paytmSettingData = await _safeLoad(() => UserPreference.getPaytmData());
+    paypalSettingData = await _safeLoad(() => UserPreference.getPayPalData());
+    payStackSettingData = await _safeLoad(() => UserPreference.getPayStackData());
+    flutterWaveSettingData = await _safeLoad(() => UserPreference.getFlutterWaveData());
+    payFastSettingData = await _safeLoad(() => UserPreference.getPayFastData());
+    mercadoPagoSettingData = await _safeLoad(() => UserPreference.getMercadoPago());
+    midTransModel = await _safeLoad(() => UserPreference.getMidTransData());
+    orangeMoneyModel = await _safeLoad(() => UserPreference.getOrangeData());
+    xenditModel = await _safeLoad(() => UserPreference.getXenditData());
     setRef();
-    initPayPal();
+    // Guarded — paypalSettingData is null whenever Paypal isn't fetched
+    // (i.e. always, right now), and initPayPal() force-unwraps it.
+    if (paypalSettingData != null) initPayPal();
   }
 
   final _flutterPaypalNativePlugin = FlutterPaypalNative.instance;
@@ -423,7 +458,7 @@ class _GiftCardPurchaseScreenState extends State<GiftCardPurchaseScreen> {
                       ],
                     ),
                     Visibility(
-                      visible: stripeData!.isEnabled,
+                      visible: stripeData?.isEnabled ?? false,
                       child: Padding(
                         padding: const EdgeInsets.symmetric(vertical: 3.0, horizontal: 20),
                         child: Card(
@@ -490,7 +525,7 @@ class _GiftCardPurchaseScreenState extends State<GiftCardPurchaseScreen> {
                       ),
                     ),
                     Visibility(
-                      visible: payStackSettingData!.isEnabled,
+                      visible: payStackSettingData?.isEnabled ?? false,
                       child: Padding(
                         padding: const EdgeInsets.symmetric(vertical: 3.0, horizontal: 20),
                         child: Card(
@@ -624,7 +659,7 @@ class _GiftCardPurchaseScreenState extends State<GiftCardPurchaseScreen> {
                       ),
                     ),
                     Visibility(
-                      visible: razorPayData!.isEnabled,
+                      visible: razorPayData?.isEnabled ?? false,
                       child: Padding(
                         padding: const EdgeInsets.symmetric(vertical: 3.0, horizontal: 20),
                         child: Card(
@@ -750,7 +785,7 @@ class _GiftCardPurchaseScreenState extends State<GiftCardPurchaseScreen> {
                       ),
                     ),
                     Visibility(
-                      visible: paytmSettingData!.isEnabled,
+                      visible: paytmSettingData?.isEnabled ?? false,
                       child: Padding(
                         padding: const EdgeInsets.symmetric(vertical: 3.0, horizontal: 20),
                         child: Card(
@@ -945,7 +980,7 @@ class _GiftCardPurchaseScreenState extends State<GiftCardPurchaseScreen> {
                       ),
                     ),
                     Visibility(
-                      visible: xenditModel!.enable ?? false,
+                      visible: xenditModel?.enable ?? false,
                       child: Padding(
                         padding: const EdgeInsets.symmetric(vertical: 3.0, horizontal: 20),
                         child: Card(
@@ -1010,7 +1045,7 @@ class _GiftCardPurchaseScreenState extends State<GiftCardPurchaseScreen> {
                       ),
                     ),
                     Visibility(
-                      visible: orangeMoneyModel!.enable ?? false,
+                      visible: orangeMoneyModel?.enable ?? false,
                       child: Padding(
                         padding: const EdgeInsets.symmetric(vertical: 3.0, horizontal: 20),
                         child: Card(
@@ -1075,7 +1110,7 @@ class _GiftCardPurchaseScreenState extends State<GiftCardPurchaseScreen> {
                       ),
                     ),
                     Visibility(
-                      visible: midTransModel!.enable ?? false,
+                      visible: midTransModel?.enable ?? false,
                       child: Padding(
                         padding: const EdgeInsets.symmetric(vertical: 3.0, horizontal: 20),
                         child: Card(

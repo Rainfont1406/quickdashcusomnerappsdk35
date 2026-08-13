@@ -783,6 +783,7 @@ class _VendorHeader extends StatelessWidget {
           onTap: () {
             storyController.pause();
             BehaviorTracker.setNextEntrySource('Story');
+            precacheVendorHeroImage(context, vendor);
             push(context, NewVendorProductsScreen(vendorModel: vendor));
           },
           child: Row(

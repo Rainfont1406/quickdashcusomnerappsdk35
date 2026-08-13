@@ -15,6 +15,17 @@ subprojects {
     configurations.configureEach {
         resolutionStrategy {
             force 'pl.droidsonroids.gif:android-gif-drawable:1.2.25'
+            // Google Play's 16 KB page size requirement (mandatory for all
+            // uploads since 2025-11-01) - mobile_scanner pulls in
+            // androidx.camera 1.3.3 transitively, whose libimage_processing_util_jni.so
+            // is only 4 KB-aligned (confirmed via readelf on the built AAB -
+            // every other native lib in this app was already 64 KB-aligned).
+            // Fixed upstream in CameraX 1.4.0+; forcing all three
+            // androidx.camera artifacts to the same version keeps them
+            // binary-compatible with each other.
+            force 'androidx.camera:camera-core:1.5.1'
+            force 'androidx.camera:camera-camera2:1.5.1'
+            force 'androidx.camera:camera-lifecycle:1.5.1'
         }
     }
 
