@@ -3918,6 +3918,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
         return ProductOptionsDialog(
           productModel: productModel,
           showProductInfo: true,
+          confidence: _confidenceScores[productModel.id],
           onAddToCart: (ProductModel updatedProduct, double totalPrice,
               int quantity) async {
             if (MyAppState.currentUser == null) {

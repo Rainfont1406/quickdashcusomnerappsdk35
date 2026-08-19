@@ -525,8 +525,17 @@ class _VendorStoryPageState extends State<_VendorStoryPage> {
   // Shown while the HLS video controller initialises.
   // Displays the Bunny-generated thumbnail at full cover + a dark scrim +
   // the standard progress spinner so the user knows something is loading.
-  Widget _videoLoadingWidget() {
-    final thumb = widget.story.videoThumbnail ?? '';
+  // `story.videoThumbnail` is defined on the model but never actually
+  // written anywhere in the vendor upload flow (vendorApp/vendorWeb's
+  // StoryModel.toJson() has no such field) - it's always empty in real
+  // data, so this fell back to a bare spinner on black for every video
+  // story. Bunny Stream auto-generates a thumbnail.jpg alongside every
+  // playlist.m3u8 in the same directory, so derive it from the actual
+  // video URL instead - same fix already applied on the vendor side.
+  Widget _videoLoadingWidget(String videoUrl) {
+    final thumb = videoUrl.contains('playlist.m3u8')
+        ? videoUrl.replaceFirst('playlist.m3u8', 'thumbnail.jpg')
+        : (widget.story.videoThumbnail ?? '');
     return SizedBox.expand(
       child: Stack(
         fit: StackFit.expand,
@@ -634,7 +643,7 @@ class _VendorStoryPageState extends State<_VendorStoryPage> {
                 requestHeaders: const {
                   'Referer': 'https://admin.quickdash.co.in',
                 },
-                loadingWidget: _videoLoadingWidget(),
+                loadingWidget: _videoLoadingWidget(urlStr),
               ));
             }
           }

@@ -5090,6 +5090,13 @@ class _CartScreenState extends State<CartScreen> {
         final isPercentage = slot.type == "percentage";
         final applicableAmount =
             double.tryParse(slot.applicableAmount ?? '0') ?? 0;
+        // Must match the eligibility check in the actual-total calculation
+        // above (subtotalCondition) - this is what decides whether the card
+        // is shown as applied/"Best Offer" or as a locked "add more to
+        // unlock" card below, and it has to agree with what's really
+        // charged so the UI never shows an offer as applied that the cart
+        // doesn't actually qualify for.
+        final isApplicable = applicableAmount <= 0 || subTotal >= applicableAmount;
         final actualAmount =
             isPercentage ? (subTotal * discountValue / 100) : discountValue;
 
@@ -5105,13 +5112,22 @@ class _CartScreenState extends State<CartScreen> {
           'applicableAmount': applicableAmount,
           'actualAmount': actualAmount,
           'validTill': validTill,
+          'isApplicable': isApplicable,
         });
       }
     }
 
-    active.sort((a, b) =>
-        (b['actualAmount'] as double).compareTo(a['actualAmount'] as double));
-    return active;
+    // Eligible offers first (highest actual value first, matching which one
+    // really gets applied to the total); locked/not-yet-applicable offers
+    // after, closest-to-unlock first - same ordering convention as the
+    // coupon list's applicable/otherCoupons split above.
+    final eligible = active.where((d) => d['isApplicable'] as bool).toList()
+      ..sort((a, b) =>
+          (b['actualAmount'] as double).compareTo(a['actualAmount'] as double));
+    final locked = active.where((d) => !(d['isApplicable'] as bool)).toList()
+      ..sort((a, b) => (a['applicableAmount'] as double)
+          .compareTo(b['applicableAmount'] as double));
+    return [...eligible, ...locked];
   }
 
   sheet(BuildContext sheetCtx) {
@@ -5180,6 +5196,8 @@ class _CartScreenState extends State<CartScreen> {
           }).toList();
 
           final activeSpecialDiscounts = _getActiveSpecialDiscounts();
+          final hasAppliedSpecialDiscount = activeSpecialDiscounts.isNotEmpty &&
+              (activeSpecialDiscounts.first['isApplicable'] as bool);
 
           return Column(
             mainAxisSize: MainAxisSize.min,
@@ -5430,6 +5448,7 @@ class _CartScreenState extends State<CartScreen> {
                           ],
                         ),
                         const SizedBox(height: 8),
+                        if (hasAppliedSpecialDiscount)
                         Container(
                           width: double.infinity,
                           padding: const EdgeInsets.symmetric(
@@ -5467,7 +5486,8 @@ class _CartScreenState extends State<CartScreen> {
                         ...activeSpecialDiscounts.asMap().entries.map(
                               (e) => _specialDiscountCard(
                                 e.value,
-                                isBest: e.key == 0,
+                                isBest: e.key == 0 &&
+                                    (e.value['isApplicable'] as bool),
                               ),
                             ),
                       ],
@@ -5678,6 +5698,12 @@ class _CartScreenState extends State<CartScreen> {
     final discountValue = discount['discountValue'] as double;
     final applicableAmount = discount['applicableAmount'] as double;
     final validTill = discount['validTill'] as String;
+    final isApplicable = discount['isApplicable'] as bool;
+    // Same "still out of reach" treatment as the coupon list's locked
+    // cards (_couponCard's isLocked) - a soft red glow plus a red
+    // "Add ₹X more to unlock" hint, only for offers whose minimum order
+    // value the current cart doesn't meet.
+    final isLocked = !isApplicable && applicableAmount > 0;
 
     final discountLabel = isPercentage
         ? "Get ${discountValue.toStringAsFixed(0)}% OFF"
@@ -5704,6 +5730,16 @@ class _CartScreenState extends State<CartScreen> {
                   : AppThemeData.neutral200),
           width: isBest ? 1.5 : 1,
         ),
+        boxShadow: isLocked
+            ? [
+                BoxShadow(
+                  color: AppThemeData.danger300.withValues(alpha: 0.35),
+                  blurRadius: 12,
+                  spreadRadius: -4,
+                  offset: const Offset(0, 6),
+                ),
+              ]
+            : null,
       ),
       child: Padding(
         padding: const EdgeInsets.all(14),
@@ -5774,6 +5810,25 @@ class _CartScreenState extends State<CartScreen> {
                             ? AppThemeData.darkTextSecondary
                             : AppThemeData.neutral600,
                       ),
+                    ),
+                  ],
+                  if (isLocked) ...[
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        const Icon(Icons.lock_outline_rounded,
+                            size: 12, color: AppThemeData.danger300),
+                        const SizedBox(width: 4),
+                        Flexible(
+                          child: Text(
+                            "Add ${amountShow(amount: (applicableAmount - subTotal).toStringAsFixed(2))} more to unlock",
+                            style: AppTypography.caption.copyWith(
+                              color: AppThemeData.danger300,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ],
                   const SizedBox(height: 4),

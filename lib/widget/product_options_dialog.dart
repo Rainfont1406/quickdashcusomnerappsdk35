@@ -8,10 +8,13 @@ import 'package:emartconsumer/model/ProductModel.dart';
 import 'package:emartconsumer/model/variant_info.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/helper.dart';
+import 'package:emartconsumer/services/recommendation/recommendation_engine.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/productDetailsScreen/ProductDetailsScreen.dart';
 import 'package:emartconsumer/utils/network_image_widget.dart';
+import 'package:emartconsumer/widget/recommendation_confidence_badge.dart';
 import 'package:flutter/material.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class ProductOptionsDialog extends StatefulWidget {
@@ -28,6 +31,11 @@ class ProductOptionsDialog extends StatefulWidget {
   // auto-skips itself, even for products with no variants/add-ons. Default
   // (false) keeps the original compact "+Add" flow untouched.
   final bool showProductInfo;
+  // Same Trending/Popular Choice green confidence bar shown on the menu
+  // card (RecommendationConfidenceBadge) - passed in by the caller from its
+  // already-computed _confidenceScores map (see newVendorProductsScreen's
+  // _showProductQuickView) rather than recomputed here. Null renders nothing.
+  final ProductRecommendationConfidence? confidence;
 
   const ProductOptionsDialog({
     Key? key,
@@ -36,6 +44,7 @@ class ProductOptionsDialog extends StatefulWidget {
     this.initialVariantInfo,
     this.initialExtras,
     this.showProductInfo = false,
+    this.confidence,
   }) : super(key: key);
 
   @override
@@ -465,8 +474,14 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        ClipRRect(
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        // Floating card treatment (margin on all sides, incl. top) rather
+        // than the previous edge-to-edge crop flush with the sheet's own
+        // rounded top corners - explicit request. Rounded on all 4 corners
+        // now that it no longer needs to match the sheet's top-only radius.
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+          child: ClipRRect(
+          borderRadius: BorderRadius.circular(16),
           // Matches the vendor's fixed 16:9 upload crop exactly, so the box
           // never re-crops an already-cropped photo — see image_crop_16x9.dart.
           child: AspectRatio(
@@ -479,65 +494,9 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
                 width: double.infinity,
                 height: double.infinity,
               ),
-              Positioned(
-                top: 12,
-                right: 12,
-                child: GestureDetector(
-                  onTap: () => Navigator.of(context).pop(),
-                  child: Container(
-                    padding: const EdgeInsets.all(6),
-                    decoration: BoxDecoration(
-                      color: Colors.black.withValues(alpha: 0.4),
-                      shape: BoxShape.circle,
-                    ),
-                    child: const Icon(Icons.close, size: 18, color: Colors.white),
-                  ),
-                ),
-              ),
-              Positioned(
-                left: 12,
-                bottom: 12,
-                child: Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(3),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        border: Border.all(
-                          color: product.nonveg ? AppThemeData.error500 : const Color(0xFF10B981),
-                          width: 1.5,
-                        ),
-                        borderRadius: BorderRadius.circular(3),
-                      ),
-                      child: Container(
-                        width: 7, height: 7,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: product.nonveg ? AppThemeData.error500 : const Color(0xFF10B981),
-                        ),
-                      ),
-                    ),
-                    if (hasDiscount) ...[
-                      const SizedBox(width: 6),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                        decoration: BoxDecoration(
-                          color: AppThemeData.primary500,
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                        child: Text(
-                          '${_discountPercent(product)}% OFF'.tr(),
-                          style: const TextStyle(
-                            fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
             ],
             ),
+          ),
           ),
         ),
         Padding(
@@ -545,6 +504,72 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // Veg/non-veg + discount indicators - moved off the photo
+              // (were overlaid bottom-left on the image before) to sit as
+              // their own row above the title, same info as before, just
+              // relocated per the reference layout. Share sits at the far
+              // end of this same row (horizontally level with the veg
+              // indicator), styled as a white floating circle per reference.
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(3),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      border: Border.all(
+                        color: product.nonveg ? AppThemeData.error500 : const Color(0xFF10B981),
+                        width: 1.5,
+                      ),
+                      borderRadius: BorderRadius.circular(3),
+                    ),
+                    child: Container(
+                      width: 7, height: 7,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: product.nonveg ? AppThemeData.error500 : const Color(0xFF10B981),
+                      ),
+                    ),
+                  ),
+                  if (hasDiscount) ...[
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: AppThemeData.primary500,
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: Text(
+                        '${_discountPercent(product)}% OFF'.tr(),
+                        style: const TextStyle(
+                          fontSize: 11, fontWeight: FontWeight.bold, color: Colors.white,
+                        ),
+                      ),
+                    ),
+                  ],
+                  const Spacer(),
+                  GestureDetector(
+                    onTap: _shareProduct,
+                    child: Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: isDark ? AppThemeData.darkBgTertiary : Colors.white,
+                        shape: BoxShape.circle,
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.15),
+                            blurRadius: 6,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
+                      ),
+                      child: Icon(Icons.send_rounded,
+                          size: 16,
+                          color: isDark ? AppThemeData.grey300 : AppThemeData.grey700),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
               Text(
                 product.name,
                 style: TextStyle(
@@ -554,6 +579,11 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
                   fontFamily: AppThemeData.semiBold,
                 ),
               ),
+              // Same Trending/Popular Choice green confidence bar as the
+              // menu card (RecommendationConfidenceBadge) - explicit request
+              // to surface it here too. Renders nothing when null/below
+              // threshold, same as everywhere else it's used.
+              RecommendationConfidenceBadge(confidence: widget.confidence),
               const SizedBox(height: 8),
               Row(
                 crossAxisAlignment: CrossAxisAlignment.end,
@@ -605,6 +635,34 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
     final disPrice = double.tryParse(product.disPrice ?? '0') ?? 0;
     if (price <= 0 || disPrice <= 0 || disPrice >= price) return '0';
     return (((price - disPrice) / price) * 100).round().toString();
+  }
+
+  // Lets a user forward this item to someone else "for reference" - just the
+  // name/price/description as text, same pattern as the gift-card and
+  // referral shares elsewhere in the app (Share.share with a subject) -
+  // there's no per-product deep link anywhere in this app to share instead.
+  void _shareProduct() {
+    final product = widget.productModel;
+    final disPrice = product.disPrice ?? '0';
+    final hasDiscount = disPrice.isNotEmpty &&
+        disPrice != "0" &&
+        double.tryParse(disPrice) != null &&
+        double.parse(disPrice) > 0;
+    final priceText = amountShow(
+        amount: productCommissionPrice(hasDiscount ? disPrice : product.price));
+
+    final buffer = StringBuffer()
+      ..writeln(product.name)
+      ..writeln(priceText);
+    if (product.description.trim().isNotEmpty) {
+      buffer.writeln(product.description.trim());
+    }
+    buffer
+      ..writeln()
+      ..writeln('Check it out on QuickDash:'.tr())
+      ..write('https://play.google.com/store/apps/details?id=com.quickdash.hadeveloper');
+
+    Share.share(buffer.toString(), subject: product.name);
   }
 
   Future<void> _saveNewVariantSelections() async {
@@ -670,7 +728,7 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
     final bg = isDarkMode(context) ? AppThemeData.surfaceDark : Colors.white;
     final divColor = isDarkMode(context) ? AppThemeData.grey800 : AppThemeData.grey100;
 
-    return Container(
+    final sheet = Container(
       decoration: BoxDecoration(
         color: bg,
         borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
@@ -679,9 +737,7 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (widget.showProductInfo)
-            _buildProductInfoHeader(context)
-          else ...[
+          if (!widget.showProductInfo) ...[
             // Handle bar
             Padding(
               padding: const EdgeInsets.only(top: 12, bottom: 0),
@@ -747,18 +803,37 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
                 ],
               ),
             ),
+            Divider(height: 20, thickness: 1, color: divColor),
           ],
-          Divider(height: 20, thickness: 1, color: divColor),
-          // Scrollable content
+          // Scrollable content - in quick-view mode the hero image/title/
+          // price/description live INSIDE this same scroll view now (were a
+          // fixed sibling above it before), so the whole page moves together
+          // when the user swipes down and the photo scrolls out of the
+          // viewport like the rest of the content, Zomato-style, instead of
+          // staying pinned while only the options section scrolls under it.
           Flexible(
             child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  if (_hasNewVariants) ..._buildNewVariantsSection(),
-                  if (_hasLegacyVariants) ..._buildLegacyVariantsSection(),
-                  if (_hasAddOns) ..._buildAddOnsSection(),
+                  if (widget.showProductInfo) ...[
+                    _buildProductInfoHeader(context),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: Divider(height: 20, thickness: 1, color: divColor),
+                    ),
+                  ],
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if (_hasNewVariants) ..._buildNewVariantsSection(),
+                        if (_hasLegacyVariants) ..._buildLegacyVariantsSection(),
+                        if (_hasAddOns) ..._buildAddOnsSection(),
+                      ],
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -908,6 +983,35 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
           ),
         ],
       ),
+    );
+
+    // Quick-view mode only: the close button floats centered above the
+    // sheet's own top edge, straddling the boundary between the dimmed
+    // backdrop and the sheet - explicit reference layout - rather than
+    // sitting inside the photo like the compact "+Add" dialog's close
+    // button still does. Clip.none so the negative top offset isn't
+    // clipped by the Stack itself.
+    if (!widget.showProductInfo) return sheet;
+    return Stack(
+      clipBehavior: Clip.none,
+      alignment: Alignment.topCenter,
+      children: [
+        sheet,
+        Positioned(
+          top: -20,
+          child: GestureDetector(
+            onTap: () => Navigator.of(context).pop(),
+            child: Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.55),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.close, size: 20, color: Colors.white),
+            ),
+          ),
+        ),
+      ],
     );
   }
 
