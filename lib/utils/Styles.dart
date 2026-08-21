@@ -25,7 +25,17 @@ class Styles {
               centerTitle: true,
               iconTheme: IconThemeData(color: Colors.white),
               elevation: 0),
-      textSelectionTheme: TextSelectionThemeData(selectionColor: isDarkTheme ? Colors.white : Colors.black),
+      // Selection highlight must stay translucent - it draws BEHIND the
+      // selected text, and most of this app's text is already black/white
+      // depending on theme. A fully opaque black/white here (as this was
+      // before) painted an opaque block right over the text color, making
+      // anything you long-press-to-select/copy look like a solid black
+      // (or white) box with the text itself invisible underneath it.
+      textSelectionTheme: TextSelectionThemeData(
+        cursorColor: AppThemeData.primary500,
+        selectionColor: AppThemeData.primary500.withOpacity(0.35),
+        selectionHandleColor: AppThemeData.primary500,
+      ),
       fontFamily: AppThemeData.regular,
       fontFamilyFallback: [
         AppThemeData.regular,

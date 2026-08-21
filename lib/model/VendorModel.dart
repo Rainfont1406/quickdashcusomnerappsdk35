@@ -96,6 +96,15 @@ class VendorModel {
   bool isVendorOnline;
   bool enabledDiveInFuture;
 
+  // Phase 1 real-time seat availability (see
+  // TABLE_BOOKING_CAPACITY_AND_DEPOSIT_PLAN.html) - deliberately separate
+  // from guestCapacity below, which is a Phase-2 booking-config field that
+  // ALWAYS defaults to 50 even when the vendor never touched it. This field
+  // must stay genuinely nullable: null means "vendor hasn't set this up,"
+  // and that restaurant must be excluded from the feature entirely, not
+  // silently treated as some default capacity.
+  int? seatCapacity;
+
   // ── Dine-In Booking Configuration ──────────────────────────────
   String bookingType;              // 'flexible' | 'slot_based'
   String bookingOpenTime;
@@ -181,6 +190,7 @@ class VendorModel {
       this.reststatus = false,
       this.isVendorOnline = false,
       this.enabledDiveInFuture = false,
+      this.seatCapacity,
       this.bookingType = 'flexible',
       this.bookingOpenTime = '',
       this.bookingCloseTime = '',
@@ -291,6 +301,10 @@ class VendorModel {
       workingHours: workingHours,
       specialDiscountEnable: parsedJson['specialDiscountEnable'] ?? false,
       specialDiscount: specialDiscount,
+      // No default - stays null when absent so an unconfigured vendor is
+      // correctly excluded from Phase 1 seat availability, not treated as
+      // some fallback capacity.
+      seatCapacity: (parsedJson['seatCapacity'] is num) ? (parsedJson['seatCapacity'] as num).toInt() : null,
       bookingType: parsedJson['bookingType'] as String? ?? 'flexible',
       bookingOpenTime: parsedJson['bookingOpenTime'] as String? ?? '',
       bookingCloseTime: parsedJson['bookingCloseTime'] as String? ?? '',
@@ -368,6 +382,7 @@ class VendorModel {
       'specialDiscount': this.specialDiscount.map((e) => e.toJson()).toList(),
       'specialDiscountEnable': this.specialDiscountEnable,
       'workingHours': workingHours.map((e) => e.toJson()).toList(),
+      'seatCapacity': seatCapacity,
       'bookingType': bookingType,
       'bookingOpenTime': bookingOpenTime,
       'bookingCloseTime': bookingCloseTime,

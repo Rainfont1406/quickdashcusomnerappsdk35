@@ -94,6 +94,9 @@ class PaymentScreen extends StatefulWidget {
   final Timestamp? scheduleTime;
   final AddressModel? addressModel;
   final String? orderType; // New field for Dineaway order type
+  // Phase 1 real-time seat availability - only set when orderType == 'Dining'
+  // at a vendor that opted in (CartScreen only shows the picker then).
+  final int? diningGuestCount;
 
   // Vendor-initiated Bill Pay accept flow: the customer paid through a
   // brand-new, completely normal order (see CartScreen's Bill Pay mode) —
@@ -126,6 +129,7 @@ class PaymentScreen extends StatefulWidget {
       this.scheduleTime,
       this.addressModel,
       this.orderType,
+      this.diningGuestCount,
       this.billPayRequestId,
       this.expectedBillVersion})
       : super(key: key);
@@ -152,6 +156,17 @@ class PaymentScreenState extends State<PaymentScreen> {
   late Future<CodModel?> futurecod;
 
   Stream<DocumentSnapshot<Map<String, dynamic>>>? userQuery;
+
+  // Phase 1 real-time seat availability - shown on THIS screen (right
+  // before the customer commits to paying) rather than on the vendor
+  // product/menu screen, so it's relevant at the moment it actually
+  // matters instead of noise while just browsing. Only fetched at all for
+  // a Dining order (widget.orderType == 'Dining') - other order types
+  // never need this. Created once in initState, not inline in build(), so
+  // the StreamBuilder keeps one stable Firestore listener for the whole
+  // screen visit instead of reopening it on every rebuild. See
+  // TABLE_BOOKING_CAPACITY_AND_DEPOSIT_PLAN.html.
+  Stream<SeatAvailability?>? _seatAvailabilityStream;
 
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
 
@@ -299,7 +314,22 @@ class PaymentScreenState extends State<PaymentScreen> {
     _razorPay.on(Razorpay.EVENT_PAYMENT_SUCCESS, _handlePaymentSuccess);
     _razorPay.on(Razorpay.EVENT_EXTERNAL_WALLET, _handleExternalWaller);
     _razorPay.on(Razorpay.EVENT_PAYMENT_ERROR, _handlePaymentError);
+    if (widget.orderType == 'Dining' && widget.products.isNotEmpty) {
+      _loadSeatAvailability();
+    }
     super.initState();
+  }
+
+  Future<void> _loadSeatAvailability() async {
+    try {
+      final vendor = await FireStoreUtils().getVendorByVendorID(widget.products.first.vendorID);
+      if (!mounted) return;
+      setState(() {
+        _seatAvailabilityStream = FireStoreUtils.streamCurrentSeatAvailability(vendor);
+      });
+    } catch (_) {
+      // Non-critical - the footer just shows nothing if this fails.
+    }
   }
 
   String? selectedRadioTile;
@@ -844,6 +874,50 @@ class PaymentScreenState extends State<PaymentScreen> {
     );
   }
 
+  // Phase 1 real-time seat availability - non-blocking, advisory only. The
+  // customer can still tap Pay Now regardless of what this shows; see
+  // TABLE_BOOKING_CAPACITY_AND_DEPOSIT_PLAN.html for why this stays
+  // advisory rather than gating checkout.
+  Widget _seatAvailabilityFooterBanner(bool dark) {
+    if (_seatAvailabilityStream == null) return const SizedBox();
+    return StreamBuilder<SeatAvailability?>(
+      stream: _seatAvailabilityStream,
+      builder: (context, snapshot) {
+        final availability = snapshot.data;
+        if (availability == null || !availability.isFull) return const SizedBox();
+        return Container(
+          margin: const EdgeInsets.only(bottom: 10),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            color: dark ? Colors.orange.shade900.withValues(alpha: 0.25) : Colors.orange.shade50,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: dark ? Colors.orange.shade700 : Colors.orange.shade200,
+            ),
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.event_seat_outlined,
+                  size: 18, color: dark ? Colors.orange.shade200 : Colors.orange.shade800),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'This restaurant is full right now. You may get a seat with a little delay.'
+                      .tr(),
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontFamily: AppThemeData.medium,
+                    color: dark ? Colors.orange.shade100 : Colors.orange.shade900,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   Widget _buildStickyFooter(BuildContext context, bool dark) {
     return Container(
       padding: EdgeInsets.fromLTRB(16, 12, 16, MediaQuery.of(context).padding.bottom + 12),
@@ -851,7 +925,12 @@ class PaymentScreenState extends State<PaymentScreen> {
         color: dark ? AppThemeData.darkBgSecondary : Colors.white,
         boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.08), blurRadius: 16, offset: const Offset(0, -4))],
       ),
-      child: SizedBox(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _seatAvailabilityFooterBanner(dark),
+          SizedBox(
         width: double.infinity,
         height: 54,
         child: ElevatedButton(
@@ -877,6 +956,8 @@ class PaymentScreenState extends State<PaymentScreen> {
                   ],
                 ),
         ),
+          ),
+        ],
       ),
     );
   }
@@ -2850,6 +2931,7 @@ class PaymentScreenState extends State<PaymentScreen> {
       takeAway: widget.take_away ?? false,
       scheduleTime: widget.scheduleTime,
       orderType: widget.orderType,
+      diningGuestCount: widget.diningGuestCount,
       billPayRequestId: widget.billPayRequestId,
       razorpayOrderId: razorpayOrderId,
       analyticsSnapshot: analyticsSnapshot,

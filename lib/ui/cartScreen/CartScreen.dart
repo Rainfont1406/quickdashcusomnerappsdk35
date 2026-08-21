@@ -100,6 +100,12 @@ class _CartScreenState extends State<CartScreen> {
   // Dineaway section variables
   String? selectedDineawayType; // "Takeaway" or "Dining"
   bool isDineawaySelected = false;
+  // Phase 1 real-time seat availability - only asked when the vendor has
+  // opted in (vendorModel?.seatCapacity != null). Feeds OrderModel below,
+  // which lets streamCurrentSeatAvailability sum actual party sizes instead
+  // of just counting active orders - see
+  // TABLE_BOOKING_CAPACITY_AND_DEPOSIT_PLAN.html.
+  int _diningGuestCount = 1;
   bool _allowDelivery = true;
   bool _allowDineaway = true;
   bool _allowDineIn = true;
@@ -1766,6 +1772,11 @@ class _CartScreenState extends State<CartScreen> {
                           scheduleTime: scheduleTime,
                           addressModel: addressModel,
                           orderType: orderTypeToStore,
+                          // Phase 1 real-time seat availability - only
+                          // meaningful for a Dining order at a vendor that
+                          // opted in (the picker above is only ever shown
+                          // in that case).
+                          diningGuestCount: orderTypeToStore == 'Dining' ? _diningGuestCount : null,
                           billPayRequestId: widget.billPayRequestModel?.id,
                           expectedBillVersion:
                               widget.billPayRequestModel?.billPayExpiresAt?.millisecondsSinceEpoch,
@@ -3539,6 +3550,14 @@ class _CartScreenState extends State<CartScreen> {
                 ),
               ],
             ),
+            // Phase 1 real-time seat availability - only asked when this
+            // vendor has actually set up seatCapacity (opted in). Restaurants
+            // that haven't don't get this prompt at all.
+            if (selectedDineawayType == "Dining" &&
+                vendorModel?.seatCapacity != null) ...[
+              const SizedBox(height: 12),
+              _diningGuestCountPicker(context),
+            ],
             if (vendorModel?.billPayEnabled == true) ...[
               const SizedBox(height: 12),
               _dineawayOption(
@@ -3555,6 +3574,112 @@ class _CartScreenState extends State<CartScreen> {
             ],
           ],
         ),
+      ),
+    );
+  }
+
+  // Phase 1 real-time seat availability - lets streamCurrentSeatAvailability
+  // sum actual party sizes against the vendor's seatCapacity instead of just
+  // counting active orders (which would show "not full" even with only 2
+  // seats left for a party of 4 asking to be seated). Only rendered when the
+  // caller already checked vendorModel?.seatCapacity != null.
+  Widget _diningGuestCountPicker(BuildContext context) {
+    final isDark = isDarkMode(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: isDark ? AppThemeData.darkBgTertiary : AppThemeData.neutral50,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: isDark ? AppThemeData.darkBorderPrimary : AppThemeData.neutral200,
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.people_outline,
+              size: 18,
+              color: isDark
+                  ? AppThemeData.darkTextSecondary
+                  : AppThemeData.neutral600),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              "How many people?".tr(),
+              style: AppTypography.bodyMedium.copyWith(
+                fontWeight: FontWeight.w600,
+                color: isDark
+                    ? AppThemeData.darkTextPrimary
+                    : AppThemeData.neutral900,
+              ),
+            ),
+          ),
+          Container(
+            decoration: BoxDecoration(
+              border: Border.all(
+                color: isDark ? AppThemeData.darkBorderPrimary : AppThemeData.neutral200,
+              ),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                GestureDetector(
+                  onTap: () {
+                    if (_diningGuestCount <= 1) return;
+                    setState(() => _diningGuestCount--);
+                  },
+                  child: Container(
+                    width: 30,
+                    height: 30,
+                    decoration: BoxDecoration(
+                      color: AppThemeData.primary500,
+                      borderRadius: const BorderRadius.only(
+                        topLeft: Radius.circular(6),
+                        bottomLeft: Radius.circular(6),
+                      ),
+                    ),
+                    child: const Icon(Icons.remove, color: Colors.white, size: 14),
+                  ),
+                ),
+                SizedBox(
+                  width: 30,
+                  child: Center(
+                    child: Text(
+                      '$_diningGuestCount',
+                      style: AppTypography.labelMedium.copyWith(
+                        fontWeight: FontWeight.w700,
+                        color: isDark
+                            ? AppThemeData.darkTextPrimary
+                            : AppThemeData.neutral900,
+                      ),
+                    ),
+                  ),
+                ),
+                GestureDetector(
+                  // Loose sanity cap, not a real venue limit - the server
+                  // never trusts this number for anything beyond the
+                  // informational seat-availability display.
+                  onTap: () {
+                    if (_diningGuestCount >= 30) return;
+                    setState(() => _diningGuestCount++);
+                  },
+                  child: Container(
+                    width: 30,
+                    height: 30,
+                    decoration: BoxDecoration(
+                      color: AppThemeData.primary500,
+                      borderRadius: const BorderRadius.only(
+                        topRight: Radius.circular(6),
+                        bottomRight: Radius.circular(6),
+                      ),
+                    ),
+                    child: const Icon(Icons.add, color: Colors.white, size: 14),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

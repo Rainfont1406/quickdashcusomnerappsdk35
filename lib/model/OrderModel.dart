@@ -58,6 +58,18 @@ class OrderModel {
   Timestamp? statusUpdatedAt;
   Timestamp? scheduleTime;
   String? orderType; // "Takeaway" or "Dining" for Dineaway feature
+  // Phase 1 real-time seat availability - only set for orderType=='Dining'
+  // at a vendor with VendorModel.seatCapacity configured. Lets
+  // streamCurrentSeatAvailability sum actual party sizes instead of just
+  // counting active orders. See TABLE_BOOKING_CAPACITY_AND_DEPOSIT_PLAN.html.
+  int? diningGuestCount;
+  // Explicit vendor signal that the table has actually been vacated -
+  // deliberately separate from status==Completed, which only means the
+  // order/kitchen side is done (food served, payment settled). A customer
+  // can still be sitting at the table well after that. Set via the "Mark
+  // Seat Free" button (vendor-side order actions), shown only once the
+  // order is Completed and only for vendors with seatCapacity configured.
+  bool seatFreed;
   String? staffStatus;
 
   // ── Vendor-initiated Bill Pay request fields ─────────────────────────────
@@ -139,6 +151,8 @@ class OrderModel {
     this.taxModel,
     this.scheduleTime,
     this.orderType,
+    this.diningGuestCount,
+    this.seatFreed = false,
     this.staffStatus,
     this.initiatedBy,
     this.billPayExpiresAt,
@@ -210,6 +224,8 @@ class OrderModel {
       taxModel: taxList,
       scheduleTime: parsedJson["scheduleTime"],
       orderType: parsedJson["orderType"],
+      diningGuestCount: (parsedJson["diningGuestCount"] is num) ? (parsedJson["diningGuestCount"] as num).toInt() : null,
+      seatFreed: parsedJson["seatFreed"] ?? false,
       staffStatus: parsedJson["staffStatus"],
       initiatedBy: parsedJson["initiatedBy"],
       billPayExpiresAt: parsedJson["billPayExpiresAt"],
@@ -257,6 +273,8 @@ class OrderModel {
       "statusUpdatedAt": this.statusUpdatedAt,
       "scheduleTime": this.scheduleTime,
       "orderType": this.orderType,
+      "diningGuestCount": this.diningGuestCount,
+      "seatFreed": this.seatFreed,
       "initiatedBy": this.initiatedBy,
       "billPayExpiresAt": this.billPayExpiresAt,
       "billPayRespondedAt": this.billPayRespondedAt,
