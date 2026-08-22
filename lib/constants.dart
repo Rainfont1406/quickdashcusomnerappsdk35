@@ -181,6 +181,14 @@ const TermsAndConditions = 'terms_and_condition';
 const GIFT_CARDS = 'gift_cards';
 const GIFT_PURCHASES = 'gift_purchases';
 const GlobalURL = "https://admin.quickdash.co.in/";
+// !! 2026-08-22: Firestore moved to asia-south1 (Mumbai) and the 6 payment
+// functions this URL calls are PREPARED (not yet deployed) to move there
+// too - see the matching commented-out deploy in the Admin Panel's
+// functions/index.js. DO NOT change this to asia-south1 and build/ship a
+// new release until that backend deploy has actually happened, or every
+// checkout/wallet-topup/table-booking payment call in the new build will
+// 404. Cutover order: deploy backend to asia-south1 first, confirm it's
+// live, THEN change this line to asia-south1 and ship a new build.
 const CloudFunctionsBaseURL = "https://us-central1-quick-dash-84f6a.cloudfunctions.net";
 const Currency = 'currencies';
 const STORAGE_ROOT = 'emart';
