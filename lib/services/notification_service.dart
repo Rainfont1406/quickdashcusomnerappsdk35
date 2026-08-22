@@ -109,7 +109,20 @@ class NotificationService {
   // Bill Pay / order notification silently did nothing.
   void _handleNotificationTap(Map<String, dynamic> data) {
     final context = navigatorKey.currentContext;
-    if (context == null) return;
+    if (context == null) {
+      // Cold start: the app process was fully killed, then launched fresh
+      // by tapping this notification. getInitialMessage() can resolve
+      // (see setupInteractedMessage above) before MaterialApp's first
+      // build() completes, so navigatorKey isn't attached to a Navigator
+      // yet - context is null here through no fault of the tap itself.
+      // Previously this just silently dropped the tap (Bill Pay/order
+      // notifications opened to Home with no error). Re-run this exact
+      // call after the next frame instead of giving up - each retry
+      // re-checks context itself, so this naturally keeps deferring until
+      // the Navigator is actually attached, however many frames that takes.
+      WidgetsBinding.instance.addPostFrameCallback((_) => _handleNotificationTap(data));
+      return;
+    }
     final String orderId = data['orderId']?.toString() ?? '';
     final String? type = data['type']?.toString();
     if (type == 'vendor_order') {
