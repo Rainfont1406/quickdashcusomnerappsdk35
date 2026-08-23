@@ -263,7 +263,7 @@ class VendorModel {
       cuisineNames: parsedJson['cuisineNames'] != null ? List<String>.from(parsedJson['cuisineNames']) : [],
       businessTypeId: parsedJson['businessTypeId'] ?? '',
       businessTypeName: parsedJson['businessTypeName'] ?? '',
-      createdAt: parsedJson['createdAt'] ?? Timestamp.now(),
+      createdAt: _parseTimestamp(parsedJson['createdAt']) ?? Timestamp.now(),
       deliveryCharge: (parsedJson.containsKey('deliveryCharge') &&
               parsedJson['deliveryCharge'] != null)
           ? DeliveryChargeModel.fromJson(parsedJson['deliveryCharge'])
@@ -466,6 +466,21 @@ class VendorModel {
   bool isCurrentDateInRange(DateTime startDate, DateTime endDate) {
     final currentDate = DateTime.now();
     return currentDate.isAfter(startDate) && currentDate.isBefore(endDate);
+  }
+
+  // Some vendor accounts have createdAt stored as a plain RFC3339 string in
+  // Firestore instead of a Timestamp (predates the fsNowTimestamp() fix
+  // documented elsewhere) - assigning that String straight into this
+  // Timestamp? field throws at parse time and silently drops the whole
+  // containing document (e.g. an order embedding this vendor as its vendor
+  // snapshot) from whatever stream is listening.
+  static Timestamp? _parseTimestamp(dynamic raw) {
+    if (raw is Timestamp) return raw;
+    if (raw is String) {
+      final parsed = DateTime.tryParse(raw);
+      if (parsed != null) return Timestamp.fromDate(parsed);
+    }
+    return null;
   }
 }
 

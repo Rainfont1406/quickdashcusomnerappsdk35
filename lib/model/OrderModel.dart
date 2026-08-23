@@ -192,7 +192,7 @@ class OrderModel {
           : AddressModel(),
       author: parsedJson.containsKey('author') ? User.fromJson(parsedJson['author']) : User(),
       authorID: parsedJson['authorID'] ?? '',
-      createdAt: parsedJson['createdAt'] ?? Timestamp.now(),
+      createdAt: _parseTimestamp(parsedJson['createdAt']) ?? Timestamp.now(),
       id: parsedJson['id'] ?? '',
       products: products,
       status: parsedJson['status'] ?? '',
@@ -219,17 +219,17 @@ class OrderModel {
       courierTrackingId: parsedJson["courierTrackingId"] ?? '',
       specialDiscount: parsedJson["specialDiscount"] ?? {},
       estimatedTimeToPrepare: parsedJson["estimatedTimeToPrepare"] ?? '',
-      acceptedAt: parsedJson["acceptedAt"],
-      statusUpdatedAt: parsedJson["statusUpdatedAt"],
+      acceptedAt: _parseTimestamp(parsedJson["acceptedAt"]),
+      statusUpdatedAt: _parseTimestamp(parsedJson["statusUpdatedAt"]),
       taxModel: taxList,
-      scheduleTime: parsedJson["scheduleTime"],
+      scheduleTime: _parseTimestamp(parsedJson["scheduleTime"]),
       orderType: parsedJson["orderType"],
       diningGuestCount: (parsedJson["diningGuestCount"] is num) ? (parsedJson["diningGuestCount"] as num).toInt() : null,
       seatFreed: parsedJson["seatFreed"] ?? false,
       staffStatus: parsedJson["staffStatus"],
       initiatedBy: parsedJson["initiatedBy"],
-      billPayExpiresAt: parsedJson["billPayExpiresAt"],
-      billPayRespondedAt: parsedJson["billPayRespondedAt"],
+      billPayExpiresAt: _parseTimestamp(parsedJson["billPayExpiresAt"]),
+      billPayRespondedAt: _parseTimestamp(parsedJson["billPayRespondedAt"]),
       billPayRequestId: parsedJson["billPayRequestId"],
       razorpayOrderId: parsedJson["razorpayOrderId"],
       analyticsSnapshot: parsedJson["analyticsSnapshot"] == null
@@ -237,6 +237,20 @@ class OrderModel {
           : Map<String, dynamic>.from(parsedJson["analyticsSnapshot"]),
       pricing: parsedJson["pricing"] == null ? null : Map<String, dynamic>.from(parsedJson["pricing"]),
     );
+  }
+
+  // Some documents have one of these Timestamp fields stored as a plain
+  // RFC3339 string instead of a real Firestore Timestamp (predates the
+  // fsNowTimestamp() fix documented elsewhere) - assigning that String
+  // straight into a Timestamp/Timestamp? field throws at parse time and
+  // silently drops the whole order from whatever stream is listening.
+  static Timestamp? _parseTimestamp(dynamic raw) {
+    if (raw is Timestamp) return raw;
+    if (raw is String) {
+      final parsed = DateTime.tryParse(raw);
+      if (parsed != null) return Timestamp.fromDate(parsed);
+    }
+    return null;
   }
 
   Map<String, dynamic> toJson() {
