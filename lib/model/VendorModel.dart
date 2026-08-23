@@ -478,7 +478,12 @@ class VendorModel {
   // caller that passes a specific instant (a customer's chosen scheduleTime).
   bool isCurrentDateInRange(DateTime startDate, DateTime endDate, [DateTime? at]) {
     final currentDate = at ?? DateTime.now();
-    return currentDate.isAfter(startDate) && currentDate.isBefore(endDate);
+    // Inclusive at both edges (>= start, <= end) - CartScreen's
+    // _generateTimeSlots() generates the closing-time slot itself
+    // (`m <= endMinutes`), so a customer scheduling for exactly closing
+    // time must pass this check too, not fall through a strict-exclusive
+    // gap between the two.
+    return !currentDate.isBefore(startDate) && !currentDate.isAfter(endDate);
   }
 
   // Some vendor accounts have createdAt stored as a plain RFC3339 string in
