@@ -422,9 +422,18 @@ class VendorModel {
   /// drifted out of sync with each other).
   bool get isAcceptingOrders => reststatus && (workingHours.isEmpty || isOpen());
 
-  bool isOpen() {
+  // Schedule-aware variant of isAcceptingOrders, for the one caller that
+  // needs to answer "will the vendor be open at this specific instant"
+  // instead of "is the vendor open right now" - CartScreen's checkout gate,
+  // once the customer has picked a future scheduleTime. Every other caller
+  // (home screen badge, restaurant-detail badge, filters) genuinely wants
+  // "right now" and should keep using isAcceptingOrders/isOpen() unchanged.
+  bool isAcceptingOrdersAt(DateTime at) =>
+      reststatus && (workingHours.isEmpty || isOpen(at));
+
+  bool isOpen([DateTime? at]) {
     try {
-      final now = DateTime.now();
+      final now = at ?? DateTime.now();
       final todayName = DateFormat('EEEE', 'en_US').format(now);
       final yesterdayName = DateFormat('EEEE', 'en_US')
           .format(now.subtract(const Duration(days: 1)));
@@ -454,7 +463,7 @@ class VendorModel {
             // Yesterday's non-crossing slot never reaches today
             continue;
           }
-          if (isCurrentDateInRange(start, end)) return true;
+          if (isCurrentDateInRange(start, end, now)) return true;
         }
       }
       return false;
@@ -463,8 +472,12 @@ class VendorModel {
     }
   }
 
-  bool isCurrentDateInRange(DateTime startDate, DateTime endDate) {
-    final currentDate = DateTime.now();
+  // `at` defaults to DateTime.now() so every existing caller that wants
+  // "is this range active right now" (home screen badge, restaurant-detail
+  // badge, filters) keeps working unchanged; isOpen() above is the only
+  // caller that passes a specific instant (a customer's chosen scheduleTime).
+  bool isCurrentDateInRange(DateTime startDate, DateTime endDate, [DateTime? at]) {
+    final currentDate = at ?? DateTime.now();
     return currentDate.isAfter(startDate) && currentDate.isBefore(endDate);
   }
 

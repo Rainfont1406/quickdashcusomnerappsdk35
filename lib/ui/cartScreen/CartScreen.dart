@@ -902,13 +902,19 @@ class _CartScreenState extends State<CartScreen> {
 
     try {
     // Vendor status check (data already available from getDeliveyData).
-    // Consistent with home-screen badge and restaurant-detail badge via the
-    // shared VendorModel.isAcceptingOrders getter.
+    // For a scheduled order, check against the scheduled instant instead of
+    // "right now" (isAcceptingOrdersAt/_discountEvalTime) - otherwise a
+    // vendor that's momentarily closed blocks checkout even when the chosen
+    // slot falls inside their real working hours, and vice versa. Every
+    // other "open now" badge/filter in the app still uses the plain
+    // isAcceptingOrders getter unchanged.
     if (vendorModel != null) {
-      if (!vendorModel!.isAcceptingOrders) {
+      if (!vendorModel!.isAcceptingOrdersAt(_discountEvalTime)) {
         setState(() {
-          _cartGlobalWarning =
-              "Restaurant is currently closed. You cannot place orders right now."
+          _cartGlobalWarning = scheduleTime == null
+              ? "Restaurant is currently closed. You cannot place orders right now."
+                  .tr()
+              : "Restaurant will be closed at the selected time. Please choose a different slot."
                   .tr();
           _canCheckout = false;
         });
@@ -2800,6 +2806,11 @@ class _CartScreenState extends State<CartScreen> {
                                       ));
                                     } else {
                                       Navigator.pop(ctx);
+                                      // Re-run the vendor-open/checkout gate
+                                      // against the newly-picked scheduleTime
+                                      // instead of leaving it stuck on
+                                      // whatever it evaluated to on cart load.
+                                      _validateCart();
                                     }
                                   },
                             child: Text(
@@ -2815,6 +2826,9 @@ class _CartScreenState extends State<CartScreen> {
                           onPressed: () {
                             setState(() => scheduleTime = null);
                             Navigator.pop(ctx);
+                            // Falls back to "right now" for the vendor-open
+                            // gate - same reasoning as Confirm Schedule above.
+                            _validateCart();
                           },
                           child: Text(
                             selctedOrderTypeValue == "Delivery"
