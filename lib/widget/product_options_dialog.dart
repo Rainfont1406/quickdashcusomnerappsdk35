@@ -559,7 +559,7 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
                           width: 1,
                         ),
                       ),
-                      child: Icon(Icons.ios_share_rounded,
+                      child: Icon(Icons.shortcut_rounded,
                           size: 16,
                           color: isDark ? AppThemeData.grey300 : AppThemeData.grey700),
                     ),
