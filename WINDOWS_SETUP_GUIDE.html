@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>QuickDash Customer App — Windows Build Setup</title>
+<title>QuickDash — Windows Build Setup (Customer App / Vendor App / Vendor Web)</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -126,8 +126,8 @@
 </head>
 <body>
 
-<h1>QuickDash Customer App — Windows Build Setup</h1>
-<p class="subtitle">What a Windows machine needs to build <code>QuickDashCustomerApp</code> (Flutter), verified against this project's actual config — not generic Flutter boilerplate.</p>
+<h1>QuickDash — Windows Build Setup</h1>
+<p class="subtitle">What a Windows machine needs to build <strong>QuickDashCustomerApp</strong>, <strong>vendorApp</strong>, and <strong>vendorWeb</strong> (all Flutter), verified against each project's actual config — not generic Flutter boilerplate. Sections 1–8 cover Customer App plus the shared Android toolchain both mobile apps need; sections 9–10 cover what's different for Vendor App and Vendor Web specifically.</p>
 
 <div class="toc">
   <strong>Contents</strong>
@@ -140,17 +140,22 @@
     <li><a href="#build-commands">6. Build commands</a></li>
     <li><a href="#device-testing">7. Device testing (ADB)</a></li>
     <li><a href="#gotchas">8. Known gotchas</a></li>
+    <li><a href="#vendor-app">9. Vendor App (what's different)</a></li>
+    <li><a href="#vendor-web">10. Vendor Web (what's different)</a></li>
   </ul>
 </div>
 
 <h2><span class="num">1</span> Core tools <span id="core-tools"></span></h2>
 <table>
   <tr><th>Tool</th><th>Version used</th><th>Notes</th></tr>
-  <tr><td>Flutter SDK</td><td>3.35.1 (stable channel)</td><td>Dart 3.9.0 bundled. Project's <code>pubspec.yaml</code> only requires Dart <code>&gt;=3.4.3 &lt;4.0.0</code>, but build this against the same stable channel to avoid version-solving surprises.</td></tr>
-  <tr><td>JDK</td><td>17</td><td><code>android/app/build.gradle</code> pins <code>sourceCompatibility</code>/<code>targetCompatibility</code>/<code>kotlinOptions.jvmTarget</code> to Java 17 explicitly.</td></tr>
-  <tr><td>Android SDK / Android Studio</td><td>SDK 35 (compile + target), min SDK 26</td><td>Android Studio is the easiest way to get the SDK manager; the IDE itself isn't required to build from the command line.</td></tr>
+  <tr><td>Flutter SDK</td><td>3.35.1 (stable channel) — Customer App <em>and</em> Vendor App</td><td>Dart 3.9.0 bundled. Project's <code>pubspec.yaml</code> only requires Dart <code>&gt;=3.4.3 &lt;4.0.0</code>, but build this against the same stable channel to avoid version-solving surprises. <strong>Vendor Web is different</strong> — pinned to Flutter <code>3.27.3</code> via FVM (see §10) and must not be built against 3.35.1, since its <code>razorpay_flutter ^1.2.9</code> dependency uses the removed Flutter v1 plugin-embedding API and only compiles on the older engine. Vendor App has no such dependency, so it was switched to match Customer App on 2026-08-23 (see §9) — no need for FVM there anymore, though it's still harmless to use.</td></tr>
+  <tr><td>JDK</td><td>17 — verified: Eclipse Temurin 17.0.16</td><td><code>android/app/build.gradle</code> pins <code>sourceCompatibility</code>/<code>targetCompatibility</code>/<code>kotlinOptions.jvmTarget</code> to Java 17 explicitly (Customer App). Same JDK also runs Vendor App's build (AGP 8.6.0 needs JDK 17 to execute, regardless of the app's own Java-8 bytecode target — see §9).</td></tr>
+  <tr><td>Android SDK / Android Studio</td><td>SDK 35 + 36 (compile + target), min SDK 24–26</td><td>Customer App targets 35; Vendor App targets 36 (see §9) — install both platforms. Android Studio is the easiest way to get the SDK manager; the IDE itself isn't required to build from the command line.</td></tr>
   <tr><td>Gradle</td><td>8.7 (via wrapper)</td><td>Pulled automatically by <code>gradlew</code> — don't install Gradle manually.</td></tr>
   <tr><td>Git</td><td>any recent</td><td>Git Bash also works fine as the build shell.</td></tr>
+  <tr><td>Node.js</td><td>verified: v20.9.0</td><td>Only needed for <code>npm install -g firebase-tools</code> (Firebase CLI) — not used to build any Flutter app directly.</td></tr>
+  <tr><td>Firebase CLI</td><td>verified: 15.20.0</td><td>Used for rules/indexes/functions/hosting deploys — see §7 of <code>DEVELOPER_GUIDE.html</code> for the install command.</td></tr>
+  <tr><td>Google Chrome</td><td>any recent (evergreen)</td><td>Only needed for Vendor Web (§10) — <code>flutter run -d chrome</code> and viewing/testing the deployed build. Not needed for Customer App or Vendor App.</td></tr>
 </table>
 
 <h2><span class="num">2</span> Environment variables <span id="env-vars"></span></h2>
@@ -170,41 +175,42 @@
 <h2><span class="num">3</span> Android SDK components <span id="android-sdk"></span></h2>
 <p>Install via Android Studio's SDK Manager (or <code>sdkmanager</code> CLI):</p>
 <ul class="checklist">
-  <li>Android SDK Platform 35</li>
-  <li>Android SDK Build-Tools (matching 35)</li>
+  <li>Android SDK Platform 35 <span class="muted">— Customer App</span></li>
+  <li>Android SDK Platform 36 <span class="muted">— Vendor App (§9); Customer App doesn't need this one</span></li>
+  <li>Android SDK Build-Tools (matching 35 and 36) <span class="muted">— verified installed on this machine: 30.0.3, 33.0.1, 34.0.0, 37.0.0 all coexist fine, Gradle picks the version each project's <code>build.gradle</code> asks for</span></li>
   <li>Android SDK Platform-Tools</li>
   <li>Android SDK Command-line Tools</li>
   <li>CMake 3.22.1 <span class="muted">— not something you need to manually install; the SDK manager auto-installs it the first time a build needs it (you'll see "Installing CMake 3.22.1" scroll by), just don't be alarmed when it happens mid-build</span></li>
 </ul>
 <p>Accept SDK licenses once: <code>flutter doctor --android-licenses</code></p>
 
-<h2><span class="num">4</span> Project-specific files (not in git) <span id="project-files"></span></h2>
-<div class="callout warn">
-  <strong>These are gitignored on purpose — you must obtain/create them separately per machine.</strong>
-  Ask whoever owns the Firebase project / signing keys for the real values.
+<h2><span class="num">4</span> Project-specific files <span id="project-files"></span></h2>
+<div class="callout ok">
+  <strong>Good news for a fresh machine: less manual setup than you'd expect.</strong>
+  Checked directly against <code>git ls-files</code> — both <code>google-services.json</code> files (production + staging) and the release keystore (<code>quickdashcustomer.jks</code> for Customer App, <code>quickdashvendor.jks</code> for Vendor App) are already <strong>committed to the repo</strong>, not gitignored. A plain <code>git clone</code> on a new machine already has them. Only <code>android/local.properties</code> (and, if ever added, <code>android/key.properties</code>) is genuinely absent — those hold machine-specific paths and aren't meant to be shared.
 </div>
 
-<h3><code>android/local.properties</code></h3>
+<h3><code>android/local.properties</code> — the one file you must create yourself</h3>
 <pre><code>sdk.dir=C:\\Users\\&lt;you&gt;\\AppData\\Local\\Android\\sdk
 flutter.sdk=C:\\src\\flutter
 flutter.buildMode=debug
 flutter.versionName=1.0.3
 flutter.versionCode=3
 GOOGLE_MAPS_API_KEY=&lt;your Google Maps API key&gt;
-RELEASE_STORE_FILE=../../upload-keystore.jks
+RELEASE_STORE_FILE=../../quickdashcustomer.jks
 RELEASE_STORE_PASSWORD=&lt;keystore password&gt;
-RELEASE_KEY_ALIAS=upload
+RELEASE_KEY_ALIAS=&lt;key alias&gt;
 RELEASE_KEY_PASSWORD=&lt;key password&gt;</code></pre>
-<p class="muted">Debug builds don't need a real keystore/passwords to run — those four <code>RELEASE_*</code> values only matter for a signed <code>--release</code> build. <code>sdk.dir</code>/<code>flutter.sdk</code> paths must match wherever you actually installed them on your machine.</p>
+<p class="muted">Debug builds don't need real keystore values to run — those four <code>RELEASE_*</code> values only matter for a signed <code>--release</code> build. <code>sdk.dir</code>/<code>flutter.sdk</code> paths must match wherever you actually installed them on your machine (that's exactly why this file can't be committed — it's per-machine, not per-project). Ask whoever owns the keystore for the actual password/alias values; they aren't repeated here even though the guide is otherwise fully self-contained, since this file is version-controlled.</p>
 
-<h3>Firebase config (two flavors, two files)</h3>
+<h3>Firebase config (two flavors, two files) — already in the repo</h3>
 <ul>
   <li><code>android/app/google-services.json</code> — production Firebase project (<code>quick-dash-84f6a</code>)</li>
   <li><code>android/app/src/staging/google-services.json</code> — staging Firebase project</li>
 </ul>
 
-<h3>Release signing keystore</h3>
-<p><code>upload-keystore.jks</code> — referenced from <code>local.properties</code> as <code>../../upload-keystore.jks</code> (i.e. sits at the Flutter project root, two levels up from <code>android/app/</code>). Only required for a signed release build, not for debug.</p>
+<h3>Release signing keystore — already in the repo</h3>
+<p><code>quickdashcustomer.jks</code> sits at the Flutter project root (referenced from <code>local.properties</code> as <code>../../quickdashcustomer.jks</code>, two levels up from <code>android/app/</code>) and is already committed. Only required for a signed release build, not for debug — you still need the actual password/alias (not stored in the repo) to produce a working signed build.</p>
 
 <h2><span class="num">5</span> First-time build steps <span id="first-build"></span></h2>
 <ol>
@@ -256,8 +262,151 @@ flutter build apk --release --flavor production -t lib/main.dart</code></pre>
   A handful of harmless <code>google_api_headers</code> "default plugin" warnings are expected and safe to ignore — the actual signal is <code>√ Built build\app\outputs\flutter-apk\app-&lt;flavor&gt;-&lt;mode&gt;.apk</code> at the end.
 </div>
 
+<h2><span class="num">9</span> Vendor App (what's different) <span id="vendor-app"></span></h2>
+<p>Same overall shape as Customer App — Android with <code>staging</code>/<code>production</code> flavors, FVM-pinned Flutter, a keystore in the repo root. Everything in §1–§8 above applies <em>except</em> where noted below.</p>
+
+<div class="callout warn">
+  <strong>Project root on this PC: <code>D:\vendorApp</code> — NOT the copy under <code>Downloads\QuickdashMergeApps</code>.</strong>
+  Both are real git clones of the same repo (<code>Rainfont1406/quickdashStoreApp-may26</code>), and this is exactly the kind of "which clone is actually current" trap already documented for the Admin Panel repo — the folder name/location tells you nothing. Verified directly: <code>D:\vendorApp</code> is <code>0 0</code> against <code>origin/main</code> (fully current) and has today's real build output; <code>C:\Users\&lt;you&gt;\Downloads\QuickdashMergeApps\vendorApp</code> is 5 commits <em>behind</em> origin (no unique unpushed work — just stale, safe to ignore, but don't build from it). Before building or editing on a machine you haven't touched in a while, always re-verify with <code>git fetch origin main &amp;&amp; git rev-list --left-right --count origin/main...HEAD</code> in whichever clone you're about to use — whichever shows <code>0 0</code> is current.
+</div>
+
+<div class="callout ok">
+  <strong>Flutter version: 3.35.1, same as Customer App — as of 2026-08-23. Earlier guidance to pin this app to 3.27.3 was wrong; corrected below.</strong>
+  Unlike Vendor Web, this app has no <code>razorpay_flutter</code> dependency at all (checked directly - not in <code>pubspec.yaml</code>), so there was never a real reason to keep it on the older engine. FVM is still fine to use if you want it (<code>.fvmrc</code> now says <code>3.35.1</code>), but it's no longer required just to dodge a compile error the way Vendor Web genuinely does.
+</div>
+
+<div class="callout warn">
+  <strong>Real bug hit and fixed 2026-08-23: a stray <code>dependency_overrides: intl: ^0.20.0</code> broke the build outright on the old 3.27.3 pin.</strong>
+  That override (added in an unrelated commit, for reasons unclear) resolves to whatever the newest 0.20.x <code>intl</code> release is at <code>pub get</code> time - it had drifted to <code>0.20.3</code>, a release requiring a newer Dart language version than Flutter 3.27.3's bundled Dart 3.6.1 supports. The build failed with <code>Error: The specified language version is too high. The highest supported language version is 3.6.</code>, repeated across every <code>intl</code> source file. Switching to Flutter 3.35.1 (Dart 3.9.0) resolves it cleanly - verified live, real APK built and installed on a device. If this app ever gets pinned back to an older Flutter for some other reason, drop the <code>intl</code> override entirely (or pin it to a specific old version) rather than leaving an open-ended <code>^0.20.0</code> range that can drift forward on its own.
+</div>
+
+<table>
+  <tr><th>Setting</th><th>Customer App</th><th>Vendor App</th></tr>
+  <tr><td>compileSdk / targetSdk</td><td>35</td><td>36</td></tr>
+  <tr><td>minSdk</td><td>26</td><td>24</td></tr>
+  <tr><td>Java target (source/target/jvmTarget)</td><td>17</td><td>1.8</td></tr>
+  <tr><td>Android Gradle Plugin</td><td>—</td><td>8.6.0</td></tr>
+  <tr><td>Kotlin</td><td>—</td><td>2.1.0</td></tr>
+  <tr><td>Gradle (wrapper)</td><td>8.7</td><td>8.7</td></tr>
+  <tr><td>Application ID</td><td><code>com.quickdash.customer</code> (+<code>.staging</code>)</td><td><code>com.quickdash.vendor</code> (+<code>.staging</code>)</td></tr>
+  <tr><td>Release minify/shrink</td><td>—</td><td>enabled (R8 + <code>proguard-rules.pro</code>)</td></tr>
+</table>
+<p class="muted">The Java-8 bytecode target doesn't mean you need an old JDK installed — Gradle/AGP itself still needs JDK 17 to run at all (same as Customer App); it only affects what the compiled app code targets. Verified against a real, current build: <code>app-production-release.apk</code> built 2026-08-22, 130MB (noticeably smaller than the 197MB debug APK — R8 shrinking is genuinely taking effect, not just declared and unused).</p>
+
+<h3 class="first">Project-specific files</h3>
+<p>Same pattern as §4 — <code>android/app/google-services.json</code> and <code>android/app/src/staging/google-services.json</code> are already committed to this repo too, as is the release keystore <code>quickdashvendor.jks</code> at the project root. The signing config already reads its values from <code>local.properties</code> (not hardcoded in <code>build.gradle</code> — that was fixed at some point after this app's early commits), so only <code>android/local.properties</code> needs creating by hand:</p>
+<pre><code>sdk.dir=C:\\Users\\&lt;you&gt;\\AppData\\Local\\Android\\sdk
+flutter.sdk=C:\\Users\\&lt;you&gt;\\fvm\\versions\\3.35.1
+flutter.buildMode=release
+flutter.versionName=&lt;current pubspec.yaml version&gt;
+flutter.versionCode=&lt;current pubspec.yaml build number&gt;
+GOOGLE_MAPS_API_KEY=&lt;your Google Maps API key&gt;
+RELEASE_STORE_FILE=../../quickdashvendor.jks
+RELEASE_STORE_PASSWORD=&lt;keystore password&gt;
+RELEASE_KEY_ALIAS=&lt;key alias&gt;
+RELEASE_KEY_PASSWORD=&lt;key password&gt;</code></pre>
+<p class="muted"><code>flutter.sdk</code> just needs to point at wherever your Flutter 3.35.1 lives — same SDK Customer App already uses, so if you've set that up already, point both apps at the same install rather than maintaining two copies. Ask whoever owns the keystore for the real password/alias.</p>
+
+<h3>Build commands</h3>
+<pre><code># From D:\vendorApp (the current clone - see the warning above)
+fvm flutter pub get
+
+# Debug run
+fvm flutter run --flavor staging -t lib/main.dart
+fvm flutter run --flavor production -t lib/main.dart
+
+# Release APK
+fvm flutter build apk --flavor staging --release -t lib/main.dart
+fvm flutter build apk --flavor production --release -t lib/main.dart
+# Output: build/app/outputs/flutter-apk/app-<flavor>-release.apk
+
+# Release AAB (Play Store)
+fvm flutter build appbundle --flavor production --release -t lib/main.dart
+# Output: build/app/outputs/bundle/productionRelease/app-production-release.aab</code></pre>
+
+<div class="callout warn">
+  <strong>If your Flutter project and pub-cache live on different drive letters, disable Kotlin's incremental compiler.</strong>
+  Already handled in this repo's <code>android/gradle.properties</code> (<code>kotlin.incremental=false</code>, with a comment explaining why) — on this machine the project is on <code>D:\</code> and the pub cache is on <code>C:\</code>, and Kotlin's incremental compiler crashes with <code>"this and base files have different roots"</code> when computing relative paths across drives. If you ever see that exact error on a fresh machine, check this setting hasn't been accidentally reverted — the cost of disabling it is a slower full Kotlin recompile each time, not a functional problem.
+</div>
+
+<h3>Install on device (ADB)</h3>
+<p>Same as §7. One extra gotcha specific to re-installing over an existing copy: if <code>adb install</code> fails with <code>INSTALL_FAILED_UPDATE_INCOMPATIBLE</code>, the device has a differently-signed build of the same app ID already installed (common after switching keystores or pulling someone else's build) — <code>adb uninstall com.quickdash.vendor</code> (or <code>.staging</code>) first, then install fresh.</p>
+
+<h2><span class="num">10</span> Vendor Web (what's different) <span id="vendor-web"></span></h2>
+<p>Project root: <code>vendorWeb</code> (on this PC it lives on a separate drive, <code>D:\vendorWeb</code> — don't assume it's a sibling of the other three apps). This is the one QuickDash project with <strong>no Android/iOS build at all</strong> in normal use — it's Flutter Web only, deployed as static files.</p>
+
+<div class="callout ok">
+  <strong>Much lighter setup than the mobile apps.</strong>
+  No Android SDK, no JDK, no keystore, no <code>local.properties</code>, no <code>google-services.json</code> hunting — <code>lib/firebase_options.dart</code> and <code>lib/firebase_options_staging.dart</code> are both already committed to the repo (verified via <code>git ls-files</code>). The only extra thing a fresh machine needs is <strong>Google Chrome</strong> installed, for local dev (<code>flutter run -d chrome</code>) and for the Vendor Web build to run at all in the browser once deployed.
+</div>
+
+<div class="callout warn">
+  <strong>Pin to Flutter 3.27.3 via FVM — this is the one app that still genuinely needs it.</strong>
+  <code>vendorWeb/pubspec.yaml</code> depends on <code>razorpay_flutter ^1.2.9</code> (used for the web Razorpay checkout), which still uses the removed Flutter v1 plugin-embedding API and only compiles on this older engine — same reasoning that used to (incorrectly) apply to Vendor App too, see §9's correction. Don't build this against 3.35.1.
+</div>
+
+<h3 class="first">No Android flavors — use <code>--dart-define=ENV=</code> instead</h3>
+<p>There's no <code>staging</code>/<code>production</code> flavor split here; the same single build target picks its Firebase project (and API base URLs) at compile time from a <code>ENV</code> dart-define, defaulting to <code>production</code> if omitted:</p>
+<pre><code>cd D:\vendorWeb
+fvm flutter pub get
+
+# Run locally in Chrome, pointed at staging Firebase
+fvm flutter run -d chrome --dart-define=ENV=staging
+
+# Run locally in Chrome, pointed at production Firebase
+fvm flutter run -d chrome --dart-define=ENV=production</code></pre>
+
+<h3>Build for web</h3>
+<pre><code>fvm flutter build web --dart-define=ENV=staging --release
+fvm flutter build web --dart-define=ENV=production --release
+# Output either way: D:\vendorWeb\build\web\
+
+# Add --source-maps when you need a real stack trace to debug a
+# production issue (production ships with no usable source map by
+# default) - safe to deploy temporarily since it's the same code, just
+# built with mappings; swap back to a plain --release build once done.
+fvm flutter build web --dart-define=ENV=production --release --source-maps</code></pre>
+
+<h3>Deploy — verified working method (tar + scp + ssh, not a plain <code>scp -r</code>)</h3>
+<p>A direct <code>scp -r build\web\*</code> onto the live directory works but has no backup and can leave stale files behind from a previous build (deleted assets, renamed chunks). The tested, safer sequence — run from PowerShell/Git&nbsp;Bash on Windows, targeting the VPS at <code>193.203.162.217</code>:</p>
+<pre><code># 1. Build (staging shown; swap ENV=production + the production path below for prod)
+fvm flutter build web --dart-define=ENV=staging --release
+
+# 2. Tarball the build output (avoids Windows path/wildcard issues with scp -r)
+tar -czf vendorweb-build.tar.gz -C build/web .
+
+# 3. Upload the tarball
+scp vendorweb-build.tar.gz ashok@193.203.162.217:/home/ashok/vendorweb-build.tar.gz
+
+# 4. On the server: back up the live dir, extract into a fresh incoming dir, then swap
+ssh ashok@193.203.162.217 "cp -r /home/ashok/quickdash-staging-vendor-web /home/ashok/quickdash-staging-vendor-web-backup-$(date +%Y%m%d-%H%M%S)"
+ssh ashok@193.203.162.217 "mkdir -p /home/ashok/vendorweb-incoming && tar -xzf /home/ashok/vendorweb-build.tar.gz -C /home/ashok/vendorweb-incoming"
+ssh ashok@193.203.162.217 "rm -rf /home/ashok/quickdash-staging-vendor-web/* && cp -r /home/ashok/vendorweb-incoming/. /home/ashok/quickdash-staging-vendor-web/ && rm -rf /home/ashok/vendorweb-incoming /home/ashok/vendorweb-build.tar.gz"
+# Result: https://staging-vendor.quickdash.co.in
+
+# Production target is /home/ashok/quickdash-vendor-web/ →
+# https://vendor.quickdash.co.in — same steps, different directory name,
+# and double-check you built with ENV=production first.</code></pre>
+
+<h3>Deploy — Firebase Hosting</h3>
+<pre><code># Staging
+fvm flutter build web --dart-define=ENV=staging --release
+firebase deploy --only hosting --project quickdash-staging
+# Result: https://quickdash-staging.web.app</code></pre>
+
+<div class="callout warn">
+  <strong>A second, separate PRODUCTION Firebase Hosting target exists and is live — verified: <code>https://quick-dash-84f6a.web.app</code> (HTTP 200, real content).</strong>
+  <code>.firebaserc</code>'s <code>"default"</code> project is <code>quick-dash-84f6a</code> (production), not staging. That means running <code>firebase deploy --only hosting</code> <em>without</em> an explicit <code>--project</code> flag deploys to this production site — separate from, and easy to confuse with, the actual customer-facing <code>https://vendor.quickdash.co.in</code> (served by nginx off the VPS, see the tar+scp+ssh steps above). This Firebase Hosting URL isn't the one anyone actually uses day to day, but it's real and reachable, so an accidental bare <code>firebase deploy --only hosting</code> here silently updates it. Always pass <code>--project</code> explicitly — never rely on the default.
+</div>
+
+<h3>Windows-specific gotcha: <code>fvm</code> not found in Git Bash</h3>
+<div class="callout warn">
+  <strong><code>fvm: command not found</code> in a Git Bash / bash-based shell, even though it works fine in PowerShell.</strong>
+  <code>dart pub global activate fvm</code> installs a <code>.bat</code> shim that some bash-based shells on Windows don't pick up from <code>PATH</code> the same way PowerShell does. If a bare <code>fvm</code> fails, call the shim directly by its full path instead of fighting PATH config: <code>"/c/Users/&lt;you&gt;/AppData/Local/Pub/Cache/bin/fvm.bat" flutter build web --dart-define=ENV=staging --release</code>. PowerShell doesn't have this problem — plain <code>fvm</code> works there once it's on <code>PATH</code>.
+</div>
+
 <footer>
-  Generated from an actual verified build session on this project — versions/paths reflect the real config in <code>android/app/build.gradle</code>, <code>android/local.properties</code>, and <code>android/gradle/wrapper/gradle-wrapper.properties</code> at time of writing. Re-check against those files if this drifts out of date.
+  Generated from an actual verified build session on this project — versions/paths reflect the real config in <code>android/app/build.gradle</code>, <code>android/local.properties</code>, and <code>android/gradle/wrapper/gradle-wrapper.properties</code> at time of writing (Customer App), plus <code>vendorApp/android/app/build.gradle</code>, <code>vendorApp/android/local.properties</code>, <code>vendorApp/android/settings.gradle</code>, and <code>vendorWeb/pubspec.yaml</code>/<code>.fvmrc</code> for the §9–§10 additions. Re-check against those files if this drifts out of date.
 </footer>
 
 </body>
