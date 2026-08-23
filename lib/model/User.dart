@@ -147,7 +147,7 @@ class User with ChangeNotifier {
         lastName: parsedJson['lastName'] ?? '',
         active: parsedJson['active'] ?? true,
         isActive: parsedJson['isActive'] ?? false,
-        lastOnlineTimestamp: parsedJson['lastOnlineTimestamp'],
+        lastOnlineTimestamp: _parseTimestamp(parsedJson['lastOnlineTimestamp']),
         userBankDetails: parsedJson.containsKey('userBankDetails') ? UserBankDetails.fromJson(parsedJson['userBankDetails']) : UserBankDetails(),
         geoFireData: parsedJson.containsKey('g')
             ? GeoFireData.fromJson(parsedJson['g'])
