@@ -432,7 +432,9 @@ class GeoFireData {
   factory GeoFireData.fromJson(Map<dynamic, dynamic> parsedJson) {
     return GeoFireData(
       geohash: parsedJson['geohash'] ?? '',
-      geoPoint: parsedJson['geopoint'] ?? '',
+      geoPoint: parsedJson['geopoint'] is GeoPoint
+          ? parsedJson['geopoint'] as GeoPoint
+          : null,
     );
   }
 
