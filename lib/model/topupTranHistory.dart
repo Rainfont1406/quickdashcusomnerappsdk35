@@ -19,6 +19,10 @@ class TopupTranHistoryModel {
   String? serviceType;
   String? transactionUser;
   String? note;
+  // Short numeric reference for display (e.g. "123456789"), same shape as
+  // OrderModel's own numeric id. Absent on transactions created before this
+  // field existed - callers should fall back to `id` in that case.
+  String? txnNumber;
 
 
   TopupTranHistoryModel({
@@ -33,6 +37,7 @@ class TopupTranHistoryModel {
     required this.serviceType,
     required this.transactionUser,
     required this.note,
+    this.txnNumber,
   });
 
   factory TopupTranHistoryModel.fromJson(Map<String, dynamic> parsedJson) {
@@ -53,6 +58,7 @@ class TopupTranHistoryModel {
       serviceType: parsedJson['serviceType'] ?? '',
       transactionUser: parsedJson['transactionUser'],
       note: parsedJson['note'] ?? "Wallet Transaction",
+      txnNumber: parsedJson['txnNumber']?.toString(),
     );
   }
 
@@ -69,6 +75,7 @@ class TopupTranHistoryModel {
       'serviceType': serviceType,
       'transactionUser': this.transactionUser,
       'note': this.note,
+      'txnNumber': this.txnNumber,
     };
     return json;
   }

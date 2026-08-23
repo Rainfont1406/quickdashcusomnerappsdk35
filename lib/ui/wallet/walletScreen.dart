@@ -620,6 +620,55 @@ class WalletScreenState extends State<WalletScreen> {
     );
   }
 
+  // Strips the old, overly-technical "(server-verified)" suffix some
+  // historical transaction notes still carry in Firestore (written before
+  // this cleanup) - verification is now shown as its own badge (see
+  // _buildVerifiedBadge below) instead of baked into the label text.
+  String _cleanTransactionNote(String? note) {
+    final raw = (note ?? '').trim();
+    if (raw.isEmpty) return 'Wallet Transaction'.tr();
+    return raw
+        .replaceAll(RegExp(r'\s*\(server[- ]verified\)', caseSensitive: false), '')
+        .trim();
+  }
+
+  // Every wallet transaction in this app is server-verified by design (no
+  // client-trusted balance write path exists) - shown as a small trust
+  // badge instead of appended to the transaction title as plain text.
+  Widget _buildVerifiedBadge(bool dark) {
+    return Container(
+      padding: EdgeInsets.symmetric(horizontal: AppSpacing.spacing2, vertical: 3),
+      decoration: BoxDecoration(
+        color: dark
+            ? AppThemeData.success500.withValues(alpha: 0.15)
+            : AppColors.success50,
+        borderRadius: AppBorderRadius.full,
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.verified_rounded, size: 12, color: AppColors.success500),
+          SizedBox(width: 4),
+          Text(
+            'Verified'.tr(),
+            style: AppTypography.caption.copyWith(
+              color: AppColors.success500,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Short numeric reference for display (txnNumber), falling back to the
+  // raw doc id for transactions created before that field existed.
+  String _displayTxnId(TopupTranHistoryModel topupTranHistory) {
+    final number = topupTranHistory.txnNumber;
+    if (number != null && number.isNotEmpty) return '#$number';
+    return topupTranHistory.id;
+  }
+
   Widget buildTransactionCard({
     required TopupTranHistoryModel topupTranHistory,
     required DateTime date,
@@ -657,19 +706,28 @@ class WalletScreenState extends State<WalletScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        topupTranHistory.note.toString(),
+                        _cleanTransactionNote(topupTranHistory.note),
                         style: AppTypography.bodyMedium.copyWith(
                           color: dark ? AppThemeData.darkTextPrimary : AppColors.neutral900,
-                          fontWeight: FontWeight.w500,
+                          fontWeight: FontWeight.w600,
                         ),
                       ),
-                      SizedBox(height: AppSpacing.spacing1),
-                      Text(
-                        DateFormat('hh:mm a, dd MMM yyyy')
-                            .format(topupTranHistory.date.toDate()),
-                        style: AppTypography.caption.copyWith(
-                          color: dark ? AppThemeData.darkTextTertiary : AppColors.neutral600,
-                        ),
+                      SizedBox(height: AppSpacing.spacing2),
+                      Row(
+                        children: [
+                          _buildVerifiedBadge(dark),
+                          SizedBox(width: AppSpacing.spacing2),
+                          Expanded(
+                            child: Text(
+                              DateFormat('hh:mm a, dd MMM yyyy')
+                                  .format(topupTranHistory.date.toDate()),
+                              style: AppTypography.caption.copyWith(
+                                color: dark ? AppThemeData.darkTextTertiary : AppColors.neutral600,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
                       ),
                     ],
                   ),
@@ -871,10 +929,11 @@ class WalletScreenState extends State<WalletScreen> {
                             ),
                             SizedBox(height: AppSpacing.spacing2),
                             Text(
-                              topupTranHistory.id,
-                              style: AppTypography.bodyMedium.copyWith(
+                              _displayTxnId(topupTranHistory),
+                              style: AppTypography.h6.copyWith(
                                 color: dark ? AppThemeData.darkTextPrimary : AppColors.neutral900,
-                                fontWeight: FontWeight.w500,
+                                fontWeight: FontWeight.w700,
+                                letterSpacing: 0.5,
                               ),
                             ),
                           ],
@@ -915,19 +974,21 @@ class WalletScreenState extends State<WalletScreen> {
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Text(
-                                    DateFormat('MMM dd, yyyy • hh:mm a').format(topupTranHistory.date.toDate()),
+                                    _cleanTransactionNote(topupTranHistory.note),
                                     style: AppTypography.bodyMedium.copyWith(
                                       color: dark ? AppThemeData.darkTextPrimary : AppColors.neutral900,
-                                      fontWeight: FontWeight.w500,
+                                      fontWeight: FontWeight.w600,
                                     ),
                                   ),
                                   SizedBox(height: AppSpacing.spacing1),
                                   Text(
-                                    topupTranHistory.note.toString(),
+                                    DateFormat('MMM dd, yyyy • hh:mm a').format(topupTranHistory.date.toDate()),
                                     style: AppTypography.bodySmall.copyWith(
                                       color: dark ? AppThemeData.darkTextSecondary : AppColors.neutral600,
                                     ),
                                   ),
+                                  SizedBox(height: AppSpacing.spacing2),
+                                  _buildVerifiedBadge(dark),
                                 ],
                               ),
                             ),
