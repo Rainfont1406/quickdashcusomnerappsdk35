@@ -185,9 +185,24 @@ class User with ChangeNotifier {
         companyAddress: parsedJson['companyAddress'] ?? '',
         rentalBookingDate: parsedJson['rentalBookingDate'] ?? [],
         vendorID: parsedJson['vendorID'] ?? '',
-        createdAt: parsedJson['createdAt'],
+        createdAt: _parseTimestamp(parsedJson['createdAt']),
         dob: parsedJson['dob'],
         orderRequestData: parsedJson.containsKey('orderRequestData') ? OrderModel.fromJson(parsedJson['orderRequestData']) : null);
+  }
+
+  // A handful of older documents have createdAt stored as a plain RFC3339
+  // string instead of a Firestore Timestamp (predates the fsNowTimestamp()
+  // fix) - assigning that String straight into this Timestamp? field throws
+  // at parse time and silently drops the whole containing document (e.g. an
+  // order embedding this user as its author) from whatever stream is
+  // listening. Tolerate both shapes instead of trusting the data is clean.
+  static Timestamp? _parseTimestamp(dynamic raw) {
+    if (raw is Timestamp) return raw;
+    if (raw is String) {
+      final parsed = DateTime.tryParse(raw);
+      if (parsed != null) return Timestamp.fromDate(parsed);
+    }
+    return null;
   }
 
   factory User.fromPayload(Map<String, dynamic> parsedJson) {
@@ -243,7 +258,7 @@ class User with ChangeNotifier {
         companyAddress: parsedJson['companyAddress'] ?? '',
         rentalBookingDate: parsedJson['rentalBookingDate'] ?? [],
         vendorID: parsedJson['vendorID'] ?? '',
-        createdAt: parsedJson['createdAt'],
+        createdAt: _parseTimestamp(parsedJson['createdAt']),
         dob: parsedJson['dob'],
         orderRequestData: parsedJson.containsKey('orderRequestData') ? OrderModel.fromJson(parsedJson['orderRequestData']) : null);
   }
