@@ -478,7 +478,15 @@ class GeoFireData {
   factory GeoFireData.fromJson(Map<dynamic, dynamic> parsedJson) {
     return GeoFireData(
       geohash: parsedJson['geohash'] ?? '',
-      geoPoint: parsedJson['geopoint'] ?? '',
+      // geoPoint is typed GeoPoint? - a bare `?? ''` fallback assigned a
+      // String into that field whenever a vendor's geopoint was null,
+      // which is a real type violation under sound null safety and threw
+      // at parse time (found 2026-08-23: silently dropped any order whose
+      // permanently-embedded vendor snapshot had geopoint: null, since the
+      // whole OrderModel.fromJson call is wrapped in a try/catch upstream
+      // that swallows the exception with no visible error). null is
+      // already a valid, correctly-typed value here - just use it.
+      geoPoint: parsedJson['geopoint'] is GeoPoint ? parsedJson['geopoint'] as GeoPoint : null,
     );
   }
 
