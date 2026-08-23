@@ -554,15 +554,12 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
                       decoration: BoxDecoration(
                         color: isDark ? AppThemeData.darkBgTertiary : Colors.white,
                         shape: BoxShape.circle,
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black.withValues(alpha: 0.15),
-                            blurRadius: 6,
-                            offset: const Offset(0, 2),
-                          ),
-                        ],
+                        border: Border.all(
+                          color: isDark ? AppThemeData.darkBorderPrimary : AppThemeData.grey300,
+                          width: 1,
+                        ),
                       ),
-                      child: Icon(Icons.send_rounded,
+                      child: Icon(Icons.ios_share_rounded,
                           size: 16,
                           color: isDark ? AppThemeData.grey300 : AppThemeData.grey700),
                     ),
