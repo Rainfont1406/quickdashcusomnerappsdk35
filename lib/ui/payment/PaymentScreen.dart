@@ -1001,6 +1001,7 @@ class PaymentScreenState extends State<PaymentScreen> {
         taxSetting: widget.taxModel,
         billPayRequestId: widget.billPayRequestId,
         expectedBillVersion: widget.expectedBillVersion,
+        scheduleTimeMillis: widget.scheduleTime?.millisecondsSinceEpoch,
       );
       debugPrint('[ORDER-PERF] createVerifiedOrderPayment — ${verifySw.elapsedMilliseconds}ms '
           '(TOTAL so far ${proceedSw.elapsedMilliseconds}ms)');
@@ -1105,6 +1106,7 @@ class PaymentScreenState extends State<PaymentScreen> {
           taxSetting: widget.taxModel,
           billPayRequestId: widget.billPayRequestId,
           expectedBillVersion: widget.expectedBillVersion,
+          scheduleTimeMillis: widget.scheduleTime?.millisecondsSinceEpoch,
         );
         debugPrint('[ORDER-PERF] createVerifiedWalletOrder — ${verifySw.elapsedMilliseconds}ms '
             '(TOTAL so far ${proceedSw.elapsedMilliseconds}ms)');
@@ -1361,6 +1363,7 @@ class PaymentScreenState extends State<PaymentScreen> {
       taxSetting: widget.taxModel,
       billPayRequestId: widget.billPayRequestId,
       expectedBillVersion: widget.expectedBillVersion,
+      scheduleTimeMillis: widget.scheduleTime?.millisecondsSinceEpoch,
     );
     dismissLoadingAndClearProcessing();
     if (!mounted) return;
@@ -1391,6 +1394,7 @@ class PaymentScreenState extends State<PaymentScreen> {
       taxSetting: widget.taxModel,
       billPayRequestId: widget.billPayRequestId,
       expectedBillVersion: widget.expectedBillVersion,
+      scheduleTimeMillis: widget.scheduleTime?.millisecondsSinceEpoch,
     );
     dismissLoadingAndClearProcessing();
     if (!mounted) return;

@@ -189,7 +189,27 @@ const GlobalURL = "https://admin.quickdash.co.in/";
 // checkout/wallet-topup/table-booking payment call in the new build will
 // 404. Cutover order: deploy backend to asia-south1 first, confirm it's
 // live, THEN change this line to asia-south1 and ship a new build.
-const CloudFunctionsBaseURL = "https://us-central1-quick-dash-84f6a.cloudfunctions.net";
+// Switched to asia-south1 (2026-08-23) - Firestore itself already lives in
+// Mumbai (asia-south1) since the earlier region migration, so this removes
+// an unnecessary US<->Mumbai round trip on every one of these calls. Safe
+// to switch outright (not a staged/dual-region client change) because every
+// function THIS constant is still used for (createVerifiedOrderPayment,
+// createVerifiedWalletOrder, createVerifiedTableBookingPayment,
+// createGiftCardPaymentOrder, verifyRazorpayPayment) was deployed to BOTH
+// us-central1 and asia-south1 first (functions/index.js, same day) -
+// us-central1 keeps serving any older installed build that hasn't updated
+// yet, unaffected.
+const CloudFunctionsBaseURL = "https://asia-south1-quick-dash-84f6a.cloudfunctions.net";
+
+// createVerifiedCodOrder is DIFFERENT - deliberately NOT switched with the
+// constant above. Confirmed via `gcloud functions describe` (2026-08-23)
+// that it exists ONLY in us-central1, never asia-south1, and its source
+// code couldn't be found in any local repo to safely deploy it to a second
+// region the way the others above were. Pinning this one call to its own
+// hardcoded us-central1 URL, decoupled from CloudFunctionsBaseURL, so a
+// future base-URL change can never silently 404 every Cash-on-Delivery
+// order placed on this build.
+const CodOrderFunctionURL = "https://us-central1-quick-dash-84f6a.cloudfunctions.net/createVerifiedCodOrder";
 const Currency = 'currencies';
 const STORAGE_ROOT = 'emart';
 

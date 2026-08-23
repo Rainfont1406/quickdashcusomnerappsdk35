@@ -55,7 +55,8 @@ class _OrdersScreenState extends State<OrdersScreen> {
     super.dispose();
   }
 
-  Future<void> _startReOrder(BuildContext context, OrderModel orderModel) async {
+  Future<void> _startReOrder(
+      BuildContext context, OrderModel orderModel) async {
     final existing = await cartDatabase.allCartProducts;
 
     if (existing.isNotEmpty &&
@@ -64,7 +65,9 @@ class _OrdersScreenState extends State<OrdersScreen> {
       final confirmed = await AppDialog.showConfirm(
         context,
         title: 'Replace Cart?'.tr(),
-        message: 'Your cart has items from another restaurant. Adding these items will clear your current cart.'.tr(),
+        message:
+            'Your cart has items from another restaurant. Adding these items will clear your current cart.'
+                .tr(),
         confirmLabel: 'Clear & Add'.tr(),
         cancelLabel: 'Cancel'.tr(),
         destructive: true,
@@ -162,7 +165,9 @@ class _OrdersScreenState extends State<OrdersScreen> {
     final pricing = orderModel.pricing;
     if (pricing != null && pricing['total'] != null) {
       final dynamic totalVal = pricing['total'];
-      return totalVal is num ? totalVal.toDouble() : double.tryParse(totalVal.toString()) ?? 0.0;
+      return totalVal is num
+          ? totalVal.toDouble()
+          : double.tryParse(totalVal.toString()) ?? 0.0;
     }
 
     double total = 0.0;
@@ -220,12 +225,13 @@ class _OrdersScreenState extends State<OrdersScreen> {
 
   Color _statusColor(String status) {
     if (status == ORDER_STATUS_COMPLETED) return AppThemeData.success500;
-    if (status == ORDER_STATUS_CANCELLED ||
-        status == ORDER_STATUS_REJECTED) return AppThemeData.error500;
+    if (status == ORDER_STATUS_CANCELLED || status == ORDER_STATUS_REJECTED)
+      return AppThemeData.error500;
     if (status == BILLPAY_STATUS_DECLINED ||
         status == BILLPAY_STATUS_EXPIRED ||
         status == BILLPAY_STATUS_CANCELLED) return AppThemeData.error500;
-    if (status == BILLPAY_STATUS_PENDING_APPROVAL) return AppThemeData.warning500;
+    if (status == BILLPAY_STATUS_PENDING_APPROVAL)
+      return AppThemeData.warning500;
     if (status == ORDER_STATUS_PLACED ||
         status == ORDER_STATUS_ACCEPTED ||
         status == ORDER_STATUS_DRIVER_PENDING ||
@@ -298,9 +304,20 @@ class _OrdersScreenState extends State<OrdersScreen> {
     final statusColor = _statusColor(orderModel.status);
     final statusBg = _statusBgColor(orderModel.status);
     final bool completed = _isCompleted(orderModel.status);
+    // A vendor-sent Bill Pay request that never actually got paid (still
+    // Pending Approval, or Declined/Expired/Cancelled) has no real
+    // transaction behind it - nothing was purchased, so "Re-Order"/"View
+    // Menu" here would be misleading (found 2026-08-23: an Expired request
+    // showed these same action buttons as a normal completed order). Once
+    // a Bill Pay request is actually paid it becomes a real order with
+    // status ORDER_STATUS_COMPLETED (same as `completed` above), so this
+    // only suppresses the still-unresolved cases.
+    final bool isUnpaidVendorBillPay =
+        orderModel.initiatedBy == 'vendor' && !completed;
     final String restaurantName = orderModel.vendor.title;
-    final String restaurantPhoto =
-        orderModel.vendor.photo.isNotEmpty ? orderModel.vendor.photo : placeholderImage;
+    final String restaurantPhoto = orderModel.vendor.photo.isNotEmpty
+        ? orderModel.vendor.photo
+        : placeholderImage;
     final String locationText = orderModel.address?.address?.toString() ?? '';
     final String dateTime = DateFormat('dd MMM yyyy · hh:mm a').format(
         DateTime.fromMillisecondsSinceEpoch(
@@ -309,7 +326,9 @@ class _OrdersScreenState extends State<OrdersScreen> {
     return Container(
       margin: const EdgeInsets.only(bottom: AppSpacing.spacing4),
       decoration: BoxDecoration(
-        color: isDarkMode(context) ? AppThemeData.neutral900 : AppThemeData.neutral0,
+        color: isDarkMode(context)
+            ? AppThemeData.neutral900
+            : AppThemeData.neutral0,
         borderRadius: BorderRadius.circular(16),
         boxShadow: [
           BoxShadow(
@@ -323,7 +342,6 @@ class _OrdersScreenState extends State<OrdersScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-
           // ── Tappable zone → Order Details ──────────────────────────────
           GestureDetector(
             behavior: HitTestBehavior.opaque,
@@ -451,7 +469,8 @@ class _OrdersScreenState extends State<OrdersScreen> {
                         // Strip leading/trailing slashes left over from old data format
                         s = s.replaceAll('"', '').trim();
                         while (s.startsWith('/')) s = s.substring(1).trim();
-                        while (s.endsWith('/')) s = s.substring(0, s.length - 1).trim();
+                        while (s.endsWith('/'))
+                          s = s.substring(0, s.length - 1).trim();
                         return s;
                       }
 
@@ -459,7 +478,8 @@ class _OrdersScreenState extends State<OrdersScreen> {
                       if (rawExtras is List) {
                         addonList = rawExtras
                             .map((e) => _cleanAddon(e.toString()))
-                            .where((s) => s.isNotEmpty && s != 'null' && s != '[]')
+                            .where(
+                                (s) => s.isNotEmpty && s != 'null' && s != '[]')
                             .toList();
                       } else if (rawExtras is String &&
                           rawExtras.isNotEmpty &&
@@ -544,18 +564,22 @@ class _OrdersScreenState extends State<OrdersScreen> {
                               ],
                             ),
                             // Customization chips — variants + add-ons
-                            if (variantEntries.isNotEmpty || addonList.isNotEmpty)
+                            if (variantEntries.isNotEmpty ||
+                                addonList.isNotEmpty)
                               Padding(
-                                padding: const EdgeInsets.only(top: 4, left: 38),
+                                padding:
+                                    const EdgeInsets.only(top: 4, left: 38),
                                 child: Wrap(
                                   spacing: 5,
                                   runSpacing: 4,
                                   children: [
-                                    ...variantEntries.map((e) => _buildCustomChip(
-                                          e.value.toString(),
-                                          isVariant: true,
-                                        )),
-                                    ...addonList.map((e) => _buildCustomChip(e)),
+                                    ...variantEntries
+                                        .map((e) => _buildCustomChip(
+                                              e.value.toString(),
+                                              isVariant: true,
+                                            )),
+                                    ...addonList
+                                        .map((e) => _buildCustomChip(e)),
                                   ],
                                 ),
                               ),
@@ -599,96 +623,99 @@ class _OrdersScreenState extends State<OrdersScreen> {
           ),
 
           // ── Action buttons (isolated from card tap) ─────────────────────
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-            child: Row(
-              children: [
-                // Re-Order — premium gradient button
-                Expanded(
-                  child: GestureDetector(
-                    onTap: () => _startReOrder(context, orderModel),
-                    child: Container(
-                      height: 44,
-                      decoration: BoxDecoration(
-                        gradient: const LinearGradient(
-                          colors: [
-                            AppThemeData.primary500,
-                            AppThemeData.primary600,
+          // Suppressed entirely for an unpaid vendor Bill Pay request - see
+          // isUnpaidVendorBillPay above.
+          if (!isUnpaidVendorBillPay)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+              child: Row(
+                children: [
+                  // Re-Order — premium gradient button
+                  Expanded(
+                    child: GestureDetector(
+                      onTap: () => _startReOrder(context, orderModel),
+                      child: Container(
+                        height: 44,
+                        decoration: BoxDecoration(
+                          gradient: const LinearGradient(
+                            colors: [
+                              AppThemeData.primary500,
+                              AppThemeData.primary600,
+                            ],
+                          ),
+                          borderRadius: BorderRadius.circular(12),
+                          boxShadow: [
+                            BoxShadow(
+                              color: AppThemeData.primary500
+                                  .withValues(alpha: 0.32),
+                              blurRadius: 12,
+                              offset: const Offset(0, 4),
+                            ),
                           ],
                         ),
-                        borderRadius: BorderRadius.circular(12),
-                        boxShadow: [
-                          BoxShadow(
-                            color: AppThemeData.primary500
-                                .withValues(alpha: 0.32),
-                            blurRadius: 12,
-                            offset: const Offset(0, 4),
-                          ),
-                        ],
-                      ),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const Icon(Icons.replay_rounded,
-                              color: Colors.white, size: 16),
-                          const SizedBox(width: 6),
-                          Text(
-                            'Re-Order'.tr(),
-                            style: const TextStyle(
-                              fontFamily: AppThemeData.semiBold,
-                              fontSize: 13,
-                              color: Colors.white,
-                              letterSpacing: 0.1,
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            const Icon(Icons.replay_rounded,
+                                color: Colors.white, size: 16),
+                            const SizedBox(width: 6),
+                            Text(
+                              'Re-Order'.tr(),
+                              style: const TextStyle(
+                                fontFamily: AppThemeData.semiBold,
+                                fontSize: 13,
+                                color: Colors.white,
+                                letterSpacing: 0.1,
+                              ),
                             ),
-                          ),
-                        ],
+                          ],
+                        ),
                       ),
                     ),
                   ),
-                ),
-                // Rate — only visible once Completed / Delivered
-                if (completed) ...[
+                  // Rate — only visible once Completed / Delivered
+                  if (completed) ...[
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _ActionButton(
+                        label: 'Rate'.tr(),
+                        icon: Icons.star_rounded,
+                        color: AppThemeData.warning500,
+                        filled: false,
+                        onTap: () => _handleRate(orderModel),
+                      ),
+                    ),
+                  ],
                   const SizedBox(width: 8),
-                  Expanded(
-                    child: _ActionButton(
-                      label: 'Rate'.tr(),
-                      icon: Icons.star_rounded,
-                      color: AppThemeData.warning500,
-                      filled: false,
-                      onTap: () => _handleRate(orderModel),
+                  // View Menu
+                  GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () {
+                      BehaviorTracker.setNextEntrySource('Reorder');
+                      precacheVendorHeroImage(context, orderModel.vendor);
+                      push(
+                        context,
+                        NewVendorProductsScreen(vendorModel: orderModel.vendor),
+                      );
+                    },
+                    child: Row(
+                      children: [
+                        Text(
+                          'View Menu'.tr(),
+                          style: AppTypography.labelSmall.copyWith(
+                            color: AppThemeData.primary500,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(width: 2),
+                        Icon(Icons.arrow_forward_ios_rounded,
+                            size: 11, color: AppThemeData.primary500),
+                      ],
                     ),
                   ),
                 ],
-                const SizedBox(width: 8),
-                // View Menu
-                GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTap: () {
-                    BehaviorTracker.setNextEntrySource('Reorder');
-                    precacheVendorHeroImage(context, orderModel.vendor);
-                    push(
-                      context,
-                      NewVendorProductsScreen(vendorModel: orderModel.vendor),
-                    );
-                  },
-                  child: Row(
-                    children: [
-                      Text(
-                        'View Menu'.tr(),
-                        style: AppTypography.labelSmall.copyWith(
-                          color: AppThemeData.primary500,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      const SizedBox(width: 2),
-                      Icon(Icons.arrow_forward_ios_rounded,
-                          size: 11, color: AppThemeData.primary500),
-                    ],
-                  ),
-                ),
-              ],
+              ),
             ),
-          ),
         ],
       ),
     );

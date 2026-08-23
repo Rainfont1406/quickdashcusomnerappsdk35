@@ -209,6 +209,17 @@ class _CartScreenState extends State<CartScreen> {
 
   DateTime get _serverAdjustedNow => DateTime.now().add(_serverTimeOffset);
 
+  // Special-discount ("happy hour") eligibility must be judged against when
+  // the order will actually be fulfilled, not when the customer happens to
+  // be checking out - found 2026-08-23: a scheduled order always evaluated
+  // against the live clock, so scheduling delivery for 8 PM inside a
+  // 6-9 PM slot while checking out at 2 PM wrongly denied the discount
+  // (and the reverse - checking out inside the window but scheduling
+  // delivery outside it - wrongly granted it). Server-side verification in
+  // paymentIntents.js/verifyOrder.js has the identical fix.
+  DateTime get _discountEvalTime =>
+      scheduleTime?.toDate() ?? _serverAdjustedNow;
+
   Future<void> _fetchServerTimeOffset() async {
     final sw = Stopwatch()..start();
     // source=Firestore('_serverPing/ping' doc) — NOT a plain read: this is a
@@ -2974,7 +2985,7 @@ class _CartScreenState extends State<CartScreen> {
       if (vendorModel!.specialDiscountEnable) {
         // Reset special discount amount at the beginning
         specialDiscountAmount = 0.0;
-        final now = _serverAdjustedNow;
+        final now = _discountEvalTime;
         var day = DateFormat('EEEE', 'en_US').format(now);
         var date = DateFormat('dd-MM-yyyy').format(now);
         
@@ -3005,7 +3016,7 @@ class _CartScreenState extends State<CartScreen> {
 
                 print('⏰ Checking timeslot: ${timeSlot.from} - ${timeSlot.to}');
 
-                if (isCurrentDateInRange(start, end)) {
+                if (isCurrentDateInRange(now, start, end)) {
                   print('✅ Time condition met');
 
                   // Check if subtotal meets the applicable amount condition
@@ -4912,9 +4923,14 @@ class _CartScreenState extends State<CartScreen> {
     );
   }
 
-  bool isCurrentDateInRange(DateTime startDate, DateTime endDate) {
-    final currentDate = _serverAdjustedNow;
-    return currentDate.isAfter(startDate) && currentDate.isBefore(endDate);
+  // `at` must be the SAME reference time the caller used to derive
+  // startDate/endDate's calendar day in the first place (_discountEvalTime
+  // for special-discount checks) - this used to hardcode the live clock
+  // internally regardless of what the caller's own "now" was, which broke
+  // scheduled-order discount evaluation even after the caller itself was
+  // fixed to use scheduleTime.
+  bool isCurrentDateInRange(DateTime at, DateTime startDate, DateTime endDate) {
+    return at.isAfter(startDate) && at.isBefore(endDate);
   }
 
   Widget _buildIssuesSummaryCard() {
@@ -5181,7 +5197,7 @@ class _CartScreenState extends State<CartScreen> {
       return [];
     }
 
-    final now = _serverAdjustedNow;
+    final now = _discountEvalTime;
     final currentDay = DateFormat('EEEE', 'en_US').format(now);
     final dateStr = DateFormat('dd-MM-yyyy').format(now);
     final List<Map<String, dynamic>> active = [];
@@ -5200,7 +5216,7 @@ class _CartScreenState extends State<CartScreen> {
               .parse('$dateStr ${slot.to}');
           // Midnight-crossing: if end ≤ start, slot wraps into next day
           if (!end.isAfter(start)) end = end.add(const Duration(days: 1));
-          if (!isCurrentDateInRange(start, end)) continue;
+          if (!isCurrentDateInRange(now, start, end)) continue;
         } catch (_) {
           continue;
         }

@@ -115,6 +115,13 @@ class RazorPayController {
     // of ever charging it. See resolveBillPayAmount in paymentIntents.js.
     String? billPayRequestId,
     int? expectedBillVersion,
+    // Epoch millis of the customer's chosen future delivery/pickup time, or
+    // null for an immediate order. Lets the server judge special-discount
+    // ("happy hour") eligibility and vendor-open status against when the
+    // order will actually be fulfilled, not the moment of checkout - see
+    // CartScreen's _discountEvalTime for the client-side half of this fix
+    // (2026-08-23).
+    int? scheduleTimeMillis,
   }) async {
     final idToken = await _idToken();
     if (idToken == null) {
@@ -142,6 +149,7 @@ class RazorPayController {
               'fcmToken': fcmToken,
               'billPayRequestId': billPayRequestId,
               'expectedBillVersion': expectedBillVersion,
+              'scheduleTimeMillis': scheduleTimeMillis,
             }),
           )
           .timeout(const Duration(seconds: 30));
@@ -211,6 +219,8 @@ class RazorPayController {
     // Bill Pay Accept & Pay only — see createVerifiedOrderPayment above.
     String? billPayRequestId,
     int? expectedBillVersion,
+    // See createVerifiedOrderPayment's doc comment - same 2026-08-23 fix.
+    int? scheduleTimeMillis,
   }) async {
     final idToken = await _idToken();
     if (idToken == null) {
@@ -238,6 +248,7 @@ class RazorPayController {
               'fcmToken': fcmToken,
               'billPayRequestId': billPayRequestId,
               'expectedBillVersion': expectedBillVersion,
+              'scheduleTimeMillis': scheduleTimeMillis,
             }),
           )
           .timeout(const Duration(seconds: 30));
@@ -334,7 +345,9 @@ class RazorPayController {
 
       final resp = await http
           .post(
-            Uri.parse('$CloudFunctionsBaseURL/createVerifiedCodOrder'),
+            // Pinned to its own us-central1-only URL, not CloudFunctionsBaseURL -
+            // see CodOrderFunctionURL's doc comment in constants.dart.
+            Uri.parse(CodOrderFunctionURL),
             headers: {'Authorization': 'Bearer $idToken', 'Content-Type': 'application/json'},
             body: jsonEncode({
               'vendorID': vendorID,
@@ -459,6 +472,13 @@ class RazorPayController {
 
   // Wallet top-up has no "true" server-known amount — the fix is guaranteeing
   // the credited amount is exactly what Razorpay actually confirms was paid.
+  //
+  // Moved off Cloud Functions onto the Laravel server (2026-08-23) - same
+  // WalletTopupController already live for Vendor Web, confirmed working
+  // with a real payment there before this switch. Only this method and its
+  // 'wallet_topup' branch in verifyPayment() below moved - 'order' and
+  // 'gift_card' verifyPayment calls are unaffected, WalletTopupController
+  // doesn't implement those.
   Future<VerifiedPaymentOrderResult> createWalletTopupOrder({required double amount}) async {
     final idToken = await _idToken();
     if (idToken == null) {
@@ -467,7 +487,7 @@ class RazorPayController {
     try {
       final resp = await http
           .post(
-            Uri.parse('$CloudFunctionsBaseURL/createWalletTopupOrder'),
+            Uri.parse('${GlobalURL}api/wallet/topup/create'),
             headers: {'Authorization': 'Bearer $idToken', 'Content-Type': 'application/json'},
             body: jsonEncode({'amount': amount}),
           )
@@ -530,10 +550,15 @@ class RazorPayController {
   }
 
   // Verifies the Razorpay payment signature server-side before the app is
-  // allowed to treat the payment as legitimate. purpose is 'order' or
-  // 'wallet_topup'; for 'wallet_topup' this is also what actually credits
-  // the wallet (server-side, once — replay-guarded by the intent's
-  // `consumed` flag).
+  // allowed to treat the payment as legitimate. purpose is 'order',
+  // 'gift_card', or 'wallet_topup'; for 'wallet_topup' this is also what
+  // actually credits the wallet (server-side, once — replay-guarded by the
+  // intent's `consumed` flag).
+  //
+  // 'wallet_topup' moved to the Laravel WalletTopupController (2026-08-23,
+  // same as createWalletTopupOrder above) - 'order'/'gift_card' stay on
+  // Cloud Functions' verifyRazorpayPayment, which is the only place that
+  // implements those two branches.
   Future<VerifyPaymentResult> verifyPayment({
     required String razorpayOrderId,
     required String razorpayPaymentId,
@@ -544,10 +569,13 @@ class RazorPayController {
     if (idToken == null) {
       return VerifyPaymentResult(errorMessage: 'Not signed in.');
     }
+    final url = purpose == 'wallet_topup'
+        ? '${GlobalURL}api/wallet/topup/verify'
+        : '$CloudFunctionsBaseURL/verifyRazorpayPayment';
     try {
       final resp = await http
           .post(
-            Uri.parse('$CloudFunctionsBaseURL/verifyRazorpayPayment'),
+            Uri.parse(url),
             headers: {'Authorization': 'Bearer $idToken', 'Content-Type': 'application/json'},
             body: jsonEncode({
               'razorpayOrderId': razorpayOrderId,
