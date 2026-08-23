@@ -123,6 +123,25 @@ class NotificationService {
       WidgetsBinding.instance.addPostFrameCallback((_) => _handleNotificationTap(data));
       return;
     }
+    _routeNotificationTap(context, data);
+  }
+
+  // Split out of _handleNotificationTap so it can await
+  // MyAppState.initialRoutingDone first. On cold start, MyAppState.initState
+  // (which starts this whole notification flow) and OnBoardingState.initState
+  // (the splash screen's own auth-based routing) fire in the same initial
+  // frame - without waiting here, this could push a deep-link route on top
+  // of the splash a moment before the splash's own pushReplacement fires,
+  // which replaces whatever's currently on top (the just-pushed deep-link
+  // route, not the splash) instead. Bounded wait so a genuine failure in
+  // that other flow can't hang every notification tap forever.
+  Future<void> _routeNotificationTap(
+      BuildContext context, Map<String, dynamic> data) async {
+    await MyAppState.initialRoutingDone.timeout(
+      const Duration(seconds: 10),
+      onTimeout: () {},
+    );
+    if (!context.mounted) return;
     final String orderId = data['orderId']?.toString() ?? '';
     final String? type = data['type']?.toString();
     if (type == 'vendor_order') {

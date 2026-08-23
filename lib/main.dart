@@ -141,6 +141,27 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
   static User? currentUser;
   static AddressModel selectedPosotion = AddressModel();
 
+  // Signals that OnBoardingState's own auth-based routing has actually
+  // navigated away from the splash screen (see OnBoardingState._safeNavigate
+  // below, which completes this). NotificationService._handleNotificationTap
+  // waits on this before pushing a deep-link route on cold start - both
+  // MyAppState.initState (notificationInit, below) and OnBoardingState.
+  // initState (hasFinishedOnBoarding) fire in the same initial frame, so
+  // without this a fast deep-link push could land on top of the splash
+  // screen moments before the splash's own pushReplacement fires - and
+  // pushReplacement silently swaps out whatever's currently on top (the
+  // pushed deep-link route, not the splash) instead (found 2026-08-23: a
+  // tapped Bill Pay notification briefly showed BillPayRequestScreen, then
+  // was clobbered back to Home within about a second).
+  static final Completer<void> _initialRoutingCompleter = Completer<void>();
+  static void markInitialRoutingDone() {
+    if (!_initialRoutingCompleter.isCompleted) {
+      _initialRoutingCompleter.complete();
+    }
+  }
+
+  static Future<void> get initialRoutingDone => _initialRoutingCompleter.future;
+
   //  late Stream<StripeKeyModel> futureStirpe;
   //  String? data,d;
 
@@ -492,6 +513,7 @@ class OnBoardingState extends State<OnBoarding> {
       }
     }
     navigate();
+    MyAppState.markInitialRoutingDone();
   }
 
   // Shared by both the cache-hit fast path and the real network path below —
