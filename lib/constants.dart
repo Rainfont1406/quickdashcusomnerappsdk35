@@ -84,6 +84,10 @@ const CAB_COUPONS = "promos";
 const PARCELCOUPONS = "parcel_coupons";
 const RENTALCOUPONS = "rental_coupons";
 const ORDERS_TABLE = 'booked_table';
+// Atomic occupancy counter for table-booking capacity (2026-08-24) - one
+// doc per (vendor, slot-or-'flexible', date), see
+// FireStoreUtils.reserveBookingCapacity/releaseBookingCapacity.
+const DINE_IN_CAPACITY = 'dine_in_capacity';
 const POPULAR_DESTINATION = 'popular_destinations';
 const dynamicNotification = 'dynamic_notification';
 const STORY = 'story';

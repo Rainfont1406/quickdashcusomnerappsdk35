@@ -167,6 +167,16 @@ class PaymentScreenState extends State<PaymentScreen> {
   // screen visit instead of reopening it on every rebuild. See
   // TABLE_BOOKING_CAPACITY_AND_DEPOSIT_PLAN.html.
   Stream<SeatAvailability?>? _seatAvailabilityStream;
+  // Set alongside _seatAvailabilityStream in _loadSeatAvailability - needed
+  // here (not just passed straight into the stream) so the guest-count
+  // picker below can check seatCapacity/seatAvailabilityEnabled/seatingMode itself.
+  VendorModel? _diningVendor;
+
+  // Guest-count input for a Dining order (2026-08-25 - moved here from
+  // CartScreen so it's asked right before the customer commits to paying,
+  // same reasoning as the seat-availability banner itself living here).
+  // Defaults from whatever CartScreen still passes in (back-compat), else 1.
+  late int _diningGuestCount = widget.diningGuestCount ?? 1;
 
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
 
@@ -325,11 +335,33 @@ class PaymentScreenState extends State<PaymentScreen> {
       final vendor = await FireStoreUtils().getVendorByVendorID(widget.products.first.vendorID);
       if (!mounted) return;
       setState(() {
-        _seatAvailabilityStream = FireStoreUtils.streamCurrentSeatAvailability(vendor);
+        _diningVendor = vendor;
+        // Club/lounge (full_session) venues don't get the rolling-
+        // availability signal at all (2026-08-25) - a guest staying all
+        // night doesn't map to "seats freeing up as people finish and
+        // leave" the way a turnover venue does, so the listener isn't even
+        // started for them. The guest-count picker's own render condition
+        // below checks the same field.
+        if (vendor.seatingMode != 'full_session') {
+          _seatAvailabilityStream = FireStoreUtils.streamCurrentSeatAvailability(vendor);
+        }
       });
     } catch (_) {
       // Non-critical - the footer just shows nothing if this fails.
     }
+  }
+
+  // Low-availability warning threshold (2026-08-25) - max(20% of capacity,
+  // 10), clamped down to capacity itself for a venue smaller than 10 seats
+  // (a threshold can never exceed the venue's own capacity). Examples
+  // confirmed with the user: capacity 30 -> 10 (20% of 30 is 6, floored up
+  // to 10); capacity 120 -> 24 (20% already exceeds 10, used as-is);
+  // capacity 6 -> 6 (10-floor would exceed capacity, clamped back down).
+  int _lowSeatThreshold(int maxCapacity) {
+    if (maxCapacity <= 0) return 0;
+    final twentyPercent = (maxCapacity * 0.2).round();
+    final withFloor = twentyPercent < 10 ? 10 : twentyPercent;
+    return withFloor > maxCapacity ? maxCapacity : withFloor;
   }
 
   String? selectedRadioTile;
@@ -878,43 +910,182 @@ class PaymentScreenState extends State<PaymentScreen> {
   // customer can still tap Pay Now regardless of what this shows; see
   // TABLE_BOOKING_CAPACITY_AND_DEPOSIT_PLAN.html for why this stays
   // advisory rather than gating checkout.
+  //
+  // Three tiers now (2026-08-25, was just full-vs-silent before):
+  //   1. Full                                          -> red "full" banner
+  //   2. Not full, but the chosen party size (
+  //      _diningGuestCount) exceeds the seats actually
+  //      remaining right now                           -> orange "delay" banner naming the exact remaining count
+  //   3. Not full, party fits, but remaining seats have
+  //      dropped under _lowSeatThreshold                -> amber "filling up" banner, same exact-count phrasing
+  //   4. Otherwise                                       -> nothing
+  // 2 takes priority over 3 - "your specific party won't comfortably fit"
+  // is more actionable than a generic low-availability nudge.
   Widget _seatAvailabilityFooterBanner(bool dark) {
     if (_seatAvailabilityStream == null) return const SizedBox();
     return StreamBuilder<SeatAvailability?>(
       stream: _seatAvailabilityStream,
       builder: (context, snapshot) {
         final availability = snapshot.data;
-        if (availability == null || !availability.isFull) return const SizedBox();
-        return Container(
-          margin: const EdgeInsets.only(bottom: 10),
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          decoration: BoxDecoration(
-            color: dark ? Colors.orange.shade900.withValues(alpha: 0.25) : Colors.orange.shade50,
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(
-              color: dark ? Colors.orange.shade700 : Colors.orange.shade200,
+        if (availability == null) return const SizedBox();
+
+        if (availability.isFull) {
+          return _seatBanner(
+            dark: dark,
+            color: Colors.red,
+            icon: Icons.event_seat_outlined,
+            message: 'This restaurant is full right now. You may get a seat with a little delay.'.tr(),
+          );
+        }
+
+        final remaining = (availability.maxCapacity - availability.occupiedGuests).clamp(0, availability.maxCapacity);
+
+        if (_diningGuestCount > remaining) {
+          return _seatBanner(
+            dark: dark,
+            color: Colors.orange,
+            icon: Icons.event_seat_outlined,
+            message: 'You may get a delay in seating - only $remaining seat${remaining == 1 ? '' : 's'} vacant right now.'.tr(),
+          );
+        }
+
+        final threshold = _lowSeatThreshold(availability.maxCapacity);
+        if (remaining <= threshold) {
+          return _seatBanner(
+            dark: dark,
+            color: Colors.amber,
+            icon: Icons.event_seat_outlined,
+            message: 'Seats are filling up - only $remaining seat${remaining == 1 ? '' : 's'} vacant right now.'.tr(),
+          );
+        }
+
+        return const SizedBox();
+      },
+    );
+  }
+
+  Widget _seatBanner({required bool dark, required MaterialColor color, required IconData icon, required String message}) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: dark ? color.shade900.withValues(alpha: 0.25) : color.shade50,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: dark ? color.shade700 : color.shade200,
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, size: 18, color: dark ? color.shade200 : color.shade800),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              message,
+              style: TextStyle(
+                fontSize: 12.5,
+                fontFamily: AppThemeData.medium,
+                color: dark ? color.shade100 : color.shade900,
+              ),
             ),
           ),
-          child: Row(
-            children: [
-              Icon(Icons.event_seat_outlined,
-                  size: 18, color: dark ? Colors.orange.shade200 : Colors.orange.shade800),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  'This restaurant is full right now. You may get a seat with a little delay.'
-                      .tr(),
-                  style: TextStyle(
-                    fontSize: 12.5,
-                    fontFamily: AppThemeData.medium,
-                    color: dark ? Colors.orange.shade100 : Colors.orange.shade900,
+        ],
+      ),
+    );
+  }
+
+  // Guest-count input for a Dining order (2026-08-25, moved here from
+  // CartScreen.dart's _diningGuestCountPicker - identical look/behavior,
+  // just relocated so it's asked right before the customer commits to
+  // paying, when the seat-availability signal it feeds is actually visible
+  // on the same screen). Only rendered when the caller already checked
+  // widget.orderType == 'Dining' && _diningVendor?.seatCapacity != null &&
+  // _diningVendor?.seatAvailabilityEnabled == true.
+  Widget _diningGuestCountPicker(bool dark) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      margin: const EdgeInsets.only(bottom: 12),
+      decoration: BoxDecoration(
+        color: dark ? AppThemeData.darkBgTertiary : Color(0xFFF7F7F9),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: dark ? AppThemeData.darkBorderPrimary : Color(0xFFE5E5EA),
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.people_outline, size: 18, color: dark ? Colors.white70 : Colors.grey.shade700),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'How many people?'.tr(),
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+                fontFamily: AppThemeData.semiBold,
+                color: dark ? Colors.white : Colors.black87,
+              ),
+            ),
+          ),
+          Container(
+            decoration: BoxDecoration(
+              border: Border.all(color: dark ? AppThemeData.darkBorderPrimary : Color(0xFFE5E5EA)),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                GestureDetector(
+                  onTap: () {
+                    if (_diningGuestCount <= 1) return;
+                    setState(() => _diningGuestCount--);
+                  },
+                  child: Container(
+                    width: 30,
+                    height: 30,
+                    decoration: BoxDecoration(
+                      color: AppThemeData.primary500,
+                      borderRadius: const BorderRadius.only(topLeft: Radius.circular(6), bottomLeft: Radius.circular(6)),
+                    ),
+                    child: const Icon(Icons.remove, color: Colors.white, size: 14),
                   ),
                 ),
-              ),
-            ],
+                SizedBox(
+                  width: 30,
+                  child: Center(
+                    child: Text(
+                      '$_diningGuestCount',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                        color: dark ? Colors.white : Colors.black87,
+                      ),
+                    ),
+                  ),
+                ),
+                GestureDetector(
+                  // Loose sanity cap, not a real venue limit - the server
+                  // never trusts this number for anything beyond the
+                  // informational seat-availability display.
+                  onTap: () {
+                    if (_diningGuestCount >= 30) return;
+                    setState(() => _diningGuestCount++);
+                  },
+                  child: Container(
+                    width: 30,
+                    height: 30,
+                    decoration: BoxDecoration(
+                      color: AppThemeData.primary500,
+                      borderRadius: const BorderRadius.only(topRight: Radius.circular(6), bottomRight: Radius.circular(6)),
+                    ),
+                    child: const Icon(Icons.add, color: Colors.white, size: 14),
+                  ),
+                ),
+              ],
+            ),
           ),
-        );
-      },
+        ],
+      ),
     );
   }
 
@@ -929,6 +1100,11 @@ class PaymentScreenState extends State<PaymentScreen> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          if (widget.orderType == 'Dining' &&
+              _diningVendor?.seatCapacity != null &&
+              _diningVendor?.seatAvailabilityEnabled == true &&
+              _diningVendor?.seatingMode != 'full_session')
+            _diningGuestCountPicker(dark),
           _seatAvailabilityFooterBanner(dark),
           SizedBox(
         width: double.infinity,
@@ -2935,7 +3111,9 @@ class PaymentScreenState extends State<PaymentScreen> {
       takeAway: widget.take_away ?? false,
       scheduleTime: widget.scheduleTime,
       orderType: widget.orderType,
-      diningGuestCount: widget.diningGuestCount,
+      // Reads the local, on-screen picker's current value now (2026-08-25),
+      // not the constructor default CartScreen used to pass in.
+      diningGuestCount: widget.orderType == 'Dining' ? _diningGuestCount : widget.diningGuestCount,
       billPayRequestId: widget.billPayRequestId,
       razorpayOrderId: razorpayOrderId,
       analyticsSnapshot: analyticsSnapshot,

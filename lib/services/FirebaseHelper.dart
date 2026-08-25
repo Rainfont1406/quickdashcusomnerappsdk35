@@ -141,6 +141,15 @@ class SeatAvailability {
   bool get isFull => maxCapacity > 0 && occupiedGuests >= maxCapacity;
 }
 
+// Thrown by FireStoreUtils.reserveBookingCapacity when a booking's slot (or,
+// for a 'flexible' vendor, the whole date) has no remaining guest capacity.
+class SlotCapacityExceededException implements Exception {
+  final String message;
+  SlotCapacityExceededException([this.message = 'This slot is fully booked. Please choose another.']);
+  @override
+  String toString() => message;
+}
+
 class FireStoreUtils {
   static FirebaseMessaging firebaseMessaging = FirebaseMessaging.instance;
   static FirebaseFirestore firestore = FirebaseFirestore.instance;
@@ -2917,12 +2926,21 @@ class FireStoreUtils {
     return orderModel;
   }
 
-  static Future<int> getSlotBookingCount({
+  // Display-only pre-check (2026-08-24, fixed - previously counted booking
+  // *documents*, not guests: a party of 8 counted as "1" against slot
+  // capacity, letting real overbooking through). This is no longer the
+  // actual enforcement point - reserveBookingCapacity's transaction below is
+  // - so a stale/wrong count here is a UX issue, not a security one.
+  //
+  // [slotId] omitted (or empty) sums every booking for the vendor+date
+  // regardless of slot - used for a 'flexible' vendor, which has no
+  // per-slot buckets at all.
+  static Future<int> getBookingCountForDate({
     required String vendorId,
-    required String slotId,
+    String slotId = '',
     required DateTime date,
   }) async {
-    // Use only equality filters (vendorID + slotId) to avoid the Firestore
+    // Use only equality filters (vendorID [+ slotId]) to avoid the Firestore
     // composite-index requirement that mixing equality + range filters triggers.
     // The bookingDateKey equality path is preferred for new documents; for older
     // documents that lack the field, we fall back to Timestamp comparison in Dart.
@@ -2931,27 +2949,91 @@ class FireStoreUtils {
     final startOfDay = DateTime(date.year, date.month, date.day);
     final endOfDay = startOfDay.add(const Duration(days: 1));
 
-    final snapshot = await firestore
-        .collection(ORDERS_TABLE)
-        .where('vendorID', isEqualTo: vendorId)
-        .where('slotId', isEqualTo: slotId)
-        .get();
+    Query<Map<String, dynamic>> query =
+        firestore.collection(ORDERS_TABLE).where('vendorID', isEqualTo: vendorId);
+    if (slotId.isNotEmpty) {
+      query = query.where('slotId', isEqualTo: slotId);
+    }
+    final snapshot = await query.get();
 
-    return snapshot.docs.where((doc) {
+    int occupiedGuests = 0;
+    for (final doc in snapshot.docs) {
       final data = doc.data();
       final status = data['status'] as String? ?? '';
-      if (status == 'Cancelled' || status == 'Rejected') return false;
+      if (status == 'Cancelled' || status == 'Rejected') continue;
 
-      // Fast path: bookingDateKey stored as 'yyyy-MM-dd' string
+      bool sameDate;
       final bdk = data['bookingDateKey'] as String?;
-      if (bdk != null) return bdk == dateKey;
+      if (bdk != null) {
+        sameDate = bdk == dateKey;
+      } else {
+        // Legacy path: compare Timestamp stored in 'date' field
+        final dateVal = data['date'];
+        if (dateVal is! Timestamp) continue;
+        final docDate = dateVal.toDate();
+        sameDate = !docDate.isBefore(startOfDay) && docDate.isBefore(endOfDay);
+      }
+      if (!sameDate) continue;
 
-      // Legacy path: compare Timestamp stored in 'date' field
-      final dateVal = data['date'];
-      if (dateVal is! Timestamp) return false;
-      final docDate = dateVal.toDate();
-      return !docDate.isBefore(startOfDay) && docDate.isBefore(endOfDay);
-    }).length;
+      final guestVal = data['totalGuest'];
+      // Legacy bookings predating totalGuest (or a corrupt value) still
+      // occupy at least one seat - never let a missing field under-count.
+      occupiedGuests += (guestVal is num && guestVal > 0) ? guestVal.toInt() : 1;
+    }
+    return occupiedGuests;
+  }
+
+  static String _capacityDocId({required String vendorId, required String bookingType, required String slotId, required String dateKey}) {
+    final bucket = bookingType == 'slot_based' ? slotId : 'flexible';
+    return '${vendorId}_${bucket}_$dateKey';
+  }
+
+  // Atomic reserve, closing the race window getBookingCountForDate's plain
+  // read can't (two concurrent bookers could both read "room available" and
+  // both write a booking). Also the first real capacity enforcement for
+  // 'flexible' vendors, which previously had none at all - maxCapacity is
+  // slot.maxCapacity for slot_based, vendor.guestCapacity for flexible.
+  // Call BEFORE any payment - see _confirmBooking's ordering.
+  static Future<void> reserveBookingCapacity({
+    required String vendorId,
+    required String bookingType,
+    required String slotId,
+    required String dateKey,
+    required int guestCount,
+    required int maxCapacity,
+  }) async {
+    final ref = firestore.collection(DINE_IN_CAPACITY).doc(
+        _capacityDocId(vendorId: vendorId, bookingType: bookingType, slotId: slotId, dateKey: dateKey));
+    await firestore.runTransaction((tx) async {
+      final snap = await tx.get(ref);
+      final occupied = (snap.data()?['occupiedGuests'] as num?)?.toInt() ?? 0;
+      if (occupied + guestCount > maxCapacity) {
+        throw SlotCapacityExceededException();
+      }
+      tx.set(ref, {'occupiedGuests': occupied + guestCount}, SetOptions(merge: true));
+    });
+  }
+
+  // Releases a reservation made by reserveBookingCapacity - used when a
+  // reservation succeeded but a later step (payment, the booking write
+  // itself) failed, so the seats must go back rather than being permanently
+  // stranded as "occupied" for no real booking. Safe to call even if
+  // nothing was actually reserved (clamped at 0).
+  static Future<void> releaseBookingCapacity({
+    required String vendorId,
+    required String bookingType,
+    required String slotId,
+    required String dateKey,
+    required int guestCount,
+  }) async {
+    final ref = firestore.collection(DINE_IN_CAPACITY).doc(
+        _capacityDocId(vendorId: vendorId, bookingType: bookingType, slotId: slotId, dateKey: dateKey));
+    await firestore.runTransaction((tx) async {
+      final snap = await tx.get(ref);
+      final occupied = (snap.data()?['occupiedGuests'] as num?)?.toInt() ?? 0;
+      final next = occupied - guestCount;
+      tx.set(ref, {'occupiedGuests': next < 0 ? 0 : next}, SetOptions(merge: true));
+    });
   }
 
   // Real-time seat availability derived from currently-active Dining orders
@@ -2960,7 +3042,11 @@ class FireStoreUtils {
   // seatCapacity setting. Only vendors who have
   // explicitly set seatCapacity are included - deliberately NOT the
   // Phase-2 guestCapacity field, which always defaults to 50 even for a
-  // vendor who never touched it (would silently include every restaurant).
+  // vendor who never touched it (would silently include every restaurant),
+  // and which can legitimately represent a different number anyway (a
+  // vendor may reserve only some of their total seats for advance
+  // bookings, leaving the rest for walk-ins - confirmed with the user
+  // 2026-08-25 that these two capacities are allowed to diverge).
   // Table booking (BookTableModel/bookingSlots) is NOT part of production
   // today, so it can't be used as the data source - this uses what IS
   // live: real Dining orders. No manual on/off toggle; fully automatic.
@@ -3011,11 +3097,16 @@ class FireStoreUtils {
   }
 
   static Stream<SeatAvailability?> streamCurrentSeatAvailability(VendorModel vendor) {
+    // seatAvailabilityEnabled is the admin-approval gate (2026-08-24) -
+    // checked here too, not just on the vendor's own config screen, so a
+    // customer stops seeing the crowding banner the instant an admin
+    // revokes approval, even if seatCapacity is still sitting in Firestore.
+    if (!vendor.seatAvailabilityEnabled) return Stream.value(null);
     if (vendor.seatCapacity == null || vendor.seatCapacity! <= 0) return Stream.value(null);
 
     // Equality-only filter (vendorID + orderType) to avoid the Firestore
     // composite-index requirement mixing in a status range/inequality
-    // filter would trigger - same reasoning as getSlotBookingCount above.
+    // filter would trigger - same reasoning as getBookingCountForDate above.
     return firestore
         .collection(ORDERS)
         .where('vendorID', isEqualTo: vendor.id)
@@ -3065,10 +3156,11 @@ class FireStoreUtils {
           continue; // past the computed deadline - assume the party has left by now
         }
 
-        // Sum actual party size when the customer provided one (CartScreen
-        // only asks for vendors with seatCapacity set); orders placed
-        // before this field existed, or without a guest-count picker shown,
-        // fall back to counting as 1 - a coarse floor, not a real headcount.
+        // Sum actual party size when the customer provided one (PaymentScreen
+        // only asks for vendors with seatCapacity set); orders
+        // placed before this field existed, or without a guest-count picker
+        // shown, fall back to counting as 1 - a coarse floor, not a real
+        // headcount.
         final guestVal = data['diningGuestCount'];
         active += (guestVal is num && guestVal.toInt() > 0) ? guestVal.toInt() : 1;
       }

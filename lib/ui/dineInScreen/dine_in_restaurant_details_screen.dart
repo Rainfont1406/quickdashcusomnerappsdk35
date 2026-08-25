@@ -66,6 +66,18 @@ class _DineInRestaurantDetailsScreenState
   double _walletBalance = 0.0;
   bool _walletLoaded = false;
 
+  // Retry-safety for _confirmBooking (2026-08-24 fix): a pre-generated id
+  // and a flag for whether its deposit has already been charged, kept as
+  // STATE rather than locals so a second tap of Confirm after a failure
+  // reuses both instead of generating a fresh bookingId and re-charging.
+  // createVerifiedTableBookingPayment's own replay-guard (paymentIntents.js)
+  // rejects a second real charge for the same bookingId anyway, but reusing
+  // it here means a retry after the booking write itself fails goes
+  // straight to retrying just that write - no confusing "already_paid"
+  // round-trip. Cleared only once a booking actually succeeds.
+  String? _pendingBookingId;
+  bool _paymentAlreadyConsumed = false;
+
   // Orange — used only for price/offer emphasis (rating, total, pricing chip)
   static const Color _accent = AppThemeData.accent500;
 
@@ -194,13 +206,19 @@ class _DineInRestaurantDetailsScreenState
       // and a single failure won't silently block the rest.
       final results = await Future.wait(
         slots.map(
-          (slot) => FireStoreUtils.getSlotBookingCount(
+          (slot) => FireStoreUtils.getBookingCountForDate(
             vendorId: widget.vendorModel.id,
             slotId: slot.id,
             date: _selectedDate,
           ).timeout(
             const Duration(seconds: 15),
-            onTimeout: () => 0, // treat timeout as 0 bookings so slot stays selectable
+            // Fail CLOSED (2026-08-24 fix): a timeout used to be treated as
+            // "0 bookings," silently showing a possibly-full slot as
+            // available. This is now display-only anyway - the real gate is
+            // reserveBookingCapacity's transaction at confirm time - but a
+            // stale "open" display is still bad UX, so a timeout now reads
+            // as "assume full" instead, same as this slot really being full.
+            onTimeout: () => slot.maxCapacity,
           ),
         ),
       );
@@ -483,7 +501,10 @@ class _DineInRestaurantDetailsScreenState
 
   // ─── Date Selector ────────────────────────────────────────────
   Widget _buildDateSelector(bool dark) {
-    final maxDays = widget.vendorModel.maxAdvanceBookingDays.clamp(1, 60);
+    // Hard cap: a table can only be booked for today or tomorrow, regardless
+    // of whatever the vendor has configured for maxAdvanceBookingDays -
+    // clamp's upper bound is the actual enforcement point (2026-08-24).
+    final maxDays = widget.vendorModel.maxAdvanceBookingDays.clamp(1, 2);
     final today = DateTime.now();
     final dates = List.generate(maxDays, (i) => today.add(Duration(days: i)));
 
@@ -1121,34 +1142,55 @@ class _DineInRestaurantDetailsScreenState
 
     _showSkeletonLoader();
 
+    final vendor = widget.vendorModel;
+    final user = MyAppState.currentUser!;
+    final dateKey = DateFormat('yyyy-MM-dd').format(_selectedDate);
+    final bool isSlotBased = vendor.bookingType == 'slot_based';
+
+    // ── Atomic capacity reservation (2026-08-24 fix) ────────────────
+    // Reserved BEFORE payment, for BOTH slot-based and flexible bookings -
+    // closes the read-then-write race two concurrent bookers could
+    // otherwise both pass, and gives a 'flexible' vendor a real capacity
+    // ceiling against vendor.guestCapacity for the first time (previously
+    // flexible bookings had zero capacity enforcement at all).
+    bool capacityReserved = false;
     try {
-      final vendor = widget.vendorModel;
-      final user = MyAppState.currentUser!;
+      final slot = isSlotBased
+          ? vendor.bookingSlots.firstWhere((s) => s.id == _selectedSlotId)
+          : null;
+      final maxCapacity = isSlotBased ? slot!.maxCapacity : vendor.guestCapacity;
+      await FireStoreUtils.reserveBookingCapacity(
+        vendorId: vendor.id,
+        bookingType: vendor.bookingType,
+        slotId: isSlotBased ? _selectedSlotId : '',
+        dateKey: dateKey,
+        guestCount: _guestCount,
+        maxCapacity: maxCapacity,
+      );
+      capacityReserved = true;
+    } on SlotCapacityExceededException catch (e) {
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.message.tr()), backgroundColor: Colors.red),
+      );
+      if (isSlotBased) await _loadSlotCounts();
+      return;
+    } catch (e) {
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Booking failed. Please try again.'.tr()),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
 
-      // ── Slot availability check ──────────────────────────────
-      if (vendor.bookingType == 'slot_based') {
-        final count = await FireStoreUtils.getSlotBookingCount(
-          vendorId: vendor.id,
-          slotId: _selectedSlotId,
-          date: _selectedDate,
-        );
-        final slot = vendor.bookingSlots.firstWhere((s) => s.id == _selectedSlotId);
-        if (count >= slot.maxCapacity) {
-          Navigator.pop(context);
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Sorry, this slot is fully booked. Please choose another.'.tr()),
-              backgroundColor: Colors.red,
-            ),
-          );
-          await _loadSlotCounts();
-          return;
-        }
-      }
-
-      // Pre-generated so the payment intent and the booking document
-      // correlate (same pattern as generateOrderId() for regular orders).
-      final bookingId = FireStoreUtils.firestore.collection(ORDERS_TABLE).doc().id;
+    try {
+      // Reused across retries (2026-08-24 fix) - a second Confirm tap after
+      // a failure below must not mint a new bookingId and re-charge.
+      _pendingBookingId ??= FireStoreUtils.firestore.collection(ORDERS_TABLE).doc().id;
+      final bookingId = _pendingBookingId!;
 
       // ── Wallet check + deduction (when charge applies) ───────
       // Server-verified and atomic: the charge is re-derived from the
@@ -1156,7 +1198,10 @@ class _DineInRestaurantDetailsScreenState
       // balance check + deduction + ledger write all happen inside one
       // Firestore transaction server-side (see
       // createVerifiedTableBookingPayment) — no client-side wallet write.
-      if (_totalCharge > 0) {
+      // Skipped on a retry that already paid (_paymentAlreadyConsumed) -
+      // that function's own replay-guard would reject a second real charge
+      // for the same bookingId anyway, but skipping avoids the round-trip.
+      if (_totalCharge > 0 && !_paymentAlreadyConsumed) {
         final result = await RazorPayController().createVerifiedTableBookingPayment(
           vendorID: vendor.id,
           guestCount: _guestCount,
@@ -1165,6 +1210,16 @@ class _DineInRestaurantDetailsScreenState
 
         if (!result.success) {
           Navigator.pop(context);
+          await FireStoreUtils.releaseBookingCapacity(
+            vendorId: vendor.id,
+            bookingType: vendor.bookingType,
+            slotId: isSlotBased ? _selectedSlotId : '',
+            dateKey: dateKey,
+            guestCount: _guestCount,
+          );
+          // Payment never went through, so there's nothing to preserve for
+          // a retry - a fresh bookingId next attempt is fine.
+          _pendingBookingId = null;
           if (result.deviceSuperseded) {
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(content: Text(result.errorMessage!), backgroundColor: Colors.red),
@@ -1185,6 +1240,7 @@ class _DineInRestaurantDetailsScreenState
           return;
         }
 
+        _paymentAlreadyConsumed = true;
         // Keep local cache in sync with the server-verified deduction.
         final newBalance = _walletBalance - result.amount;
         MyAppState.currentUser!.wallet_amount = newBalance;
@@ -1218,7 +1274,7 @@ class _DineInRestaurantDetailsScreenState
         selectedTime: vendor.bookingType == 'slot_based' ? _selectedSlotStart : _selectedTime,
         selectedEndTime: vendor.bookingType == 'slot_based' ? _selectedSlotEnd : '',
         bookingDate: DateFormat('EEE, MMM d yyyy').format(_selectedDate),
-        bookingDateKey: DateFormat('yyyy-MM-dd').format(_selectedDate),
+        bookingDateKey: dateKey,
         pricingModel: vendor.bookingPricingModel,
         bookingCharge: vendor.bookingCharge,
         totalCharge: _totalCharge,
@@ -1237,14 +1293,45 @@ class _DineInRestaurantDetailsScreenState
         });
       } catch (_) {}
 
+      // Fresh state for the next booking - this one succeeded.
+      _pendingBookingId = null;
+      _paymentAlreadyConsumed = false;
+
       Navigator.pop(context);
       push(context, BookingConfirmationScreen(booking: saved));
     } catch (e) {
+      // The booking write (or something after a successful charge) failed.
+      // Release the reservation - a retry will re-reserve it - but keep
+      // _pendingBookingId/_paymentAlreadyConsumed intact when a real charge
+      // already went through (2026-08-24 fix): the next Confirm tap reuses
+      // the same already-paid intent and retries only the booking write,
+      // instead of minting a new id and charging a second time. This is
+      // also what closes the "charged with no booking to show for it" gap -
+      // the customer isn't stuck; retrying finishes the same paid booking.
+      if (capacityReserved) {
+        try {
+          await FireStoreUtils.releaseBookingCapacity(
+            vendorId: vendor.id,
+            bookingType: vendor.bookingType,
+            slotId: isSlotBased ? _selectedSlotId : '',
+            dateKey: dateKey,
+            guestCount: _guestCount,
+          );
+        } catch (_) {}
+      }
+      if (!_paymentAlreadyConsumed) {
+        _pendingBookingId = null;
+      }
       Navigator.pop(context);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Booking failed. Please try again.'.tr()),
+          content: Text(
+            _paymentAlreadyConsumed
+                ? 'Payment received, but your booking couldn\'t be saved. Please tap Confirm again to finish - you won\'t be charged twice.'.tr()
+                : 'Booking failed. Please try again.'.tr(),
+          ),
           backgroundColor: Colors.red,
+          duration: Duration(seconds: _paymentAlreadyConsumed ? 6 : 4),
         ),
       );
     }

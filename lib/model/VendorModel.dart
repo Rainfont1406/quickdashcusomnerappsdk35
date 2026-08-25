@@ -99,11 +99,31 @@ class VendorModel {
   // Phase 1 real-time seat availability (see
   // TABLE_BOOKING_CAPACITY_AND_DEPOSIT_PLAN.html) - deliberately separate
   // from guestCapacity below, which is a Phase-2 booking-config field that
-  // ALWAYS defaults to 50 even when the vendor never touched it. This field
-  // must stay genuinely nullable: null means "vendor hasn't set this up,"
-  // and that restaurant must be excluded from the feature entirely, not
-  // silently treated as some default capacity.
+  // ALWAYS defaults to 50 even when the vendor never touched it, and
+  // represents a genuinely different real-world number for some venues
+  // (e.g. a vendor may reserve only 30 of their 50 total seats for advance
+  // table bookings, leaving 20 for walk-ins - guestCapacity and seatCapacity
+  // are allowed to legitimately differ, confirmed with the user 2026-08-25
+  // after an earlier attempt to unify them into one field was reverted).
+  // This field must stay genuinely nullable: null means "vendor hasn't set
+  // this up," and that restaurant must be excluded from the feature
+  // entirely, not silently treated as some default capacity.
   int? seatCapacity;
+
+  // Venue turnover type (2026-08-25) - 'turnover' (default) is a rolling
+  // restaurant where guests eat and leave, so seats genuinely free up over
+  // the course of service. 'full_session' is a club/lounge where a guest
+  // effectively occupies their seat for the whole night - "3 seats vacant
+  // right now" doesn't mean the same thing there, so PaymentScreen hides
+  // the guest-count input and the seat-availability banner entirely for
+  // this mode.
+  String seatingMode;
+
+  // Admin-approval gate for Seat Availability (2026-08-24) - checked by
+  // streamCurrentSeatAvailability below so a customer stops seeing the
+  // crowding banner the moment an admin revokes a vendor's approval, even
+  // if seatCapacity itself is still sitting in Firestore from before.
+  bool seatAvailabilityEnabled;
 
   // ── Dine-In Booking Configuration ──────────────────────────────
   String bookingType;              // 'flexible' | 'slot_based'
@@ -191,6 +211,8 @@ class VendorModel {
       this.isVendorOnline = false,
       this.enabledDiveInFuture = false,
       this.seatCapacity,
+      this.seatingMode = 'turnover',
+      this.seatAvailabilityEnabled = false,
       this.bookingType = 'flexible',
       this.bookingOpenTime = '',
       this.bookingCloseTime = '',
@@ -305,6 +327,8 @@ class VendorModel {
       // correctly excluded from Phase 1 seat availability, not treated as
       // some fallback capacity.
       seatCapacity: (parsedJson['seatCapacity'] is num) ? (parsedJson['seatCapacity'] as num).toInt() : null,
+      seatingMode: parsedJson['seatingMode'] as String? ?? 'turnover',
+      seatAvailabilityEnabled: parsedJson['seatAvailabilityEnabled'] as bool? ?? false,
       bookingType: parsedJson['bookingType'] as String? ?? 'flexible',
       bookingOpenTime: parsedJson['bookingOpenTime'] as String? ?? '',
       bookingCloseTime: parsedJson['bookingCloseTime'] as String? ?? '',
@@ -383,6 +407,8 @@ class VendorModel {
       'specialDiscountEnable': this.specialDiscountEnable,
       'workingHours': workingHours.map((e) => e.toJson()).toList(),
       'seatCapacity': seatCapacity,
+      'seatingMode': seatingMode,
+      'seatAvailabilityEnabled': seatAvailabilityEnabled,
       'bookingType': bookingType,
       'bookingOpenTime': bookingOpenTime,
       'bookingCloseTime': bookingCloseTime,
