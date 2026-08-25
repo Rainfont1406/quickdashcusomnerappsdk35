@@ -88,6 +88,12 @@ const ORDERS_TABLE = 'booked_table';
 // doc per (vendor, slot-or-'flexible', date), see
 // FireStoreUtils.reserveBookingCapacity/releaseBookingCapacity.
 const DINE_IN_CAPACITY = 'dine_in_capacity';
+// Server-maintained seat-occupancy aggregate, one doc per vendor
+// (2026-08-25) - see functions/dineOccupancy.js. Replaces a direct
+// vendor_orders query that was PERMISSION_DENIED for every customer (a
+// customer can only read their OWN orders, not another customer's, and an
+// occupancy count needs every customer's active Dining order at a vendor).
+const DINE_IN_OCCUPANCY = 'dine_in_occupancy';
 const POPULAR_DESTINATION = 'popular_destinations';
 const dynamicNotification = 'dynamic_notification';
 const STORY = 'story';

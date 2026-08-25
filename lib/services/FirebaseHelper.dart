@@ -3036,66 +3036,28 @@ class FireStoreUtils {
     });
   }
 
-  // Real-time seat availability derived from currently-active Dining orders
-  // (part of the existing Dineaway system - OrderModel.orderType, same
-  // field CartScreen.selectedDineawayType writes) vs. the vendor's own
-  // seatCapacity setting. Only vendors who have
-  // explicitly set seatCapacity are included - deliberately NOT the
-  // Phase-2 guestCapacity field, which always defaults to 50 even for a
-  // vendor who never touched it (would silently include every restaurant),
-  // and which can legitimately represent a different number anyway (a
-  // vendor may reserve only some of their total seats for advance
-  // bookings, leaving the rest for walk-ins - confirmed with the user
-  // 2026-08-25 that these two capacities are allowed to diverge).
-  // Table booking (BookTableModel/bookingSlots) is NOT part of production
-  // today, so it can't be used as the data source - this uses what IS
-  // live: real Dining orders. No manual on/off toggle; fully automatic.
+  // Real-time seat availability vs. the vendor's own seatCapacity setting.
+  // Only vendors who have explicitly set seatCapacity are included -
+  // deliberately NOT the Phase-2 guestCapacity field, which always
+  // defaults to 50 even for a vendor who never touched it (would silently
+  // include every restaurant), and which can legitimately represent a
+  // different number anyway (a vendor may reserve only some of their total
+  // seats for advance bookings, leaving the rest for walk-ins - confirmed
+  // with the user 2026-08-25 that these two capacities are allowed to
+  // diverge).
   //
-  // "Occupying a seat" = Rejected/Cancelled excluded (never happened/won't
-  // happen), AND seatFreed != true (the vendor's explicit "Mark Seat Free"
-  // signal - deliberately NOT the same as status==Completed, since a
-  // completed order just means the kitchen/payment side is done; the
-  // customer can still be sitting there). Two more safety nets below catch
-  // what an explicit click doesn't:
-  //
-  // Excludes orders scheduled meaningfully in the future (CartScreen allows
-  // scheduling a Dining order - nothing gates scheduleTime on the Dining
-  // option the way it does for Bill Pay). Without this, a table booked for
-  // 7pm would inflate "currently occupied" the instant it's placed at
-  // 10am, for the entire wait until the actual visit - a real bug, not a
-  // hypothetical. _kScheduleGraceWindow is a Phase 1 approximation: a
-  // scheduled order only counts once its visit time is imminent/underway.
-  static const Duration _kScheduleGraceWindow = Duration(minutes: 60);
-
-  // Also excludes orders past their computed "should be free by now"
-  // deadline, regardless of status/seatFreed - the safety net for a vendor
-  // who forgets to tap "Mark Seat Free". Deadline is computed per-order,
-  // not a flat window:
-  //  - Scheduled order (scheduleTime set): scheduleTime + _kPostVisitGrace.
-  //    Prep time doesn't apply the same way to something booked in advance,
-  //    so the visit's own scheduled time is the anchor.
-  //  - Immediate order: acceptedAt + estimatedTimeToPrepare (the vendor's
-  //    own "HH:MM" prep-time estimate from acceptOrderWithPrepTime - when
-  //    the food should actually be ready/served) + _kPostVisitGrace.
-  //  - Neither available (never went through the prep-time accept flow, or
-  //    an older order missing the field): falls back to a flat window from
-  //    acceptedAt/createdAt.
-  static const Duration _kPostVisitGrace = Duration(hours: 1);
-  static const Duration _kFallbackMaxOccupancyDuration = Duration(hours: 2, minutes: 30);
-
-  // Parses the "HH:MM" duration string acceptOrderWithPrepTime writes
-  // (e.g. "00:20" for 20 minutes) into a Duration. Returns null for
-  // anything malformed rather than guessing.
-  static Duration? _parsePrepDuration(String? hhmm) {
-    if (hhmm == null) return null;
-    final parts = hhmm.split(':');
-    if (parts.length != 2) return null;
-    final h = int.tryParse(parts[0]);
-    final m = int.tryParse(parts[1]);
-    if (h == null || m == null) return null;
-    return Duration(hours: h, minutes: m);
-  }
-
+  // Reads the server-maintained dine_in_occupancy/{vendorId} aggregate
+  // (2026-08-25) instead of querying vendor_orders directly - that direct
+  // query (vendorID + orderType=='Dining', summing every matching order)
+  // was PERMISSION_DENIED for every real customer, always: firestore.rules
+  // only allows reading a vendor_orders doc if you're its authorID, the
+  // vendor, staff, or admin, and an occupancy count needs every customer's
+  // active order at that vendor, not just the requesting customer's own.
+  // Confirmed live via logcat during an on-device test pass - the banner
+  // had never actually worked in production. See functions/dineOccupancy.js
+  // for the Cloud Functions trigger that keeps this aggregate in sync, and
+  // for where the "occupying a seat" time-window logic that used to live
+  // here (schedule-grace-window, per-order deadline) now lives instead.
   static Stream<SeatAvailability?> streamCurrentSeatAvailability(VendorModel vendor) {
     // seatAvailabilityEnabled is the admin-approval gate (2026-08-24) -
     // checked here too, not just on the vendor's own config screen, so a
@@ -3104,68 +3066,13 @@ class FireStoreUtils {
     if (!vendor.seatAvailabilityEnabled) return Stream.value(null);
     if (vendor.seatCapacity == null || vendor.seatCapacity! <= 0) return Stream.value(null);
 
-    // Equality-only filter (vendorID + orderType) to avoid the Firestore
-    // composite-index requirement mixing in a status range/inequality
-    // filter would trigger - same reasoning as getBookingCountForDate above.
-    return firestore
-        .collection(ORDERS)
-        .where('vendorID', isEqualTo: vendor.id)
-        .where('orderType', isEqualTo: 'Dining')
-        .snapshots()
-        .map((snapshot) {
-      int active = 0;
-      final now = DateTime.now();
-      for (final doc in snapshot.docs) {
-        final data = doc.data();
-        final status = data['status'] as String? ?? '';
-        // Rejected/Cancelled never happened - always excluded. Completed
-        // is deliberately NOT excluded here on its own: that only means
-        // the order/kitchen side is done (food served, paid), not that the
-        // customer has actually left - see seatFreed below, which is the
-        // real "this table is free" signal (the vendor's own "Mark Seat
-        // Free" action, or the time-ceiling fallback further down).
-        if (status == ORDER_STATUS_REJECTED || status == ORDER_STATUS_CANCELLED) {
-          continue;
-        }
-        if (data['seatFreed'] == true) continue;
-
-        final scheduleVal = data['scheduleTime'];
-        if (scheduleVal is Timestamp) {
-          final visitTime = scheduleVal.toDate();
-          if (visitTime.isAfter(now.add(_kScheduleGraceWindow))) {
-            continue; // scheduled well in the future - not occupying a seat yet
-          }
-        }
-
-        final acceptedVal = data['acceptedAt'];
-        final createdVal = data['createdAt'];
-        DateTime? deadline;
-        if (scheduleVal is Timestamp) {
-          deadline = scheduleVal.toDate().add(_kPostVisitGrace);
-        } else if (acceptedVal is Timestamp) {
-          final prep = _parsePrepDuration(data['estimatedTimeToPrepare'] as String?);
-          if (prep != null) {
-            deadline = acceptedVal.toDate().add(prep).add(_kPostVisitGrace);
-          }
-        }
-        deadline ??= (acceptedVal is Timestamp
-                ? acceptedVal.toDate()
-                : (createdVal is Timestamp ? createdVal.toDate() : null))
-            ?.add(_kFallbackMaxOccupancyDuration);
-        if (deadline != null && now.isAfter(deadline)) {
-          continue; // past the computed deadline - assume the party has left by now
-        }
-
-        // Sum actual party size when the customer provided one (PaymentScreen
-        // only asks for vendors with seatCapacity set); orders
-        // placed before this field existed, or without a guest-count picker
-        // shown, fall back to counting as 1 - a coarse floor, not a real
-        // headcount.
-        final guestVal = data['diningGuestCount'];
-        active += (guestVal is num && guestVal.toInt() > 0) ? guestVal.toInt() : 1;
-      }
+    return firestore.collection(DINE_IN_OCCUPANCY).doc(vendor.id).snapshots().map((doc) {
+      // A vendor with no aggregate doc yet (no Dining orders ever, or the
+      // trigger hasn't fired for them yet) is simply at zero occupancy -
+      // not an error state, nothing to distinguish from "quiet right now".
+      final occupied = doc.exists ? (doc.data()?['occupiedGuests'] as num?)?.toInt() ?? 0 : 0;
       return SeatAvailability(
-        occupiedGuests: active,
+        occupiedGuests: occupied,
         maxCapacity: vendor.seatCapacity!,
       );
     });
