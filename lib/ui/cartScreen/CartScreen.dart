@@ -34,6 +34,7 @@ import 'package:uuid/uuid.dart';
 
 import 'package:emartconsumer/ui/productDetailsScreen/ProductDetailsScreen.dart';
 import 'package:emartconsumer/ui/vendorProductsScreen/newVendorProductsScreen.dart';
+import 'package:emartconsumer/ui/dineInScreen/dine_in_restaurant_details_screen.dart';
 import 'package:emartconsumer/widget/product_options_dialog.dart';
 import 'package:emartconsumer/widget/savings_banner.dart';
 import 'package:flutter/material.dart';
@@ -532,6 +533,131 @@ class _CartScreenState extends State<CartScreen> {
   // ── Themed dialog for service-type mismatch / blocked options ────────────────
   void _showServiceMismatchDialog(String title, String message) {
     AppDialog.showWarning(context, title: title, message: message);
+  }
+
+  // Presented when a vendor has BOTH table booking and seat availability
+  // enabled (2026-08-25) - "Dining" alone is ambiguous between "reserve a
+  // table for later" and "I'm heading in now", so ask instead of guessing.
+  // Not shown at all when only one (or neither) is enabled - see the
+  // Dining tap handler above for those cases.
+  void _showDiningChoiceSheet() {
+    final dark = isDarkMode(context);
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (sheetCtx) => Container(
+        padding: EdgeInsets.only(
+          left: 20, right: 20, top: 24,
+          bottom: MediaQuery.of(sheetCtx).padding.bottom + 24,
+        ),
+        decoration: BoxDecoration(
+          color: dark ? AppThemeData.darkBgSecondary : Colors.white,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'How would you like to dine?'.tr(),
+              style: TextStyle(
+                fontSize: 18,
+                fontFamily: AppThemeData.bold,
+                fontWeight: FontWeight.w700,
+                color: dark ? AppThemeData.darkTextPrimary : AppThemeData.neutral900,
+              ),
+            ),
+            const SizedBox(height: 18),
+            _diningChoiceCard(
+              dark: dark,
+              icon: Icons.event_seat_rounded,
+              title: 'Book a Table'.tr(),
+              subtitle: 'Reserve for today or tomorrow'.tr(),
+              onTap: () {
+                Navigator.of(sheetCtx).pop();
+                if (vendorModel != null) {
+                  push(context, DineInRestaurantDetailsScreen(vendorModel: vendorModel!));
+                }
+              },
+            ),
+            const SizedBox(height: 12),
+            _diningChoiceCard(
+              dark: dark,
+              icon: Icons.restaurant_rounded,
+              title: 'Dine Now'.tr(),
+              subtitle: 'Order food to eat here today'.tr(),
+              onTap: () {
+                Navigator.of(sheetCtx).pop();
+                setState(() {
+                  selectedDineawayType = 'Dining';
+                  isDineawaySelected = true;
+                });
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _diningChoiceCard({
+    required bool dark,
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: dark ? AppThemeData.darkBgTertiary : AppThemeData.neutral50,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: dark ? AppThemeData.darkBorderSecondary : AppThemeData.neutral200),
+        ),
+        child: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: AppThemeData.primary500,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(icon, size: 22, color: Colors.white),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontFamily: AppThemeData.semiBold,
+                      fontWeight: FontWeight.w600,
+                      color: dark ? AppThemeData.darkTextPrimary : AppThemeData.neutral900,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    subtitle,
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontFamily: AppThemeData.regular,
+                      color: dark ? AppThemeData.darkTextTertiary : AppThemeData.neutral500,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Icon(Icons.chevron_right_rounded, color: dark ? AppThemeData.grey400 : AppThemeData.grey500),
+          ],
+        ),
+      ),
+    );
   }
 
   String _lastPermCartHash = '';
@@ -3617,6 +3743,26 @@ class _CartScreenState extends State<CartScreen> {
             );
           }
           return;
+        }
+        if (title == 'Dining') {
+          final bookingEnabled = vendorModel?.enabledDiveInFuture == true;
+          final seatAvailEnabled = vendorModel?.seatAvailabilityEnabled == true;
+          // Both features on for this vendor - let the customer pick
+          // between reserving ahead and eating now, instead of silently
+          // picking one for them (2026-08-25).
+          if (bookingEnabled && seatAvailEnabled) {
+            _showDiningChoiceSheet();
+            return;
+          }
+          // Table booking only, no live seat tracking - go straight to the
+          // booking flow rather than a normal Dining checkout, since that's
+          // the only Dining experience this vendor actually offers.
+          if (bookingEnabled && vendorModel != null) {
+            push(context, DineInRestaurantDetailsScreen(vendorModel: vendorModel!));
+            return;
+          }
+          // Seat-availability-only (or neither) falls through to the normal
+          // Dining selection below - unchanged from before this feature.
         }
         setState(() {
           selectedDineawayType = title;
