@@ -117,7 +117,7 @@ class VendorModel {
   // overridable via SeatAvailabilityScreen for a vendor who genuinely wants
   // a different number (e.g. only some seats reserved for walk-ins).
   int? get effectiveSeatCapacity =>
-      seatCapacity ?? (guestCapacity > 0 ? guestCapacity : null);
+      seatCapacity ?? (enabledDiveInFuture && guestCapacity > 0 ? guestCapacity : null);
 
   // Per-vendor override for how long a confirmed table booking's capacity
   // reservation stays held before the auto-release sweep frees it back
