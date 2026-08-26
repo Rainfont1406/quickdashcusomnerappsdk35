@@ -1101,7 +1101,7 @@ class PaymentScreenState extends State<PaymentScreen> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           if (widget.orderType == 'Dining' &&
-              _diningVendor?.seatCapacity != null &&
+              _diningVendor?.effectiveSeatCapacity != null &&
               _diningVendor?.seatAvailabilityEnabled == true &&
               _diningVendor?.seatingMode != 'full_session')
             _diningGuestCountPicker(dark),

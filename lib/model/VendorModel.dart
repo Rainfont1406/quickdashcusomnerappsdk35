@@ -110,6 +110,22 @@ class VendorModel {
   // entirely, not silently treated as some default capacity.
   int? seatCapacity;
 
+  // Single-source-of-truth fallback (2026-08-26) - a vendor who's already
+  // set guestCapacity (table booking) shouldn't have to separately fill in
+  // seatCapacity too just to get live seat tracking. Falls back to
+  // guestCapacity when seatCapacity hasn't been explicitly set; still
+  // overridable via SeatAvailabilityScreen for a vendor who genuinely wants
+  // a different number (e.g. only some seats reserved for walk-ins).
+  int? get effectiveSeatCapacity =>
+      seatCapacity ?? (guestCapacity > 0 ? guestCapacity : null);
+
+  // Per-vendor override for how long a confirmed table booking's capacity
+  // reservation stays held before the auto-release sweep frees it back
+  // (2026-08-26) - see AutoReleaseStaleBookingCapacity.php in the Admin
+  // Panel repo. Not used client-side here, just parsed for completeness
+  // since VendorModel is otherwise kept in parity across all three apps.
+  int? bookingAutoReleaseHours;
+
   // Venue turnover type (2026-08-25) - 'turnover' (default) is a rolling
   // restaurant where guests eat and leave, so seats genuinely free up over
   // the course of service. 'full_session' is a club/lounge where a guest
@@ -211,6 +227,7 @@ class VendorModel {
       this.isVendorOnline = false,
       this.enabledDiveInFuture = false,
       this.seatCapacity,
+      this.bookingAutoReleaseHours,
       this.seatingMode = 'turnover',
       this.seatAvailabilityEnabled = false,
       this.bookingType = 'flexible',
@@ -327,6 +344,7 @@ class VendorModel {
       // correctly excluded from Phase 1 seat availability, not treated as
       // some fallback capacity.
       seatCapacity: (parsedJson['seatCapacity'] is num) ? (parsedJson['seatCapacity'] as num).toInt() : null,
+      bookingAutoReleaseHours: (parsedJson['bookingAutoReleaseHours'] is num) ? (parsedJson['bookingAutoReleaseHours'] as num).toInt() : null,
       seatingMode: parsedJson['seatingMode'] as String? ?? 'turnover',
       seatAvailabilityEnabled: parsedJson['seatAvailabilityEnabled'] as bool? ?? false,
       bookingType: parsedJson['bookingType'] as String? ?? 'flexible',
@@ -407,6 +425,7 @@ class VendorModel {
       'specialDiscountEnable': this.specialDiscountEnable,
       'workingHours': workingHours.map((e) => e.toJson()).toList(),
       'seatCapacity': seatCapacity,
+      'bookingAutoReleaseHours': bookingAutoReleaseHours,
       'seatingMode': seatingMode,
       'seatAvailabilityEnabled': seatAvailabilityEnabled,
       'bookingType': bookingType,

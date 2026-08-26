@@ -3036,15 +3036,13 @@ class FireStoreUtils {
     });
   }
 
-  // Real-time seat availability vs. the vendor's own seatCapacity setting.
-  // Only vendors who have explicitly set seatCapacity are included -
-  // deliberately NOT the Phase-2 guestCapacity field, which always
-  // defaults to 50 even for a vendor who never touched it (would silently
-  // include every restaurant), and which can legitimately represent a
-  // different number anyway (a vendor may reserve only some of their total
-  // seats for advance bookings, leaving the rest for walk-ins - confirmed
-  // with the user 2026-08-25 that these two capacities are allowed to
-  // diverge).
+  // Real-time seat availability vs. the vendor's effective seat capacity -
+  // seatCapacity if explicitly set, else guestCapacity (table booking) as a
+  // single-source-of-truth fallback (2026-08-26) so a vendor doesn't have
+  // to fill in the same number twice. Still allowed to diverge: a vendor
+  // may reserve only some of their total seats for advance bookings,
+  // leaving the rest for walk-ins - set seatCapacity explicitly via
+  // SeatAvailabilityScreen to override the fallback.
   //
   // Reads the server-maintained dine_in_occupancy/{vendorId} aggregate
   // (2026-08-25) instead of querying vendor_orders directly - that direct
@@ -3064,7 +3062,8 @@ class FireStoreUtils {
     // customer stops seeing the crowding banner the instant an admin
     // revokes approval, even if seatCapacity is still sitting in Firestore.
     if (!vendor.seatAvailabilityEnabled) return Stream.value(null);
-    if (vendor.seatCapacity == null || vendor.seatCapacity! <= 0) return Stream.value(null);
+    final capacity = vendor.effectiveSeatCapacity;
+    if (capacity == null || capacity <= 0) return Stream.value(null);
 
     return firestore.collection(DINE_IN_OCCUPANCY).doc(vendor.id).snapshots().map((doc) {
       // A vendor with no aggregate doc yet (no Dining orders ever, or the
@@ -3073,7 +3072,7 @@ class FireStoreUtils {
       final occupied = doc.exists ? (doc.data()?['occupiedGuests'] as num?)?.toInt() ?? 0 : 0;
       return SeatAvailability(
         occupiedGuests: occupied,
-        maxCapacity: vendor.seatCapacity!,
+        maxCapacity: capacity,
       );
     });
   }
