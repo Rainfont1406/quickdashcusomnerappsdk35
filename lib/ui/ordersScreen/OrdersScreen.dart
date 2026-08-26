@@ -196,10 +196,18 @@ class _OrdersScreenState extends State<OrdersScreen> {
 
     double totalTaxAmount = 0.0;
     if (orderModel.taxModel != null) {
+      // takeAway alone used to double as "any non-delivery order" (Dining/
+      // Bill Pay included), matching how tax rules' own isTakeaway field
+      // buckets "non-delivery" - takeAway is now narrower (only genuine
+      // Takeaway, since the client bug writing it true for every Dineaway
+      // order was fixed 2026-08-26), so orderType is needed here too or
+      // Dining/Bill Pay orders silently lose their non-delivery tax lines.
+      final bool isNonDelivery = (orderModel.takeAway ?? false) ||
+          ((orderModel.orderType ?? '').isNotEmpty);
       for (var element in orderModel.taxModel!) {
-        bool shouldApplyTax = (orderModel.takeAway == false &&
+        bool shouldApplyTax = (!isNonDelivery &&
                 (element.isTakeaway == false || element.isTakeaway == null)) ||
-            (orderModel.takeAway == true && element.isTakeaway == true);
+            (isNonDelivery && element.isTakeaway == true);
         if (shouldApplyTax) {
           double taxAmount = getTaxValue(
             amount: (total - discount - specialDiscountAmount).toString(),

@@ -1709,9 +1709,14 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
     List<TaxModel> taxesToDisplay = [];
     double totalTaxAmount = 0.0;
     if (orderModel.taxModel != null) {
+      // See the matching comment in OrdersScreen.dart's tax loop - takeAway
+      // alone no longer means "any non-delivery order" now that it's fixed
+      // to only mean genuine Takeaway.
+      final bool isNonDelivery = (orderModel.takeAway ?? false) ||
+          ((orderModel.orderType ?? '').isNotEmpty);
       for (var element in orderModel.taxModel!) {
-        bool shouldApplyTax = (orderModel.takeAway == false && (element.isTakeaway == false || element.isTakeaway == null)) ||
-            (orderModel.takeAway == true && element.isTakeaway == true);
+        bool shouldApplyTax = (!isNonDelivery && (element.isTakeaway == false || element.isTakeaway == null)) ||
+            (isNonDelivery && element.isTakeaway == true);
         if (shouldApplyTax) {
           double taxAmount = getTaxValue(amount: (total - discount - specialDiscountAmount).toString(), taxModel: element);
           totalTaxAmount += taxAmount;
@@ -1843,9 +1848,12 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
     final double taxBase = (subtotalAmount - discountAmount - specialDiscountAmount).clamp(0.0, double.infinity);
     List<TaxModel> taxesToDisplay = [];
     if (orderModel.taxModel != null) {
+      // See the matching comment further up this file's tax loop.
+      final bool isNonDelivery = (orderModel.takeAway ?? false) ||
+          ((orderModel.orderType ?? '').isNotEmpty);
       for (var element in orderModel.taxModel!) {
-        bool shouldApplyTax = (orderModel.takeAway == false && (element.isTakeaway == false || element.isTakeaway == null)) ||
-            (orderModel.takeAway == true && element.isTakeaway == true);
+        bool shouldApplyTax = (!isNonDelivery && (element.isTakeaway == false || element.isTakeaway == null)) ||
+            (isNonDelivery && element.isTakeaway == true);
         if (shouldApplyTax) taxesToDisplay.add(element);
       }
     }
