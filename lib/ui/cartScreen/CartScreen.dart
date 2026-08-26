@@ -535,6 +535,42 @@ class _CartScreenState extends State<CartScreen> {
     AppDialog.showWarning(context, title: title, message: message);
   }
 
+  // Club/lounge venues don't offer walk-in "Dine Now" - this decides
+  // whether the current customer already has a table booked for tonight
+  // at this vendor, so the Dining tap handler above can either let them
+  // proceed or redirect them to Book a Table instead (2026-08-26). Mirrors
+  // findMatchingBookingId's own "today, or yesterday before 6am" window
+  // (Cloud Functions, orderVerification.js) so the two stay consistent.
+  Future<bool> _hasEligibleBookingTonight(VendorModel vendor) async {
+    final uid = MyAppState.currentUser?.userID ?? '';
+    if (uid.isEmpty) return false;
+    String dateKey(DateTime d) =>
+        '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+    final now = DateTime.now();
+    final todayKey = dateKey(now);
+    final yesterdayKey = dateKey(now.subtract(const Duration(days: 1)));
+    final yesterdayEligible = now.hour < 6;
+
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection(ORDERS_TABLE)
+          .where('authorID', isEqualTo: uid)
+          .where('vendorID', isEqualTo: vendor.id)
+          .get();
+      return snap.docs.any((doc) {
+        final data = doc.data();
+        final status = data['status'] as String? ?? '';
+        if (status == ORDER_STATUS_REJECTED || status == ORDER_STATUS_CANCELLED) return false;
+        final key = data['bookingDateKey'] as String? ?? '';
+        return key == todayKey || (yesterdayEligible && key == yesterdayKey);
+      });
+    } catch (_) {
+      // Fails safe toward "no booking found" -> redirected to Book a
+      // Table, never silently lets a walk-in skip booking on an error.
+      return false;
+    }
+  }
+
   // Presented when a vendor has BOTH table booking and seat availability
   // enabled (2026-08-25) - "Dining" alone is ambiguous between "reserve a
   // table for later" and "I'm heading in now", so ask instead of guessing.
@@ -3737,7 +3773,7 @@ class _CartScreenState extends State<CartScreen> {
   }) {
     final isDark = isDarkMode(context);
     return GestureDetector(
-      onTap: () {
+      onTap: () async {
         if (!enabled) {
           if (disabledDialogTitle != null) {
             _showServiceMismatchDialog(
@@ -3758,23 +3794,38 @@ class _CartScreenState extends State<CartScreen> {
         if (title == 'Dining') {
           final bookingEnabled = vendorModel?.enabledDiveInFuture == true;
           final seatAvailEnabled = vendorModel?.seatAvailabilityEnabled == true;
-          // Both features on for this vendor - let the customer pick
-          // between reserving ahead and eating now, instead of silently
-          // picking one for them (2026-08-25).
-          if (bookingEnabled && seatAvailEnabled) {
+          final isClubType = vendorModel?.seatingMode == 'full_session';
+
+          // Club/lounge with table booking: walk-in "Dine Now" isn't
+          // offered at all - a guest either already has a table booked for
+          // tonight, or needs to book one first (2026-08-26). Checked
+          // before the seat-availability chooser below since that doesn't
+          // apply the same way for this venue type.
+          if (bookingEnabled && isClubType && vendorModel != null) {
+            final hasBooking = await _hasEligibleBookingTonight(vendorModel!);
+            if (!hasBooking) {
+              push(context, DineInRestaurantDetailsScreen(vendorModel: vendorModel!));
+              return;
+            }
+            // Already has a table booked - fall through to a normal Dining
+            // selection below, same as any other confirmed-booking guest.
+          } else if (bookingEnabled && seatAvailEnabled) {
+            // Both features on for this vendor - let the customer pick
+            // between reserving ahead and eating now, instead of silently
+            // picking one for them (2026-08-25).
             _showDiningChoiceSheet();
             return;
-          }
-          // Table booking only, no live seat tracking - go straight to the
-          // booking flow rather than a normal Dining checkout, since that's
-          // the only Dining experience this vendor actually offers.
-          if (bookingEnabled && vendorModel != null) {
+          } else if (bookingEnabled && vendorModel != null) {
+            // Table booking only, no live seat tracking - go straight to
+            // the booking flow rather than a normal Dining checkout, since
+            // that's the only Dining experience this vendor actually offers.
             push(context, DineInRestaurantDetailsScreen(vendorModel: vendorModel!));
             return;
           }
           // Seat-availability-only (or neither) falls through to the normal
           // Dining selection below - unchanged from before this feature.
         }
+        if (!mounted) return;
         setState(() {
           selectedDineawayType = title;
           isDineawaySelected = true;
