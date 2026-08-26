@@ -1888,7 +1888,18 @@ class _CartScreenState extends State<CartScreen> {
                         'specialType': specialType,
                       };
                       final isDelivery = selctedOrderTypeValue == "Delivery";
-                      final isTakeaway = selctedOrderTypeValue == "Dineaway";
+                      // Was comparing against the top-level Delivery-vs-
+                      // Dineaway mode, so every Dineaway order (Dining AND
+                      // Bill Pay too, not just Takeaway) got take_away=true
+                      // on the order document - confirmed live 2026-08-26:
+                      // every historical Dining order for a real vendor had
+                      // take_away=true, which silently broke the Vendor
+                      // App/Web action-button row (Mark Complete, Mark Seat
+                      // Free) for every Dining order, since that row gates
+                      // on !isTakeAway. Must check the actual Dining/
+                      // Takeaway sub-choice instead.
+                      final isTakeaway = selctedOrderTypeValue == "Dineaway" &&
+                          selectedDineawayType == "Takeaway";
                       final String? orderTypeToStore =
                           selctedOrderTypeValue == "Dineaway" ? selectedDineawayType : null;
                       push(
