@@ -535,6 +535,105 @@ class _CartScreenState extends State<CartScreen> {
     AppDialog.showWarning(context, title: title, message: message);
   }
 
+  // Phone signup only collects a phone number now (2026-08-27) - name/email
+  // are asked for here instead, right before an order actually needs them,
+  // rather than blocking account creation for information that isn't
+  // needed yet. Returns true once both are present (already were, or the
+  // vendor just filled them in and the save succeeded); false if they
+  // dismissed the sheet without completing it, in which case checkout
+  // should not proceed.
+  Future<bool> _ensureProfileComplete() async {
+    final user = MyAppState.currentUser;
+    if (user == null) return true;
+    final needsName = user.firstName.trim().isEmpty;
+    final needsEmail = user.email.trim().isEmpty;
+    if (!needsName && !needsEmail) return true;
+
+    final nameCtrl = TextEditingController(
+        text: [user.firstName, user.lastName].where((s) => s.trim().isNotEmpty).join(' '));
+    final emailCtrl = TextEditingController(text: user.email);
+    final formKey = GlobalKey<FormState>();
+
+    final completed = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => Padding(
+        padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+        child: Container(
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+          ),
+          padding: const EdgeInsets.fromLTRB(20, 20, 20, 24),
+          child: Form(
+            key: formKey,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('One last thing'.tr(), style: AppTypography.labelLarge.copyWith(fontWeight: FontWeight.w700)),
+                const SizedBox(height: 4),
+                Text('We need this to place your order.'.tr(),
+                    style: AppTypography.labelSmall.copyWith(color: AppThemeData.neutral500)),
+                const SizedBox(height: 16),
+                if (needsName) ...[
+                  TextFormField(
+                    controller: nameCtrl,
+                    textCapitalization: TextCapitalization.words,
+                    decoration: InputDecoration(labelText: 'Full Name'.tr()),
+                    validator: validateName,
+                  ),
+                  const SizedBox(height: 12),
+                ],
+                if (needsEmail) ...[
+                  TextFormField(
+                    controller: emailCtrl,
+                    keyboardType: TextInputType.emailAddress,
+                    textCapitalization: TextCapitalization.none,
+                    decoration: InputDecoration(labelText: 'Email Address'.tr()),
+                    validator: validateEmail,
+                  ),
+                  const SizedBox(height: 12),
+                ],
+                SizedBox(
+                  width: double.infinity,
+                  height: 48,
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppThemeData.primary500,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    ),
+                    onPressed: () {
+                      if (formKey.currentState?.validate() ?? false) {
+                        Navigator.pop(ctx, true);
+                      }
+                    },
+                    child: Text('Continue'.tr(),
+                        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    if (completed != true) return false;
+
+    if (needsName) {
+      final parts = nameCtrl.text.trim().split(RegExp(r'\s+'));
+      user.firstName = parts.first;
+      user.lastName = parts.length > 1 ? parts.sublist(1).join(' ') : '';
+    }
+    if (needsEmail) {
+      user.email = emailCtrl.text.trim().toLowerCase();
+    }
+    await FireStoreUtils.updateCurrentUser(user);
+    return true;
+  }
+
   // Club/lounge venues don't offer walk-in "Dine Now" - this decides
   // whether the current customer already has a table booked for tonight
   // at this vendor, so the Dining tap handler above can either let them
@@ -1863,7 +1962,7 @@ class _CartScreenState extends State<CartScreen> {
                   Builder(builder: (context) {
                     final isDark = isDarkMode(context);
                     final canAct = !_isValidating && _canCheckout && _serviceRestrictionMessage == null;
-                    void _handleTap() {
+                    void _handleTap() async {
                       if (_isValidating) {
                         _showTopNotification(
                           message: "Validating cart, please wait...".tr(),
@@ -1938,6 +2037,14 @@ class _CartScreenState extends State<CartScreen> {
                           selectedDineawayType == "Takeaway";
                       final String? orderTypeToStore =
                           selctedOrderTypeValue == "Dineaway" ? selectedDineawayType : null;
+
+                      // Phone signup no longer collects name/email up front
+                      // (2026-08-27) - this is where it's actually needed,
+                      // so ask for whichever is still missing right before
+                      // checkout instead of blocking signup for it.
+                      final profileOk = await _ensureProfileComplete();
+                      if (!profileOk || !mounted) return;
+
                       push(
                         context,
                         PaymentScreen(
@@ -3793,7 +3900,8 @@ class _CartScreenState extends State<CartScreen> {
         }
         if (title == 'Dining') {
           final bookingEnabled = vendorModel?.enabledDiveInFuture == true;
-          final seatAvailEnabled = vendorModel?.seatAvailabilityEnabled == true;
+          final seatAvailEnabled = vendorModel?.seatAvailabilityEnabled == true &&
+              vendorModel?.seatAvailabilityOn == true;
           final isClubType = vendorModel?.seatingMode == 'full_session';
 
           // Club/lounge with table booking: walk-in "Dine Now" isn't

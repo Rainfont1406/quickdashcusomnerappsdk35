@@ -1103,6 +1103,7 @@ class PaymentScreenState extends State<PaymentScreen> {
           if (widget.orderType == 'Dining' &&
               _diningVendor?.effectiveSeatCapacity != null &&
               _diningVendor?.seatAvailabilityEnabled == true &&
+              _diningVendor?.seatAvailabilityOn == true &&
               _diningVendor?.seatingMode != 'full_session')
             _diningGuestCountPicker(dark),
           _seatAvailabilityFooterBanner(dark),

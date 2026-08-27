@@ -141,12 +141,25 @@ class VendorModel {
   // if seatCapacity itself is still sitting in Firestore from before.
   bool seatAvailabilityEnabled;
 
+  // Vendor's own on/off for the feature (2026-08-27), separate from
+  // seatAvailabilityEnabled (admin approval, above) - checked alongside it
+  // by streamCurrentSeatAvailability so a vendor can pause the banner
+  // themselves without losing admin approval. Defaults true.
+  bool seatAvailabilityOn;
+
   // ── Dine-In Booking Configuration ──────────────────────────────
   String bookingType;              // 'flexible' | 'slot_based'
   String bookingOpenTime;
   String bookingCloseTime;
   int minBookingNoticeMinutes;
   int maxAdvanceBookingDays;
+  // Dates the vendor has manually closed for new table bookings (2026-08-28)
+  // - 'yyyy-MM-dd' keys, any future date, not limited to the today/tomorrow
+  // booking window itself (a vendor can plan ahead for a known closure).
+  // Checked both in the customer's date picker (dine_in_restaurant_details_
+  // screen.dart) and at reservation time (FirebaseHelper.reserveBookingCapacity)
+  // as the actual enforcement point - the picker exclusion is UX only.
+  List<String> bookingBlockedDates;
   int guestCapacity;
   int bufferTimeBetweenReservations;
   String bookingPricingModel;      // 'free' | 'per_person' | 'table_charge' | 'cover_charge'
@@ -230,11 +243,13 @@ class VendorModel {
       this.bookingAutoReleaseHours,
       this.seatingMode = 'turnover',
       this.seatAvailabilityEnabled = false,
+      this.seatAvailabilityOn = true,
       this.bookingType = 'flexible',
       this.bookingOpenTime = '',
       this.bookingCloseTime = '',
       this.minBookingNoticeMinutes = 30,
       this.maxAdvanceBookingDays = 7,
+      this.bookingBlockedDates = const [],
       this.guestCapacity = 50,
       this.bufferTimeBetweenReservations = 15,
       this.bookingPricingModel = 'free',
@@ -347,11 +362,13 @@ class VendorModel {
       bookingAutoReleaseHours: (parsedJson['bookingAutoReleaseHours'] is num) ? (parsedJson['bookingAutoReleaseHours'] as num).toInt() : null,
       seatingMode: parsedJson['seatingMode'] as String? ?? 'turnover',
       seatAvailabilityEnabled: parsedJson['seatAvailabilityEnabled'] as bool? ?? false,
+      seatAvailabilityOn: parsedJson['seatAvailabilityOn'] as bool? ?? true,
       bookingType: parsedJson['bookingType'] as String? ?? 'flexible',
       bookingOpenTime: parsedJson['bookingOpenTime'] as String? ?? '',
       bookingCloseTime: parsedJson['bookingCloseTime'] as String? ?? '',
       minBookingNoticeMinutes: (parsedJson['minBookingNoticeMinutes'] is num) ? (parsedJson['minBookingNoticeMinutes'] as num).toInt() : 30,
       maxAdvanceBookingDays: (parsedJson['maxAdvanceBookingDays'] is num) ? (parsedJson['maxAdvanceBookingDays'] as num).toInt() : 7,
+      bookingBlockedDates: parsedJson['bookingBlockedDates'] != null ? List<String>.from(parsedJson['bookingBlockedDates']) : [],
       guestCapacity: (parsedJson['guestCapacity'] is num) ? (parsedJson['guestCapacity'] as num).toInt() : 50,
       bufferTimeBetweenReservations: (parsedJson['bufferTimeBetweenReservations'] is num) ? (parsedJson['bufferTimeBetweenReservations'] as num).toInt() : 15,
       bookingPricingModel: parsedJson['bookingPricingModel'] as String? ?? 'free',
@@ -428,11 +445,13 @@ class VendorModel {
       'bookingAutoReleaseHours': bookingAutoReleaseHours,
       'seatingMode': seatingMode,
       'seatAvailabilityEnabled': seatAvailabilityEnabled,
+      'seatAvailabilityOn': seatAvailabilityOn,
       'bookingType': bookingType,
       'bookingOpenTime': bookingOpenTime,
       'bookingCloseTime': bookingCloseTime,
       'minBookingNoticeMinutes': minBookingNoticeMinutes,
       'maxAdvanceBookingDays': maxAdvanceBookingDays,
+      'bookingBlockedDates': bookingBlockedDates,
       'guestCapacity': guestCapacity,
       'bufferTimeBetweenReservations': bufferTimeBetweenReservations,
       'bookingPricingModel': bookingPricingModel,

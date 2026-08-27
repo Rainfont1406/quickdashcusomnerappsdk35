@@ -44,15 +44,16 @@ class _DineInRestaurantDetailsScreenState
   String _selectedSlotEnd = '';
   int _guestCount = 2;
 
-  // Header image carousel (vendorMenuPhotos uploaded via AddDineIn)
+  // Header image carousel - uses the restaurant's own gallery (vendor.photos,
+  // set via Add Store) rather than the retired Dine-In-only Menu Photos
+  // upload (2026-08-27, vendor request: don't maintain two photo sets).
   late PageController _headerCtrl;
   Timer? _headerTimer;
   int _headerPage = 0;
 
-  // vendorMenuPhotos[0..n] = menu/ambience photos set by vendor in AddDineIn.
   // Entries may be a legacy URL string or a {original, cover} map.
   List<String> get _menuPhotos =>
-      widget.vendorModel.vendorMenuPhotos
+      widget.vendorModel.photos
           .map((e) => VendorModel.coverPhotoUrl(e))
           .where((s) => s.isNotEmpty && s != 'null')
           .toList();
@@ -111,6 +112,21 @@ class _DineInRestaurantDetailsScreenState
   void initState() {
     super.initState();
     _guestCount = widget.vendorModel.minGuests.clamp(1, 100);
+    // If the vendor has blocked today, default to the first available date
+    // in the booking window instead (2026-08-28) - _selectedDate otherwise
+    // stays on a blocked day with nothing visibly selected in the date
+    // strip below.
+    final maxDays = widget.vendorModel.maxAdvanceBookingDays.clamp(1, 2);
+    final blockedDates = widget.vendorModel.bookingBlockedDates.toSet();
+    final today = DateTime.now();
+    final availableDates = List.generate(maxDays, (i) => today.add(Duration(days: i)))
+        .where((d) => !blockedDates.contains(DateFormat('yyyy-MM-dd').format(d)))
+        .toList();
+    if (availableDates.isNotEmpty &&
+        !availableDates.any((d) =>
+            d.year == _selectedDate.year && d.month == _selectedDate.month && d.day == _selectedDate.day)) {
+      _selectedDate = availableDates.first;
+    }
     if (widget.vendorModel.bookingType == 'slot_based') {
       _loadSlotCounts();
     }
@@ -506,7 +522,13 @@ class _DineInRestaurantDetailsScreenState
     // clamp's upper bound is the actual enforcement point (2026-08-24).
     final maxDays = widget.vendorModel.maxAdvanceBookingDays.clamp(1, 2);
     final today = DateTime.now();
-    final dates = List.generate(maxDays, (i) => today.add(Duration(days: i)));
+    // Dates the vendor has closed for new bookings (2026-08-28) never show
+    // as selectable here - the actual enforcement is the transaction check
+    // in FirebaseHelper.reserveBookingCapacity, this is UX only.
+    final blockedDates = widget.vendorModel.bookingBlockedDates.toSet();
+    final dates = List.generate(maxDays, (i) => today.add(Duration(days: i)))
+        .where((d) => !blockedDates.contains(DateFormat('yyyy-MM-dd').format(d)))
+        .toList();
 
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 16),
@@ -517,6 +539,12 @@ class _DineInRestaurantDetailsScreenState
         children: [
           _sectionTitle(dark, Icons.calendar_today_rounded, 'Select Date'.tr()),
           const SizedBox(height: 14),
+          if (dates.isEmpty)
+            Text(
+              'No dates are currently available for booking. Please check back later.'.tr(),
+              style: TextStyle(fontSize: 13, color: dark ? Colors.white60 : Colors.grey.shade600),
+            )
+          else
           SizedBox(
             height: 72,
             child: ListView.builder(
@@ -534,6 +562,10 @@ class _DineInRestaurantDetailsScreenState
                       _selectedSlotId = '';
                       _selectedSlotStart = '';
                       _selectedSlotEnd = '';
+                      // Flexible time slots are generated per-date (2026-08-27)
+                      // - a previously picked time belongs to the old date's
+                      // grid, so drop it rather than silently carrying it over.
+                      _selectedTime = '';
                     });
                     if (widget.vendorModel.bookingType == 'slot_based') _loadSlotCounts();
                   },
@@ -710,8 +742,59 @@ class _DineInRestaurantDetailsScreenState
     );
   }
 
+  // A vendor's Booking Start/Close Time is saved via TimeOfDay.format(context)
+  // on their own device (e.g. "7:30 PM" in a 12-hour locale, or "19:30" if
+  // that device uses a 24-hour clock) - accept both shapes.
+  TimeOfDay? _parseVendorTimeString(String raw) {
+    final s = raw.trim();
+    if (s.isEmpty) return null;
+    final m = RegExp(r'^(\d{1,2}):(\d{2})\s*([AaPp][Mm])?$').firstMatch(s);
+    if (m == null) return null;
+    int hour = int.parse(m.group(1)!);
+    final minute = int.parse(m.group(2)!);
+    final meridiem = m.group(3)?.toUpperCase();
+    if (meridiem == 'PM' && hour != 12) hour += 12;
+    if (meridiem == 'AM' && hour == 12) hour = 0;
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
+    return TimeOfDay(hour: hour, minute: minute);
+  }
+
+  // 30-min grid clamped to the vendor's Booking Start/Close Time (2026-08-27)
+  // - replaces the old free-form native time picker, which never read those
+  // fields at all and let a customer pick any minute, even outside hours.
+  // Same for Rolling/Turnover and Club/Lounge - both use this identical
+  // flexible-booking flow.
+  List<DateTime> _buildFlexibleTimeSlots() {
+    final vendor = widget.vendorModel;
+    final openRaw = vendor.bookingOpenTime.isNotEmpty ? vendor.bookingOpenTime : vendor.openDineTime;
+    final closeRaw = vendor.bookingCloseTime.isNotEmpty ? vendor.bookingCloseTime : vendor.closeDineTime;
+    final openTod = _parseVendorTimeString(openRaw);
+    final closeTod = _parseVendorTimeString(closeRaw);
+
+    final base = DateTime(_selectedDate.year, _selectedDate.month, _selectedDate.day);
+    // Old vendor docs may never have set these (or saved an unparseable
+    // value) - fall back to a full-day grid rather than reverting to the
+    // old unclamped native picker, so the UX stays consistent either way.
+    final open = base.add(Duration(hours: openTod?.hour ?? 0, minutes: openTod?.minute ?? 0));
+    var close = base.add(Duration(hours: closeTod?.hour ?? 23, minutes: closeTod?.minute ?? 30));
+    if (!close.isAfter(open)) {
+      close = close.add(const Duration(days: 1)); // overnight venue, e.g. 6 PM-2 AM
+    }
+
+    final earliest = DateTime.now().add(Duration(minutes: vendor.minBookingNoticeMinutes));
+    final slots = <DateTime>[];
+    var t = open;
+    while (!t.isAfter(close)) {
+      if (!t.isBefore(earliest)) slots.add(t);
+      t = t.add(const Duration(minutes: 30));
+    }
+    return slots;
+  }
+
   // ─── Time Picker (Flexible) ───────────────────────────────────
   Widget _buildTimePicker(bool dark) {
+    final slots = _buildFlexibleTimeSlots();
+
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 16),
       padding: const EdgeInsets.all(16),
@@ -721,59 +804,51 @@ class _DineInRestaurantDetailsScreenState
         children: [
           _sectionTitle(dark, Icons.access_time_rounded, 'Select Time'.tr()),
           const SizedBox(height: 14),
-          GestureDetector(
-            onTap: () async {
-              final minNotice = widget.vendorModel.minBookingNoticeMinutes;
-              final earliest = DateTime.now().add(Duration(minutes: minNotice));
-              final t = await showTimePicker(
-                context: context,
-                initialTime: TimeOfDay.fromDateTime(earliest),
-                builder: (context, child) => Theme(
-                  data: ThemeData.light().copyWith(
-                      colorScheme: const ColorScheme.light(primary: _primary)),
-                  child: child!,
-                ),
-              );
-              if (t != null) setState(() => _selectedTime = t.format(context));
-            },
-            child: Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: _selectedTime.isNotEmpty
-                    ? _primary.withValues(alpha: 0.08)
-                    : (dark ? Colors.grey.shade800 : Colors.grey.shade100),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: _selectedTime.isNotEmpty ? _primary : Colors.transparent,
-                  width: 2,
-                ),
+          if (slots.isEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Text(
+                'No time slots available for this date. Try a different date.'.tr(),
+                style: TextStyle(fontSize: 13, color: dark ? Colors.white54 : Colors.grey.shade600),
               ),
-              child: Row(
-                children: [
-                  Icon(Icons.access_time_rounded,
-                      color: _selectedTime.isNotEmpty ? _primary : Colors.grey.shade400, size: 22),
-                  const SizedBox(width: 12),
-                  Expanded(
+            )
+          else
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: slots.map((s) {
+                final label = TimeOfDay.fromDateTime(s).format(context);
+                final selected = _selectedTime == label;
+                return GestureDetector(
+                  onTap: () => setState(() => _selectedTime = label),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 180),
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    decoration: BoxDecoration(
+                      gradient: selected ? _primaryGrad : null,
+                      color: selected ? null : (dark ? Colors.grey.shade800 : Colors.grey.shade100),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(
+                        color: selected
+                            ? Colors.transparent
+                            : (dark ? Colors.grey.shade700 : Colors.grey.shade300),
+                      ),
+                    ),
                     child: Text(
-                      _selectedTime.isEmpty ? 'Tap to select time'.tr() : _selectedTime,
+                      label,
                       style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: _selectedTime.isNotEmpty ? FontWeight.w700 : FontWeight.normal,
-                        color: _selectedTime.isNotEmpty
-                            ? _primary
-                            : (dark ? Colors.white38 : Colors.grey.shade400),
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: selected ? Colors.white : (dark ? Colors.white70 : Colors.black87),
                       ),
                     ),
                   ),
-                  Icon(Icons.chevron_right_rounded,
-                      color: dark ? Colors.white38 : Colors.grey.shade400),
-                ],
-              ),
+                );
+              }).toList(),
             ),
-          ),
           if (widget.vendorModel.minBookingNoticeMinutes > 0)
             Padding(
-              padding: const EdgeInsets.only(top: 8),
+              padding: const EdgeInsets.only(top: 12),
               child: Text(
                 'Min ${widget.vendorModel.minBookingNoticeMinutes} min advance notice required'.tr(),
                 style: TextStyle(fontSize: 11, color: dark ? Colors.white38 : Colors.grey.shade500),
@@ -1174,6 +1249,15 @@ class _DineInRestaurantDetailsScreenState
         SnackBar(content: Text(e.message.tr()), backgroundColor: Colors.red),
       );
       if (isSlotBased) await _loadSlotCounts();
+      return;
+    } on BookingDateBlockedException catch (e) {
+      // The vendor blocked this date after the customer already had this
+      // screen open (or the picker's own exclusion below is somehow stale)
+      // - this transaction read is the real, live enforcement point.
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.message.tr()), backgroundColor: Colors.red),
+      );
       return;
     } catch (e) {
       Navigator.pop(context);

@@ -150,6 +150,13 @@ class SlotCapacityExceededException implements Exception {
   String toString() => message;
 }
 
+class BookingDateBlockedException implements Exception {
+  final String message;
+  BookingDateBlockedException([this.message = 'This date is not available for booking. Please choose another date.']);
+  @override
+  String toString() => message;
+}
+
 class FireStoreUtils {
   static FirebaseMessaging firebaseMessaging = FirebaseMessaging.instance;
   static FirebaseFirestore firestore = FirebaseFirestore.instance;
@@ -3004,7 +3011,20 @@ class FireStoreUtils {
   }) async {
     final ref = firestore.collection(DINE_IN_CAPACITY).doc(
         _capacityDocId(vendorId: vendorId, bookingType: bookingType, slotId: slotId, dateKey: dateKey));
+    // Reads the vendor's OWN blocked-dates list live, inside the same
+    // transaction, rather than trusting a value the caller already had in
+    // memory - the picker on dine_in_restaurant_details_screen.dart already
+    // excludes a blocked date, but this is the actual enforcement point
+    // (2026-08-28), same "guard at the write, not just the UI" pattern as
+    // the capacity check right below it. Closes the gap where a vendor
+    // blocks a date after the customer already has the booking screen open.
+    final vendorRef = firestore.collection(VENDORS).doc(vendorId);
     await firestore.runTransaction((tx) async {
+      final vendorSnap = await tx.get(vendorRef);
+      final blockedDates = List<String>.from(vendorSnap.data()?['bookingBlockedDates'] ?? []);
+      if (blockedDates.contains(dateKey)) {
+        throw BookingDateBlockedException();
+      }
       final snap = await tx.get(ref);
       final occupied = (snap.data()?['occupiedGuests'] as num?)?.toInt() ?? 0;
       if (occupied + guestCount > maxCapacity) {
@@ -3061,7 +3081,9 @@ class FireStoreUtils {
     // checked here too, not just on the vendor's own config screen, so a
     // customer stops seeing the crowding banner the instant an admin
     // revokes approval, even if seatCapacity is still sitting in Firestore.
-    if (!vendor.seatAvailabilityEnabled) return Stream.value(null);
+    // seatAvailabilityOn (2026-08-27) is the vendor's own separate
+    // pause/resume for the same banner - see its own VendorModel comment.
+    if (!vendor.seatAvailabilityEnabled || !vendor.seatAvailabilityOn) return Stream.value(null);
     final capacity = vendor.effectiveSeatCapacity;
     if (capacity == null || capacity <= 0) return Stream.value(null);
 
