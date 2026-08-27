@@ -55,6 +55,10 @@ class _EmailLoginScreenState extends State<EmailLoginScreen> {
     if (_isBusy) return;
     if (mounted) setState(() => _isBusy = true);
     ShowToastDialog.showLoader('Verifying your account...');
+    // Set right before showSuccess() below - skips finally's plain dismiss
+    // so the success checkmark isn't cut off the instant it appears
+    // (2026-08-27).
+    var didShowSuccess = false;
     // TEMPORARY [LOGIN-PERF] - timing instrumentation for the login-speed
     // investigation. Remove once done.
     final totalSw = Stopwatch()..start();
@@ -126,6 +130,8 @@ class _EmailLoginScreenState extends State<EmailLoginScreen> {
       // in memory. Same fix as hasFinishedOnBoarding() in main.dart.
       unawaited(FireStoreUtils.updateCurrentUser(userModel));
       if (!mounted) return;
+      didShowSuccess = true;
+      ShowToastDialog.showSuccess('Login successful!');
       debugPrint('[LOGIN-PERF] TOTAL (tap to navigate) — ${totalSw.elapsedMilliseconds}ms');
       if (userModel.shippingAddress != null && userModel.shippingAddress!.isNotEmpty) {
         if (userModel.shippingAddress!.where((e) => e.isDefault == true).isNotEmpty) {
@@ -172,7 +178,7 @@ class _EmailLoginScreenState extends State<EmailLoginScreen> {
     } catch (_) {
       ShowToastDialog.showToast('Something went wrong. Please try again.');
     } finally {
-      ShowToastDialog.closeLoader();
+      if (!didShowSuccess) ShowToastDialog.closeLoader();
       if (mounted) setState(() => _isBusy = false);
     }
   }
@@ -276,7 +282,9 @@ class _EmailLoginScreenState extends State<EmailLoginScreen> {
                 style: const TextStyle(
                   color: AppThemeData.primary400,
                   fontFamily: AppThemeData.bold,
-                  fontSize: 14,
+                  // Bumped from 14 (2026-08-27) - see login_screen.dart's
+                  // identical fix for why.
+                  fontSize: 17,
                 ),
               ),
             ],

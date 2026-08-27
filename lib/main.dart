@@ -318,7 +318,13 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
   void _configureEasyLoading() {
     EasyLoading.instance
       ..displayDuration = const Duration(milliseconds: 2500)
-      ..indicatorType = EasyLoadingIndicatorType.threeBounce
+      // Switched from threeBounce (2026-08-27, vendor request) - a plain
+      // spinning ring is the one loading pattern every phone user already
+      // recognizes from iOS/Android's own native indicators, unlike
+      // bouncing dots which can read as ambiguous (e.g. a chat "typing…"
+      // indicator). This is the app-wide loader used everywhere
+      // ShowToastDialog.showLoader() is called, not just login/signup.
+      ..indicatorType = EasyLoadingIndicatorType.ring
       ..loadingStyle = EasyLoadingStyle.custom
       ..indicatorSize = 32.0
       ..radius = 16.0

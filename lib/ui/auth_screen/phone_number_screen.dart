@@ -381,7 +381,9 @@ class _PhoneNumberScreenState extends State<PhoneNumberScreen> {
                 style: const TextStyle(
                   color: AppThemeData.primary400,
                   fontFamily: AppThemeData.bold,
-                  fontSize: 14,
+                  // Bumped from 14 (2026-08-27) - see login_screen.dart's
+                  // identical fix for why.
+                  fontSize: 17,
                 ),
               ),
             ],

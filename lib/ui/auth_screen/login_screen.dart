@@ -244,7 +244,10 @@ class _LoginScreenState extends State<LoginScreen> {
                 style: const TextStyle(
                   color: AppThemeData.primary400,
                   fontFamily: AppThemeData.bold,
-                  fontSize: 14,
+                  // Bumped from 14 (2026-08-27, vendor-reported: many users
+                  // never noticed this was tappable at the same size as the
+                  // surrounding plain text).
+                  fontSize: 17,
                 ),
               ),
             ],

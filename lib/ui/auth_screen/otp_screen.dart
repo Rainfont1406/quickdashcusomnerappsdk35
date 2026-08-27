@@ -6,6 +6,7 @@ import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/User.dart';
+import 'package:emartconsumer/model/referral_model.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/device_session_service.dart';
 import 'package:emartconsumer/services/helper.dart';
@@ -15,7 +16,6 @@ import 'package:emartconsumer/services/show_toast_dialog.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/auth_screen/auth_widgets.dart';
 import 'package:emartconsumer/ui/auth_screen/login_screen.dart';
-import 'package:emartconsumer/ui/auth_screen/signup_screen.dart';
 import 'package:emartconsumer/ui/location_permission_screen.dart';
 import 'package:emartconsumer/ui/service_list_screen.dart';
 import 'package:firebase_auth/firebase_auth.dart' as firebase_auth;
@@ -333,7 +333,10 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
         MyAppState.currentUser = userModel;
 
         if (!mounted) return;
-        ShowToastDialog.closeLoader();
+        // showSuccess() transitions the same loading overlay to a checkmark
+        // and dismisses itself on its own timer (2026-08-27) - no finally
+        // block wraps this call, so nothing re-dismisses it early.
+        ShowToastDialog.showSuccess('Login successful!');
         debugPrint('[LOGIN-PERF] TOTAL (tap to navigate) — ${totalSw.elapsedMilliseconds}ms');
 
         final addresses = userModel.shippingAddress;
@@ -358,19 +361,23 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
       }
 
       // ── Step 4b: SIGNUP flow ───────────────────────────────────────
-      final signupTokenSw = Stopwatch()..start();
-      final fcmToken = await NotificationService.getToken();
-      debugPrint('[LOGIN-PERF] getToken (FCM, signup) — ${signupTokenSw.elapsedMilliseconds}ms');
       final User userModel = User()
         ..userID = newUid!
         ..countryCode = countryCode
-        ..phoneNumber = phoneNumber
-        ..fcmToken = fcmToken;
+        ..phoneNumber = phoneNumber;
 
-      ShowToastDialog.closeLoader();
       if (!mounted) return;
-      debugPrint('[LOGIN-PERF] TOTAL (OTP verify -> push SignupScreen) — ${totalSw.elapsedMilliseconds}ms since tap');
-      push(context, SignupScreen(type: 'mobileNumber', userModel: userModel));
+      // Same pattern as Step 4a's "Login successful!" above (2026-08-27) -
+      // OTP verification gets its own clear success moment before handing
+      // off to the profile sheet, instead of the loader just vanishing.
+      ShowToastDialog.showSuccess('Phone verified!');
+      debugPrint('[LOGIN-PERF] TOTAL (OTP verify -> profile sheet) — ${totalSw.elapsedMilliseconds}ms since tap');
+      // A bottom sheet, not a full SignupScreen push (2026-08-27, vendor
+      // request) - keeps this lightweight, signup-only 3-field step
+      // (name/email/referral) fully decoupled from AccountDetailsScreen,
+      // which is free to grow more fields later for editing an existing
+      // profile without entangling with signup at all.
+      await _completePhoneSignup(userModel);
     } catch (e) {
       ShowToastDialog.closeLoader();
       final msg = e.toString();
@@ -384,6 +391,294 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
     } finally {
       if (mounted) setState(() => _isVerifying = false);
     }
+  }
+
+  // ── Phone signup: 3-field profile sheet + account creation ────────────
+  // Moved here from signup_screen.dart's SignupScreen(type: 'mobileNumber')
+  // (2026-08-27, vendor request) - a lightweight bottom sheet instead of a
+  // full screen, so this signup-only step (name/email/referral, nothing
+  // else) never has to grow alongside AccountDetailsScreen (the separate,
+  // pre-existing profile-editing screen for an already-signed-up user,
+  // which may gain more fields later with no bearing on signup at all).
+  Future<void> _completePhoneSignup(User userModel) async {
+    final nameCtrl = TextEditingController();
+    final emailCtrl = TextEditingController();
+    final referralCtrl = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+    Timer? emailDebounce;
+
+    // Mandatory, no dismiss (2026-08-25 decision: name+email required right
+    // after OTP, not deferred) - the phone-auth account already exists at
+    // this point, so backing out without completing still needs the same
+    // orphan cleanup as any other aborted signup, handled below.
+    final submitted = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      isDismissible: false,
+      enableDrag: false,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) {
+          // Instant duplicate check as the vendor finishes typing the email
+          // (2026-08-27, vendor request) - shown right under the field
+          // instead of only surfacing at the final Continue tap, so a
+          // known-taken email is caught immediately rather than after
+          // filling in the rest of the sheet. _finishPhoneSignup still runs
+          // the authoritative check on submit regardless (a race between
+          // typing here and someone else registering the same email in the
+          // meantime is still possible, however unlikely) - this is purely
+          // an earlier warning, not a replacement for that check.
+          String? emailError;
+          bool checkingEmail = false;
+
+          void onEmailChanged(String value) {
+            emailDebounce?.cancel();
+            setSheetState(() {
+              emailError = null;
+              checkingEmail = false;
+            });
+            final trimmed = value.trim();
+            if (trimmed.isEmpty || validateEmail(trimmed) != null) return;
+            emailDebounce = Timer(const Duration(milliseconds: 700), () async {
+              setSheetState(() => checkingEmail = true);
+              final conflict = await _checkEmailAlreadyRegistered(trimmed);
+              setSheetState(() {
+                checkingEmail = false;
+                emailError = conflict;
+              });
+            });
+          }
+
+          return PopScope(
+            canPop: false,
+            child: Padding(
+              padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+              child: Container(
+                decoration: const BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+                ),
+                padding: const EdgeInsets.fromLTRB(20, 20, 20, 24),
+                child: Form(
+                  key: formKey,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Set Your Profile'.tr(),
+                          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: Colors.black87)),
+                      const SizedBox(height: 4),
+                      Text(
+                          'Your number is verified - just a couple more details to get started.'
+                              .tr(),
+                          style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
+                      const SizedBox(height: 16),
+                      TextFormField(
+                        controller: nameCtrl,
+                        textCapitalization: TextCapitalization.words,
+                        decoration: InputDecoration(labelText: 'Full Name'.tr()),
+                        validator: validateName,
+                      ),
+                      const SizedBox(height: 12),
+                      TextFormField(
+                        controller: emailCtrl,
+                        keyboardType: TextInputType.emailAddress,
+                        textCapitalization: TextCapitalization.none,
+                        onChanged: onEmailChanged,
+                        decoration: InputDecoration(
+                          labelText: 'Email Address'.tr(),
+                          suffixIcon: checkingEmail
+                              ? const Padding(
+                                  padding: EdgeInsets.all(12),
+                                  child: SizedBox(
+                                      width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+                                )
+                              : null,
+                          errorText: emailError,
+                        ),
+                        validator: (v) => validateEmail(v) ?? emailError,
+                      ),
+                      const SizedBox(height: 12),
+                      TextFormField(
+                        controller: referralCtrl,
+                        textCapitalization: TextCapitalization.characters,
+                        decoration: InputDecoration(labelText: 'Referral Code (Optional)'.tr()),
+                      ),
+                      const SizedBox(height: 20),
+                      SizedBox(
+                        width: double.infinity,
+                        height: 48,
+                        child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: AppThemeData.primary500,
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          ),
+                          onPressed: checkingEmail
+                              ? null
+                              : () {
+                                  if (formKey.currentState?.validate() ?? false) {
+                                    Navigator.pop(ctx, true);
+                                  }
+                                },
+                          child: Text('Continue'.tr(),
+                              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+    emailDebounce?.cancel();
+
+    if (submitted != true) {
+      await _abortOrphanedPhoneSignup(userModel, 'Signup was not completed.');
+      return;
+    }
+
+    await _finishPhoneSignup(
+      userModel,
+      fullName: nameCtrl.text,
+      email: emailCtrl.text,
+      referralCode: referralCtrl.text,
+    );
+  }
+
+  // Shared by the instant-check above and _finishPhoneSignup's own
+  // authoritative check on submit - same query, same role scoping.
+  Future<String?> _checkEmailAlreadyRegistered(String email) async {
+    final normalized = email.trim().toLowerCase();
+    if (normalized.isEmpty) return null;
+    final snap =
+        await FirebaseFirestore.instance.collection(USERS).where('email', isEqualTo: normalized).get();
+    final conflict =
+        snap.docs.any((doc) => (doc.data()['role'] as String? ?? '') == USER_ROLE_CUSTOMER);
+    return conflict ? 'This email is already registered.'.tr() : null;
+  }
+
+  Map<String, String> _splitFullName(String fullName) {
+    final trimmedName = fullName.trim();
+    if (trimmedName.isEmpty) return {'firstName': '', 'lastName': ''};
+    final parts = trimmedName.split(RegExp(r'\s+'));
+    if (parts.length == 1) return {'firstName': parts[0], 'lastName': ''};
+    return {'firstName': parts[0], 'lastName': parts.sublist(1).join(' ')};
+  }
+
+  // Same account-creation logic previously in signup_screen.dart's
+  // signUp()'s mobileNumber branch, moved here unchanged (2026-08-27).
+  Future<void> _finishPhoneSignup(
+    User userModel, {
+    required String fullName,
+    required String email,
+    required String referralCode,
+  }) async {
+    ShowToastDialog.showLoader('Creating your account...');
+    var didShowSuccess = false;
+    try {
+      // Phone uniqueness for signup is already enforced server-side
+      // (OtpVerifyController::verifyAndMint rejects a duplicate phone+role
+      // before this screen is ever reached) - but email is only collected
+      // here, so it still needs its own check. Authoritative re-check here
+      // regardless of what the sheet's instant check already found - closes
+      // the race where someone else registers the same email in the gap
+      // between typing it and tapping Continue.
+      final emailConflict = await _checkEmailAlreadyRegistered(email);
+      if (emailConflict != null) {
+        await _abortOrphanedPhoneSignup(userModel, emailConflict);
+        return;
+      }
+
+      final fcmToken = await NotificationService.getToken();
+
+      // Registers this device as the account's authorized device the
+      // moment it's created - without this, a brand-new account has no
+      // device_id on file until its first subsequent login, leaving a
+      // window where a second device could complete its own login-time
+      // authorize() with nothing yet to conflict against.
+      final sessionResult = await DeviceSessionService.authorize(fcmToken: fcmToken);
+      if (!sessionResult.allowed) {
+        await _abortOrphanedPhoneSignup(userModel, sessionResult.message!);
+        return;
+      }
+
+      final nameParts = _splitFullName(fullName);
+      userModel.firstName = nameParts['firstName']!;
+      userModel.lastName = nameParts['lastName']!;
+      userModel.email = email.trim().toLowerCase();
+      userModel.role = USER_ROLE_CUSTOMER;
+      userModel.fcmToken = fcmToken;
+      // Must be false (or absent) on this very first write - firestore.rules
+      // rejects a self-created user doc with active: true (2026-08-18
+      // hardening, to stop a client self-approving). ServiceListScreen/
+      // LocationPermissionScreen already promote it to true themselves via
+      // a separate update right after this, which the rules do allow.
+      userModel.active = false;
+      userModel.createdAt = Timestamp.now();
+
+      final referralUser = await FireStoreUtils.getReferralUserByCode(referralCode);
+      await FireStoreUtils.referralAdd(ReferralModel(
+        id: userModel.userID,
+        referralBy: referralUser?.id ?? '',
+        referralCode: getReferralCode(),
+      ));
+
+      await FireStoreUtils.updateCurrentUser(userModel);
+      // Persist phone user ID so the session survives app restarts
+      final signupPrefs = await SharedPreferences.getInstance();
+      await signupPrefs.setString(PHONE_AUTH_USER_ID, userModel.userID);
+      if (!mounted) return;
+      didShowSuccess = true;
+      ShowToastDialog.showSuccess('Account created!');
+      if (userModel.shippingAddress != null && userModel.shippingAddress!.isNotEmpty) {
+        if (userModel.shippingAddress!.where((e) => e.isDefault == true).isNotEmpty) {
+          MyAppState.selectedPosotion =
+              userModel.shippingAddress!.where((e) => e.isDefault == true).single;
+        } else {
+          MyAppState.selectedPosotion = userModel.shippingAddress!.first;
+        }
+        pushAndRemoveUntil(context, ServiceListScreen(user: userModel));
+      } else {
+        pushAndRemoveUntil(context, LocationPermissionScreen());
+      }
+    } catch (_) {
+      await _abortOrphanedPhoneSignup(userModel, 'Something went wrong. Please try again.');
+    } finally {
+      if (!didShowSuccess) ShowToastDialog.closeLoader();
+    }
+  }
+
+  // Same rollback as signup_screen.dart's _abortOrphanedSignup (2026-08-27)
+  // - the phone-auth Firebase account already exists by the time this
+  // screen is reached, so any failure/abandonment from here on must delete
+  // it rather than leave an orphan with no Firestore profile. Logs the
+  // attempt to failed_signups first, for admin visibility only - see that
+  // method's own comment for the full reasoning, identical here.
+  Future<void> _abortOrphanedPhoneSignup(User userModel, String message) async {
+    ShowToastDialog.showToast(message);
+    final user = firebase_auth.FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      try {
+        await FirebaseFirestore.instance.collection('failed_signups').add({
+          'deletedAuthUid': user.uid,
+          'signupType': 'phone',
+          'attemptedPhone': userModel.phoneNumber,
+          'countryCode': userModel.countryCode,
+          'reason': message,
+          'createdAt': FieldValue.serverTimestamp(),
+          'ttlAt': Timestamp.fromDate(DateTime.now().toUtc().add(const Duration(days: 30))),
+        });
+      } catch (_) {}
+      try {
+        await user.delete();
+      } catch (_) {
+        await firebase_auth.FirebaseAuth.instance.signOut();
+      }
+    }
+    if (mounted) pushAndRemoveUntil(context, const LoginScreen());
   }
 
   // ── UI ────────────────────────────────────────────────────────────────

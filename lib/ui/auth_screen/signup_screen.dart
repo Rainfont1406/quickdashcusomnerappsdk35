@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -53,6 +54,20 @@ class _SignupScreenState extends State<SignupScreen> {
 
   User userModel = User();
 
+  // Instant (debounced) duplicate checks (2026-08-27, vendor request) - shown
+  // right under each field as the vendor finishes typing, instead of only
+  // surfacing at the final Sign Up tap after the whole form is filled in.
+  // _validateSignupForm/signUp() still run the authoritative check on
+  // submit regardless - this is purely an earlier warning, not a
+  // replacement (closes the race where someone else registers the same
+  // email/phone in the gap between typing here and tapping Sign Up).
+  String? _emailInlineError;
+  String? _phoneInlineError;
+  bool _checkingEmail = false;
+  bool _checkingPhone = false;
+  Timer? _emailDebounce;
+  Timer? _phoneDebounce;
+
   @override
   void initState() {
     super.initState();
@@ -68,6 +83,82 @@ class _SignupScreenState extends State<SignupScreen> {
     }
     phoneMaxLength =
         CountryPhoneLength.getMaxLength(countryCodeEditingController.text);
+  }
+
+  @override
+  void dispose() {
+    _emailDebounce?.cancel();
+    _phoneDebounce?.cancel();
+    super.dispose();
+  }
+
+  // Same query/role-scoping as _findExistingCustomerConflict below, split
+  // out per-field so each can run and report independently as the vendor
+  // types (2026-08-27).
+  Future<String?> _checkEmailAlreadyRegistered(String email) async {
+    final normalized = email.trim().toLowerCase();
+    if (normalized.isEmpty || validateEmail(normalized) != null) return null;
+    final snap =
+        await FirebaseFirestore.instance.collection(USERS).where('email', isEqualTo: normalized).get();
+    final conflict =
+        snap.docs.any((doc) => (doc.data()['role'] as String? ?? '') == USER_ROLE_CUSTOMER);
+    return conflict ? 'This email is already registered.'.tr : null;
+  }
+
+  Future<String?> _checkPhoneAlreadyRegistered(String phoneNumber, String countryCode) async {
+    final trimmed = phoneNumber.trim();
+    if (trimmed.isEmpty || !_isPhoneNumberValid()) return null;
+    final snap = await FirebaseFirestore.instance
+        .collection(USERS)
+        .where('phoneNumber', isEqualTo: trimmed)
+        .get();
+    final conflict = snap.docs.any((doc) {
+      final data = doc.data();
+      return (data['role'] as String? ?? '') == USER_ROLE_CUSTOMER &&
+          (data['countryCode'] as String? ?? '') == countryCode;
+    });
+    return conflict ? 'This number is already registered.'.tr : null;
+  }
+
+  void _onEmailChangedInline(String value) {
+    _emailDebounce?.cancel();
+    setState(() {
+      _emailInlineError = null;
+      _checkingEmail = false;
+    });
+    final trimmed = value.trim();
+    if (trimmed.isEmpty || validateEmail(trimmed) != null) return;
+    _emailDebounce = Timer(const Duration(milliseconds: 700), () async {
+      if (!mounted) return;
+      setState(() => _checkingEmail = true);
+      final conflict = await _checkEmailAlreadyRegistered(trimmed);
+      if (!mounted) return;
+      setState(() {
+        _checkingEmail = false;
+        _emailInlineError = conflict;
+      });
+    });
+  }
+
+  void _onPhoneChangedInline(String value) {
+    _phoneDebounce?.cancel();
+    setState(() {
+      _phoneInlineError = null;
+      _checkingPhone = false;
+    });
+    // type == "mobileNumber" -> phone is locked/pre-verified, never re-checked.
+    if (type == "mobileNumber" || value.trim().isEmpty || !_isPhoneNumberValid()) return;
+    _phoneDebounce = Timer(const Duration(milliseconds: 700), () async {
+      if (!mounted) return;
+      setState(() => _checkingPhone = true);
+      final conflict =
+          await _checkPhoneAlreadyRegistered(value, countryCodeEditingController.text);
+      if (!mounted) return;
+      setState(() {
+        _checkingPhone = false;
+        _phoneInlineError = conflict;
+      });
+    });
   }
 
   void _updatePhoneMaxLength() {
@@ -208,9 +299,58 @@ class _SignupScreenState extends State<SignupScreen> {
     signUp(context);
   }
 
+  // A signup that fails AFTER the Firebase Auth account already exists
+  // (device-session denied, an existing-customer conflict found only after
+  // OTP already created the phone credential, or any later exception) used
+  // to just sign out locally, leaving a permanently orphaned Auth account
+  // behind - it has no matching Firestore user doc, so a retry with the
+  // same email/phone fails as "already registered" while login fails as
+  // "not registered," with no way out (2026-08-27 fix, found via a live
+  // Auth-vs-Firestore diff: 38 real accounts stuck exactly this way).
+  // Deleting the account here instead means the same email/phone is
+  // immediately signup-able again.
+  Future<void> _abortOrphanedSignup(BuildContext context, String message) async {
+    ShowToastDialog.showToast(message);
+    final user = auth.FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      // Log the attempt for admin visibility BEFORE deleting the account -
+      // once it's gone there is otherwise zero trace this ever happened, so
+      // an admin has no way to see who tried to sign up and hit a wall
+      // (2026-08-27, vendor request). Best-effort: a logging failure must
+      // never block the actual account cleanup below.
+      try {
+        await FirebaseFirestore.instance.collection('failed_signups').add({
+          'deletedAuthUid': user.uid,
+          'signupType': type.isEmpty ? 'email' : type,
+          'attemptedEmail': emailEditingController.text.trim().toLowerCase(),
+          'attemptedPhone': phoneNUmberEditingController.text.trim(),
+          'countryCode': countryCodeEditingController.text,
+          'reason': message,
+          'createdAt': FieldValue.serverTimestamp(),
+          // Firestore TTL policy (configured on the collection, not in code)
+          // auto-deletes this doc 30 days after it's written - admin-only
+          // tracking, not meant to accumulate indefinitely (2026-08-27).
+          'ttlAt': Timestamp.fromDate(DateTime.now().toUtc().add(const Duration(days: 30))),
+        });
+      } catch (_) {}
+      try {
+        await user.delete();
+      } catch (_) {
+        // requires-recent-login or similar - fall back to at least signing
+        // out locally rather than leaving a live session on a broken account.
+        await auth.FirebaseAuth.instance.signOut();
+      }
+    }
+    if (mounted) pushAndRemoveUntil(context, const LoginScreen());
+  }
+
   signUp(BuildContext context) async {
     if (mounted) setState(() => _isBusy = true);
     ShowToastDialog.showLoader('Creating your account...');
+    // Set right before showSuccess() below, on the one path that actually
+    // reaches it - skips finally's plain dismiss so the success checkmark
+    // isn't cut off the instant it appears (2026-08-27).
+    var didShowSuccess = false;
     final nameParts = _splitFullName(fullNameEditingController.text.toString());
     // TEMPORARY [LOGIN-PERF] - timing instrumentation for the login/signup
     // speed investigation, matching email_login_screen.dart/otp_screen.dart.
@@ -245,9 +385,7 @@ class _SignupScreenState extends State<SignupScreen> {
         final referralUser = signupResults[2] as ReferralModel?;
 
         if (conflict != null) {
-          ShowToastDialog.showToast(conflict);
-          await auth.FirebaseAuth.instance.signOut();
-          if (mounted) pushAndRemoveUntil(context, const LoginScreen());
+          await _abortOrphanedSignup(context, conflict);
           return;
         }
 
@@ -260,9 +398,7 @@ class _SignupScreenState extends State<SignupScreen> {
         final sessionResult = await DeviceSessionService.authorize(fcmToken: fcmToken);
         debugPrint('[LOGIN-PERF] SIGNUP(phone) DeviceSessionService.authorize — ${deviceSessionSw.elapsedMilliseconds}ms');
         if (!sessionResult.allowed) {
-          ShowToastDialog.showToast(sessionResult.message!);
-          await auth.FirebaseAuth.instance.signOut();
-          if (mounted) pushAndRemoveUntil(context, const LoginScreen());
+          await _abortOrphanedSignup(context, sessionResult.message!);
           return;
         }
 
@@ -272,7 +408,14 @@ class _SignupScreenState extends State<SignupScreen> {
         userModel.phoneNumber = phoneNUmberEditingController.text.trim();
         userModel.role = USER_ROLE_CUSTOMER;
         userModel.fcmToken = fcmToken;
-        userModel.active = true;
+        // Must be false (or absent) on this very first write - firestore.rules
+        // rejects a self-created user doc with active: true (2026-08-18
+        // hardening, to stop a client self-approving). ServiceListScreen/
+        // LocationPermissionScreen already promote it to true themselves via
+        // a separate update right after this, which the rules do allow -
+        // this was the actual cause of every new signup silently failing to
+        // write its Firestore profile (2026-08-27 fix).
+        userModel.active = false;
         userModel.countryCode = countryCodeEditingController.text;
         userModel.createdAt = Timestamp.now();
 
@@ -291,7 +434,8 @@ class _SignupScreenState extends State<SignupScreen> {
         final signupPrefs = await SharedPreferences.getInstance();
         await signupPrefs.setString(PHONE_AUTH_USER_ID, userModel.userID);
         if (!mounted) return;
-        ShowToastDialog.showToast('Welcome to QuickDash! Your account is ready.');
+        didShowSuccess = true;
+        ShowToastDialog.showSuccess('Account created!');
         debugPrint('[LOGIN-PERF] SIGNUP(phone) TOTAL (tap to navigate) — ${totalSw.elapsedMilliseconds}ms');
         if (userModel.shippingAddress != null &&
             userModel.shippingAddress!.isNotEmpty) {
@@ -339,7 +483,7 @@ class _SignupScreenState extends State<SignupScreen> {
       );
       debugPrint('[LOGIN-PERF] SIGNUP(email) createUserWithEmailAndPassword — ${createUserSw.elapsedMilliseconds}ms');
       if (credential.user == null) {
-        ShowToastDialog.showToast("Signup failed. Please try again.");
+        await _abortOrphanedSignup(context, "Signup failed. Please try again.");
         return;
       }
 
@@ -352,9 +496,7 @@ class _SignupScreenState extends State<SignupScreen> {
       final sessionResult = await DeviceSessionService.authorize(fcmToken: fcmToken);
       debugPrint('[LOGIN-PERF] SIGNUP(email) DeviceSessionService.authorize — ${deviceSessionSw.elapsedMilliseconds}ms');
       if (!sessionResult.allowed) {
-        ShowToastDialog.showToast(sessionResult.message!);
-        await auth.FirebaseAuth.instance.signOut();
-        if (mounted) pushAndRemoveUntil(context, const LoginScreen());
+        await _abortOrphanedSignup(context, sessionResult.message!);
         return;
       }
 
@@ -372,7 +514,9 @@ class _SignupScreenState extends State<SignupScreen> {
       userModel.phoneNumber = phoneNUmberEditingController.text.trim();
       userModel.role = USER_ROLE_CUSTOMER;
       userModel.fcmToken = fcmToken;
-      userModel.active = true;
+      // Must be false (or absent) on this very first write - see the
+      // identical comment on the phone branch above for why.
+      userModel.active = false;
       userModel.countryCode = countryCodeEditingController.text;
       userModel.createdAt = Timestamp.now();
 
@@ -396,7 +540,8 @@ class _SignupScreenState extends State<SignupScreen> {
       } catch (_) {}
 
       if (!mounted) return;
-      ShowToastDialog.showToast('Welcome to QuickDash! Your account is ready.');
+      didShowSuccess = true;
+      ShowToastDialog.showSuccess('Account created!');
       debugPrint('[LOGIN-PERF] SIGNUP(email) TOTAL (tap to navigate) — ${totalSw.elapsedMilliseconds}ms');
       if (userModel.shippingAddress != null &&
           userModel.shippingAddress!.isNotEmpty) {
@@ -436,19 +581,19 @@ class _SignupScreenState extends State<SignupScreen> {
           ShowToastDialog.showToast(e.message ?? "Signup failed. Please try again.");
       }
     } catch (_) {
-      ShowToastDialog.showToast("Something went wrong. Please try again.");
       // Any exception this late (e.g. the Firestore profile write failing
       // right after a successful authorize() call) means signup did not
-      // actually complete — leaving a live Auth session with no matching
-      // profile is worse than signing out and letting the user retry
-      // cleanly. There's no way to un-claim the device_id authorize()
-      // already registered server-side from here, but at least the local
-      // session doesn't limp along half-signed-up.
-      if (auth.FirebaseAuth.instance.currentUser != null) {
-        await auth.FirebaseAuth.instance.signOut();
-      }
+      // actually complete - deleting the Auth account (2026-08-27, see
+      // _abortOrphanedSignup) rather than just signing out means the
+      // customer can immediately retry with the same email/phone instead
+      // of being permanently stuck.
+      await _abortOrphanedSignup(context, "Something went wrong. Please try again.");
     } finally {
-      ShowToastDialog.closeLoader();
+      // Skip the plain dismiss on the success path - showSuccess() above
+      // already transitions the same overlay to a checkmark and dismisses
+      // itself on its own timer; closeLoader() here would cut that off
+      // before the user ever sees it.
+      if (!didShowSuccess) ShowToastDialog.closeLoader();
       if (mounted) setState(() => _isBusy = false);
     }
   }
@@ -463,8 +608,14 @@ class _SignupScreenState extends State<SignupScreen> {
           child: Column(
             children: [
               AuthHeader(
-                title: 'Create Your Account'.tr,
-                subtitle: 'Join QuickDash and start enjoying faster dining experiences.'.tr,
+                // Phone is already verified by the time this shows - framed
+                // as completing a profile, not still "signing up"
+                // (2026-08-27, better first-run experience).
+                title: (type == "mobileNumber" ? 'Set Your Profile' : 'Create Your Account').tr,
+                subtitle: (type == "mobileNumber"
+                        ? 'Your number is verified - just a couple more details to get started.'
+                        : 'Join QuickDash and start enjoying faster dining experiences.')
+                    .tr,
                 showBackButton: true,
               ),
               Expanded(
@@ -503,7 +654,9 @@ class _SignupScreenState extends State<SignupScreen> {
           keyboardType: TextInputType.emailAddress,
           textCapitalization: TextCapitalization.none,
           maxLength: 254,
+          onChanged: _onEmailChangedInline,
         ),
+        _buildInlineFieldStatus(checking: _checkingEmail, error: _emailInlineError),
         const SizedBox(height: 16),
         AuthFieldLabel(text: 'Phone Number'.tr),
         AuthTextField(
@@ -517,6 +670,7 @@ class _SignupScreenState extends State<SignupScreen> {
             FilteringTextInputFormatter.digitsOnly,
             LengthLimitingTextInputFormatter(phoneMaxLength),
           ],
+          onChanged: _onPhoneChangedInline,
           prefixWidget: CountryCodePicker(
             enabled: type != "mobileNumber",
             onChanged: (value) =>
@@ -546,6 +700,8 @@ class _SignupScreenState extends State<SignupScreen> {
             ),
           ),
         ),
+        if (type != "mobileNumber")
+          _buildInlineFieldStatus(checking: _checkingPhone, error: _phoneInlineError),
         if (type != "mobileNumber") ...[
           const SizedBox(height: 16),
           AuthFieldLabel(text: 'Password'.tr),
@@ -582,34 +738,75 @@ class _SignupScreenState extends State<SignupScreen> {
         ),
         const SizedBox(height: 24),
         AuthPrimaryButton(
-          label: 'Sign Up'.tr,
+          label: (type == "mobileNumber" ? 'Continue' : 'Sign Up').tr,
           onTap: () {
+            if (_checkingEmail || _checkingPhone) {
+              ShowToastDialog.showToast('Still checking your details, please wait a moment.'.tr);
+              return;
+            }
+            if (_emailInlineError != null) {
+              ShowToastDialog.showToast(_emailInlineError!);
+              return;
+            }
+            if (_phoneInlineError != null) {
+              ShowToastDialog.showToast(_phoneInlineError!);
+              return;
+            }
             if (_validateSignupForm()) {
               signUpWithEmailAndPassword(context);
             }
           },
         ),
-        const SizedBox(height: 20),
-        const AuthOrDivider(),
-        const SizedBox(height: 16),
-        Center(
-          child: GestureDetector(
-            onTap: () => push(context, const PhoneNumberScreen(isSignup: true)),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              child: Text(
-                'Sign up with Phone Number'.tr,
-                style: TextStyle(
-                  color: Colors.white.withValues(alpha: 0.88),
-                  fontFamily: AppThemeData.semiBold,
-                  fontSize: 15,
+        // Doesn't apply once already on the phone flow's own profile step -
+        // "sign up with phone number" makes no sense to offer here
+        // (2026-08-27 fix, found while reworking this screen for phone
+        // signup).
+        if (type != "mobileNumber") ...[
+          const SizedBox(height: 20),
+          const AuthOrDivider(),
+          const SizedBox(height: 16),
+          Center(
+            child: GestureDetector(
+              onTap: () => push(context, const PhoneNumberScreen(isSignup: true)),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Text(
+                  'Sign up with Phone Number'.tr,
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.88),
+                    fontFamily: AppThemeData.semiBold,
+                    fontSize: 15,
+                  ),
                 ),
               ),
             ),
           ),
-        ),
+        ],
         const SizedBox(height: 8),
       ],
+    );
+  }
+
+  // "Checking…" / error text under an email or phone field, or nothing at
+  // all when there's no status to show (2026-08-27) - kept as a fixed-height
+  // slot below the field rather than inside AuthTextField itself, since that
+  // shared widget doesn't have an error/suffix slot and is used elsewhere
+  // in the app too.
+  Widget _buildInlineFieldStatus({required bool checking, required String? error}) {
+    if (!checking && error == null) return const SizedBox(height: 4);
+    return Padding(
+      padding: const EdgeInsets.only(top: 6, left: 4),
+      child: checking
+          ? Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const SizedBox(
+                    width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 1.5, color: Colors.white54)),
+                const SizedBox(width: 6),
+                Text('Checking…'.tr, style: const TextStyle(fontSize: 11, color: Colors.white54)),
+              ],
+            )
+          : Text(error!, style: const TextStyle(fontSize: 11, color: Colors.redAccent, fontWeight: FontWeight.w600)),
     );
   }
 
