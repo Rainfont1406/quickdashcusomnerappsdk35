@@ -44,6 +44,15 @@ class _DineInRestaurantDetailsScreenState
   String _selectedSlotEnd = '';
   int _guestCount = 2;
 
+  // Combined booking+walk-in capacity snapshot for _selectedDate
+  // (2026-08-28) - lets this screen tell the customer a date is already
+  // fully booked (with a "seats may free up" estimate, for today) before
+  // they pick a time and hit the SlotCapacityExceededException rejection
+  // at Confirm. Only fetched for 'flexible' bookingType - see
+  // FireStoreUtils.getDateAvailabilitySnapshot's own comment.
+  SeatAvailability? _dateAvailability;
+  bool _checkingDateAvailability = false;
+
   // Header image carousel - uses the restaurant's own gallery (vendor.photos,
   // set via Add Store) rather than the retired Dine-In-only Menu Photos
   // upload (2026-08-27, vendor request: don't maintain two photo sets).
@@ -129,6 +138,8 @@ class _DineInRestaurantDetailsScreenState
     }
     if (widget.vendorModel.bookingType == 'slot_based') {
       _loadSlotCounts();
+    } else {
+      _checkDateAvailability();
     }
     _fetchWalletBalance();
     _headerCtrl = PageController();
@@ -272,6 +283,34 @@ class _DineInRestaurantDetailsScreenState
     if (!slot.isEnabled) return false;
     final count = _slotBookingCounts[slot.id] ?? 0;
     return count < slot.maxCapacity;
+  }
+
+  // Combined booking+walk-in capacity check for the currently-selected
+  // date (2026-08-28) - display-only, same as _loadSlotCounts above; the
+  // real gate is still reserveBookingCapacity's transaction at confirm
+  // time. Lets the customer see "fully booked" (with a "seats may free up"
+  // estimate for today) right after picking a date, instead of only after
+  // picking a time and hitting the rejection at Confirm.
+  Future<void> _checkDateAvailability() async {
+    if (!mounted) return;
+    setState(() => _checkingDateAvailability = true);
+    try {
+      final dateKey = DateFormat('yyyy-MM-dd').format(_selectedDate);
+      final availability = await FireStoreUtils.getDateAvailabilitySnapshot(
+        vendor: widget.vendorModel,
+        dateKey: dateKey,
+      );
+      if (!mounted) return;
+      setState(() {
+        _dateAvailability = availability;
+        _checkingDateAvailability = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      // Non-critical - the advisory just doesn't show; Confirm-time
+      // enforcement is unaffected either way.
+      setState(() => _checkingDateAvailability = false);
+    }
   }
 
   // ── Price calculation ──────────────────────────────────────────
@@ -567,7 +606,11 @@ class _DineInRestaurantDetailsScreenState
                       // grid, so drop it rather than silently carrying it over.
                       _selectedTime = '';
                     });
-                    if (widget.vendorModel.bookingType == 'slot_based') _loadSlotCounts();
+                    if (widget.vendorModel.bookingType == 'slot_based') {
+                      _loadSlotCounts();
+                    } else {
+                      _checkDateAvailability();
+                    }
                   },
                   child: AnimatedContainer(
                     duration: const Duration(milliseconds: 200),
@@ -607,6 +650,45 @@ class _DineInRestaurantDetailsScreenState
                   ),
                 );
               },
+            ),
+          ),
+          _buildDateAvailabilityNotice(dark),
+        ],
+      ),
+    );
+  }
+
+  // "Fully booked" advisory for the selected date (2026-08-28) - shown
+  // right here, before the customer even picks a time, rather than only
+  // as a rejection at Confirm. The "seats may free up" estimate only ever
+  // appears for today (see getDateAvailabilitySnapshot's own comment on
+  // why a future date has no live nextFreeAt to show) - explicitly worded
+  // as a worst case, since a vendor's own "Mark Seat Free"/reject can free
+  // a seat earlier than this.
+  Widget _buildDateAvailabilityNotice(bool dark) {
+    if (_checkingDateAvailability || _dateAvailability?.isFull != true) return const SizedBox();
+    final eta = _dateAvailability!.nextFreeAt;
+    final dateLabel = DateFormat('EEE, MMM d').format(_selectedDate);
+    final message = eta != null
+        ? 'This restaurant is fully booked for $dateLabel. Seats may free up around ${DateFormat('h:mm a').format(eta)}, or possibly earlier.'
+        : 'This restaurant is fully booked for $dateLabel. Please check back later or try another date.';
+    return Container(
+      margin: const EdgeInsets.only(top: 14),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: (dark ? Colors.orange.shade900 : Colors.orange.shade50),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Colors.orange.withValues(alpha: 0.4)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.info_outline_rounded, size: 18, color: Colors.orange.shade700),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              message.tr(),
+              style: TextStyle(fontSize: 12.5, color: dark ? Colors.white : Colors.orange.shade900),
             ),
           ),
         ],
@@ -1245,10 +1327,22 @@ class _DineInRestaurantDetailsScreenState
       capacityReserved = true;
     } on SlotCapacityExceededException catch (e) {
       Navigator.pop(context);
+      // Append the last-known "seats may free up around HH:MM" estimate
+      // when available (2026-08-28) - re-uses whatever _checkDateAvailability
+      // last fetched for this date rather than a fresh read, so this stays
+      // a fast UI update even if that estimate has drifted slightly stale.
+      final eta = _dateAvailability?.nextFreeAt;
+      final message = eta != null
+          ? '${e.message} Seats may free up around ${DateFormat('h:mm a').format(eta)}, or possibly earlier.'
+          : e.message;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(e.message.tr()), backgroundColor: Colors.red),
+        SnackBar(content: Text(message.tr()), backgroundColor: Colors.red),
       );
-      if (isSlotBased) await _loadSlotCounts();
+      if (isSlotBased) {
+        await _loadSlotCounts();
+      } else {
+        await _checkDateAvailability();
+      }
       return;
     } on BookingDateBlockedException catch (e) {
       // The vendor blocked this date after the customer already had this

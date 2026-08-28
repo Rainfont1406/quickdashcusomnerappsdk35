@@ -132,10 +132,17 @@ class BusinessContextData {
 class SeatAvailability {
   final int occupiedGuests;
   final int maxCapacity;
+  // Server-computed worst-case estimate of when the soonest currently-
+  // occupying walk-in order or table booking is due to auto-free
+  // (2026-08-28, functions/dineOccupancy.js) - null when nothing is
+  // currently occupying, or the field hasn't been computed yet. Advisory
+  // only: a vendor's own "Mark Seat Free"/reject can free a seat earlier.
+  final DateTime? nextFreeAt;
 
   SeatAvailability({
     required this.occupiedGuests,
     required this.maxCapacity,
+    this.nextFreeAt,
   });
 
   bool get isFull => maxCapacity > 0 && occupiedGuests >= maxCapacity;
@@ -3156,6 +3163,7 @@ class FireStoreUtils {
     StreamSubscription? bookingSub;
     int walkInGuests = 0;
     int bookingGuests = 0;
+    DateTime? nextFreeAt;
     bool haveOccupancy = false;
     bool haveBooking = false;
 
@@ -3167,6 +3175,7 @@ class FireStoreUtils {
       controller.add(SeatAvailability(
         occupiedGuests: walkInGuests + bookingGuests,
         maxCapacity: capacity,
+        nextFreeAt: nextFreeAt,
       ));
     }
 
@@ -3178,6 +3187,8 @@ class FireStoreUtils {
           // occupancy - not an error state, nothing to distinguish from
           // "quiet right now".
           walkInGuests = doc.exists ? (doc.data()?['occupiedGuests'] as num?)?.toInt() ?? 0 : 0;
+          final nextFreeTs = doc.data()?['nextFreeAt'];
+          nextFreeAt = nextFreeTs is Timestamp ? nextFreeTs.toDate() : null;
           haveOccupancy = true;
           emit();
         });
@@ -3193,6 +3204,52 @@ class FireStoreUtils {
       },
     );
     return controller.stream;
+  }
+
+  // One-time combined-capacity snapshot for a specific booking date
+  // (2026-08-28) - used by the "Select Date" step on the table-booking
+  // screen itself, so a customer can be told a date is already fully
+  // booked (with a "seats may free up around HH:MM" estimate, for today)
+  // before they even pick a time and hit the SlotCapacityExceededException
+  // rejection at Confirm. Deliberately NOT gated on seatAvailabilityEnabled/
+  // seatAvailabilityOn - those control the separate, optional walk-in
+  // crowding banner; this is core table-booking UX, always relevant
+  // whenever a booking is being attempted, regardless of that toggle.
+  // Only meaningful for 'flexible' bookingType (see reserveBookingCapacity's
+  // own comment on why slot-based isn't combined this way).
+  static Future<SeatAvailability?> getDateAvailabilitySnapshot({
+    required VendorModel vendor,
+    required String dateKey,
+  }) async {
+    if (vendor.bookingType != 'flexible') return null;
+    final capacity = vendor.guestCapacity;
+    if (capacity <= 0) return null;
+
+    final bookingDoc = await firestore
+        .collection(DINE_IN_CAPACITY)
+        .doc(_capacityDocId(vendorId: vendor.id, bookingType: 'flexible', slotId: '', dateKey: dateKey))
+        .get();
+    final bookingGuests = (bookingDoc.data()?['occupiedGuests'] as num?)?.toInt() ?? 0;
+
+    // Walk-in occupancy (and the nextFreeAt estimate) is inherently a live,
+    // right-now concept - only relevant when checking today, never a
+    // future date that hasn't started occupying anything yet.
+    final today = DateTime.now();
+    final todayKey = '${today.year}-${today.month.toString().padLeft(2, '0')}-${today.day.toString().padLeft(2, '0')}';
+    int walkInGuests = 0;
+    DateTime? nextFreeAt;
+    if (dateKey == todayKey) {
+      final occDoc = await firestore.collection(DINE_IN_OCCUPANCY).doc(vendor.id).get();
+      walkInGuests = (occDoc.data()?['occupiedGuests'] as num?)?.toInt() ?? 0;
+      final nextFreeTs = occDoc.data()?['nextFreeAt'];
+      nextFreeAt = nextFreeTs is Timestamp ? nextFreeTs.toDate() : null;
+    }
+
+    return SeatAvailability(
+      occupiedGuests: bookingGuests + walkInGuests,
+      maxCapacity: capacity,
+      nextFreeAt: nextFreeAt,
+    );
   }
 
   Future<OrderModel> placeOrder(OrderModel orderModel) async {
