@@ -3051,6 +3051,18 @@ class FireStoreUtils {
     // the capacity check right below it. Closes the gap where a vendor
     // blocks a date after the customer already has the booking screen open.
     final vendorRef = firestore.collection(VENDORS).doc(vendorId);
+    // Walk-in Dining occupancy and table-booking capacity used to be two
+    // blind, independent pools drawing from the same physical seats
+    // (2026-08-28 fix) - a vendor could be genuinely full from walk-ins
+    // alone while a new booking still sailed through because it only ever
+    // checked its own dine_in_capacity doc. Only meaningful for 'flexible'
+    // bookings: dine_in_occupancy is a per-vendor-per-day figure with no
+    // slot granularity, so combining it into a single slot's own capacity
+    // check wouldn't be dimensionally comparable (slot-based is hidden
+    // from the Dine-In Settings UI as of 2026-08-27 anyway - see AddDineIn.
+    // dart - but the underlying function still supports it, untouched).
+    final occupancyRef =
+        bookingType == 'flexible' ? firestore.collection(DINE_IN_OCCUPANCY).doc(vendorId) : null;
     await firestore.runTransaction((tx) async {
       final vendorSnap = await tx.get(vendorRef);
       final blockedDates = List<String>.from(vendorSnap.data()?['bookingBlockedDates'] ?? []);
@@ -3059,7 +3071,12 @@ class FireStoreUtils {
       }
       final snap = await tx.get(ref);
       final occupied = (snap.data()?['occupiedGuests'] as num?)?.toInt() ?? 0;
-      if (occupied + guestCount > maxCapacity) {
+      int walkInOccupied = 0;
+      if (occupancyRef != null) {
+        final occupancySnap = await tx.get(occupancyRef);
+        walkInOccupied = (occupancySnap.data()?['occupiedGuests'] as num?)?.toInt() ?? 0;
+      }
+      if (occupied + walkInOccupied + guestCount > maxCapacity) {
         throw SlotCapacityExceededException();
       }
       tx.set(ref, {'occupiedGuests': occupied + guestCount}, SetOptions(merge: true));
@@ -3119,16 +3136,63 @@ class FireStoreUtils {
     final capacity = vendor.effectiveSeatCapacity;
     if (capacity == null || capacity <= 0) return Stream.value(null);
 
-    return firestore.collection(DINE_IN_OCCUPANCY).doc(vendor.id).snapshots().map((doc) {
-      // A vendor with no aggregate doc yet (no Dining orders ever, or the
-      // trigger hasn't fired for them yet) is simply at zero occupancy -
-      // not an error state, nothing to distinguish from "quiet right now".
-      final occupied = doc.exists ? (doc.data()?['occupiedGuests'] as num?)?.toInt() ?? 0 : 0;
-      return SeatAvailability(
-        occupiedGuests: occupied,
+    // Combines two previously-blind occupancy sources (2026-08-28 fix):
+    // dine_in_occupancy (walk-in Dining orders, unchanged meaning - still
+    // maintained server-side by functions/dineOccupancy.js) and today's
+    // dine_in_capacity 'flexible' doc (table bookings). Before this, the
+    // banner only ever showed the walk-in half, so a vendor already full
+    // from table bookings alone could still show seats "vacant." Manual
+    // dual-stream combine (no rxdart dependency) - tracks the latest value
+    // from each source and re-emits occupiedGuests as their sum whenever
+    // either one changes. Slot-based bookings aren't included here for the
+    // same reason reserveBookingCapacity only combines for 'flexible' -
+    // dine_in_occupancy has no slot granularity to compare against.
+    final today = DateTime.now();
+    final todayKey = '${today.year}-${today.month.toString().padLeft(2, '0')}-${today.day.toString().padLeft(2, '0')}';
+    final bookingDocId = '${vendor.id}_flexible_$todayKey';
+
+    late StreamController<SeatAvailability?> controller;
+    StreamSubscription? occupancySub;
+    StreamSubscription? bookingSub;
+    int walkInGuests = 0;
+    int bookingGuests = 0;
+    bool haveOccupancy = false;
+    bool haveBooking = false;
+
+    void emit() {
+      // Wait for at least one snapshot from each source before the first
+      // emission, so the banner never briefly flashes a wrong, half-summed
+      // number on initial load.
+      if (!haveOccupancy || !haveBooking) return;
+      controller.add(SeatAvailability(
+        occupiedGuests: walkInGuests + bookingGuests,
         maxCapacity: capacity,
-      );
-    });
+      ));
+    }
+
+    controller = StreamController<SeatAvailability?>(
+      onListen: () {
+        occupancySub = firestore.collection(DINE_IN_OCCUPANCY).doc(vendor.id).snapshots().listen((doc) {
+          // A vendor with no aggregate doc yet (no Dining orders ever, or
+          // the trigger hasn't fired for them yet) is simply at zero
+          // occupancy - not an error state, nothing to distinguish from
+          // "quiet right now".
+          walkInGuests = doc.exists ? (doc.data()?['occupiedGuests'] as num?)?.toInt() ?? 0 : 0;
+          haveOccupancy = true;
+          emit();
+        });
+        bookingSub = firestore.collection(DINE_IN_CAPACITY).doc(bookingDocId).snapshots().listen((doc) {
+          bookingGuests = doc.exists ? (doc.data()?['occupiedGuests'] as num?)?.toInt() ?? 0 : 0;
+          haveBooking = true;
+          emit();
+        });
+      },
+      onCancel: () {
+        occupancySub?.cancel();
+        bookingSub?.cancel();
+      },
+    );
+    return controller.stream;
   }
 
   Future<OrderModel> placeOrder(OrderModel orderModel) async {
