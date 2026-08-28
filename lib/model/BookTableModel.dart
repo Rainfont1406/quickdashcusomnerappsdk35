@@ -31,6 +31,19 @@ class BookTableModel {
   num bookingCharge;        // per-unit charge
   num totalCharge;          // totalGuest * bookingCharge or flat charge
   String approvalMode;      // 'auto' | 'manual'
+  // Whether this booking's dine_in_capacity reservation has been given back
+  // (auto-release sweep, "Mark Seat Free", or vendor reject) - added
+  // 2026-08-28. This field was missing from this model entirely (though
+  // present on the Vendor App's copy), so every booking ever created here
+  // wrote a Firestore doc with no capacityReleased field at all - not
+  // false, genuinely absent. That silently broke AutoReleaseStaleBooking
+  // Capacity.php's own Firestore-level `capacityReleased == false` filter
+  // forever (a missing field never matches an equality filter), meaning
+  // the 15-min auto-release sweep never found a single real booking to
+  // release. Fixed on the PHP side (status-only filter, in-memory check
+  // instead) and here, so newly created bookings explicitly carry the
+  // field going forward.
+  bool capacityReleased;
 
   BookTableModel(
       {author,
@@ -59,7 +72,8 @@ class BookTableModel {
       this.pricingModel = 'free',
       this.bookingCharge = 0,
       this.totalCharge = 0,
-      this.approvalMode = 'auto'})
+      this.approvalMode = 'auto',
+      this.capacityReleased = false})
       : author = author ?? User(),
         createdAt = createdAt ?? Timestamp.now(),
         date = date ?? Timestamp.now(),
@@ -103,7 +117,8 @@ class BookTableModel {
         pricingModel: parsedJson['pricingModel'] as String? ?? 'free',
         bookingCharge: parsedJson['bookingCharge'] is num ? parsedJson['bookingCharge'] as num : 0,
         totalCharge: parsedJson['totalCharge'] is num ? parsedJson['totalCharge'] as num : 0,
-        approvalMode: parsedJson['approvalMode'] as String? ?? 'auto');
+        approvalMode: parsedJson['approvalMode'] as String? ?? 'auto',
+        capacityReleased: parsedJson['capacityReleased'] == true);
   }
 
   Map<String, dynamic> toJson() {
@@ -135,6 +150,7 @@ class BookTableModel {
       'bookingCharge': bookingCharge,
       'totalCharge': totalCharge,
       'approvalMode': approvalMode,
+      'capacityReleased': capacityReleased,
     };
   }
 }
