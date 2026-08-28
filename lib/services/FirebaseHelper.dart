@@ -2990,6 +2990,38 @@ class FireStoreUtils {
     return occupiedGuests;
   }
 
+  // A customer who already has an active table booking for this vendor
+  // today already told us their party size at booking time - re-asking
+  // "how many people?" on the Dining PaymentScreen is redundant (2026-08-28).
+  // Sums totalGuest across every active booking this customer has for this
+  // vendor today (rare, but a customer could have more than one), returning
+  // null when there's none - the caller falls back to the normal picker in
+  // that case, same "no default for an unconfigured/uninvolved case" rule
+  // as effectiveSeatCapacity's own null fallback.
+  static Future<int?> getExistingBookingGuestCountToday({
+    required String vendorId,
+    required String customerId,
+  }) async {
+    final today = DateTime.now();
+    final dateKey = '${today.year}-${today.month.toString().padLeft(2, '0')}-${today.day.toString().padLeft(2, '0')}';
+    final snapshot = await firestore
+        .collection(ORDERS_TABLE)
+        .where('vendorID', isEqualTo: vendorId)
+        .where('authorID', isEqualTo: customerId)
+        .get();
+
+    int? totalGuests;
+    for (final doc in snapshot.docs) {
+      final data = doc.data();
+      final status = data['status'] as String? ?? '';
+      if (status == 'Cancelled' || status == 'Rejected') continue;
+      if ((data['bookingDateKey'] as String?) != dateKey) continue;
+      final guestVal = data['totalGuest'];
+      totalGuests = (totalGuests ?? 0) + ((guestVal is num && guestVal > 0) ? guestVal.toInt() : 1);
+    }
+    return totalGuests;
+  }
+
   static String _capacityDocId({required String vendorId, required String bookingType, required String slotId, required String dateKey}) {
     final bucket = bookingType == 'slot_based' ? slotId : 'flexible';
     return '${vendorId}_${bucket}_$dateKey';

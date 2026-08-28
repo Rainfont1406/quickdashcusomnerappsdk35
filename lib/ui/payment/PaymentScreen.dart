@@ -178,6 +178,14 @@ class PaymentScreenState extends State<PaymentScreen> {
   // Defaults from whatever CartScreen still passes in (back-compat), else 1.
   late int _diningGuestCount = widget.diningGuestCount ?? 1;
 
+  // Set in _loadSeatAvailability if this customer already has an active
+  // table booking at this vendor today (2026-08-28) - when non-null, the
+  // picker below shows this count read-only instead of the interactive
+  // stepper, since the customer already told us their party size at
+  // booking time. Null means "no existing booking," not "zero guests" -
+  // the normal picker applies in that case.
+  int? _existingBookingGuestCount;
+
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
 
   String paymentOption = 'Pay Via Wallet'.tr();
@@ -346,6 +354,24 @@ class PaymentScreenState extends State<PaymentScreen> {
           _seatAvailabilityStream = FireStoreUtils.streamCurrentSeatAvailability(vendor);
         }
       });
+      // Check for an existing table booking at this vendor today (2026-08-28)
+      // - separate try/catch so a failure here never blocks the seat-
+      // availability banner above, which already loaded fine.
+      try {
+        final existingGuests = await FireStoreUtils.getExistingBookingGuestCountToday(
+          vendorId: vendor.id,
+          customerId: MyAppState.currentUser!.userID,
+        );
+        if (!mounted) return;
+        if (existingGuests != null) {
+          setState(() {
+            _existingBookingGuestCount = existingGuests;
+            _diningGuestCount = existingGuests;
+          });
+        }
+      } catch (_) {
+        // Non-critical - falls back to the normal interactive picker.
+      }
     } catch (_) {
       // Non-critical - the footer just shows nothing if this fails.
     }
@@ -1002,6 +1028,40 @@ class PaymentScreenState extends State<PaymentScreen> {
   // widget.orderType == 'Dining' && _diningVendor?.seatCapacity != null &&
   // _diningVendor?.seatAvailabilityEnabled == true.
   Widget _diningGuestCountPicker(bool dark) {
+    // Already booked a table here today - show the count read-only instead
+    // of re-asking (2026-08-28). No +/- stepper at all: this number came
+    // from the booking, not from this screen, so it isn't editable here.
+    if (_existingBookingGuestCount != null) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        margin: const EdgeInsets.only(bottom: 12),
+        decoration: BoxDecoration(
+          color: dark ? AppThemeData.darkBgTertiary : Color(0xFFF7F7F9),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: dark ? AppThemeData.darkBorderPrimary : Color(0xFFE5E5EA),
+          ),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.event_seat_outlined, size: 18, color: dark ? Colors.white70 : Colors.grey.shade700),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'You already have a table booked here today for $_existingBookingGuestCount ${_existingBookingGuestCount == 1 ? 'guest' : 'guests'}.'
+                    .tr(),
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  fontFamily: AppThemeData.semiBold,
+                  color: dark ? Colors.white : Colors.black87,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
       margin: const EdgeInsets.only(bottom: 12),
