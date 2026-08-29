@@ -98,13 +98,12 @@ class VendorModel {
 
   // Phase 1 real-time seat availability (see
   // TABLE_BOOKING_CAPACITY_AND_DEPOSIT_PLAN.html) - deliberately separate
-  // from guestCapacity below, which is a Phase-2 booking-config field that
-  // ALWAYS defaults to 50 even when the vendor never touched it, and
-  // represents a genuinely different real-world number for some venues
-  // (e.g. a vendor may reserve only 30 of their 50 total seats for advance
-  // table bookings, leaving 20 for walk-ins - guestCapacity and seatCapacity
-  // are allowed to legitimately differ, confirmed with the user 2026-08-25
-  // after an earlier attempt to unify them into one field was reverted).
+  // from guestCapacity below, a Phase-2 booking-config field representing a
+  // genuinely different real-world number for some venues (e.g. a vendor
+  // may reserve only 30 of their 50 total seats for advance table bookings,
+  // leaving 20 for walk-ins - guestCapacity and seatCapacity are allowed to
+  // legitimately differ, confirmed with the user 2026-08-25 after an
+  // earlier attempt to unify them into one field was reverted).
   // This field must stay genuinely nullable: null means "vendor hasn't set
   // this up," and that restaurant must be excluded from the feature
   // entirely, not silently treated as some default capacity.
@@ -117,7 +116,7 @@ class VendorModel {
   // overridable via SeatAvailabilityScreen for a vendor who genuinely wants
   // a different number (e.g. only some seats reserved for walk-ins).
   int? get effectiveSeatCapacity =>
-      seatCapacity ?? (enabledDiveInFuture && guestCapacity > 0 ? guestCapacity : null);
+      seatCapacity ?? ((enabledDiveInFuture && (guestCapacity ?? 0) > 0) ? guestCapacity : null);
 
   // Per-vendor override for how long a confirmed table booking's capacity
   // reservation stays held before the auto-release sweep frees it back
@@ -160,7 +159,11 @@ class VendorModel {
   // screen.dart) and at reservation time (FirebaseHelper.reserveBookingCapacity)
   // as the actual enforcement point - the picker exclusion is UX only.
   List<String> bookingBlockedDates;
-  int guestCapacity;
+  // Null means the vendor has never set this - deliberately no default
+  // value (2026-08-29, reverting the earlier "always defaults to 50" rule
+  // at the user's request): a number here must mean the vendor actually
+  // typed and saved it in the Vendor App/Web, not a fabrication.
+  int? guestCapacity;
   int bufferTimeBetweenReservations;
   String bookingPricingModel;      // 'free' | 'per_person' | 'table_charge' | 'cover_charge'
   num bookingCharge;
@@ -250,7 +253,7 @@ class VendorModel {
       this.minBookingNoticeMinutes = 30,
       this.maxAdvanceBookingDays = 7,
       this.bookingBlockedDates = const [],
-      this.guestCapacity = 50,
+      this.guestCapacity,
       this.bufferTimeBetweenReservations = 15,
       this.bookingPricingModel = 'free',
       this.bookingCharge = 0,
@@ -369,7 +372,7 @@ class VendorModel {
       minBookingNoticeMinutes: (parsedJson['minBookingNoticeMinutes'] is num) ? (parsedJson['minBookingNoticeMinutes'] as num).toInt() : 30,
       maxAdvanceBookingDays: (parsedJson['maxAdvanceBookingDays'] is num) ? (parsedJson['maxAdvanceBookingDays'] as num).toInt() : 7,
       bookingBlockedDates: parsedJson['bookingBlockedDates'] != null ? List<String>.from(parsedJson['bookingBlockedDates']) : [],
-      guestCapacity: (parsedJson['guestCapacity'] is num) ? (parsedJson['guestCapacity'] as num).toInt() : 50,
+      guestCapacity: (parsedJson['guestCapacity'] is num) ? (parsedJson['guestCapacity'] as num).toInt() : null,
       bufferTimeBetweenReservations: (parsedJson['bufferTimeBetweenReservations'] is num) ? (parsedJson['bufferTimeBetweenReservations'] as num).toInt() : 15,
       bookingPricingModel: parsedJson['bookingPricingModel'] as String? ?? 'free',
       bookingCharge: parsedJson['bookingCharge'] is num ? parsedJson['bookingCharge'] as num : 0,

@@ -9,8 +9,16 @@ import 'package:flutter/services.dart';
 
 class BookingConfirmationScreen extends StatelessWidget {
   final BookTableModel booking;
+  // When this booking was made from the Cart's "Dining -> Book a Table"
+  // choice (2026-08-29 fix), the customer still has an unpaid food order
+  // sitting in that same cart - popping all the way to Home here (the
+  // previous unconditional behavior) silently abandoned it with no path
+  // back to Payment. Popping twice instead (this screen + the booking
+  // screen beneath it) lands them back on that same Cart, still holding
+  // their items, ready to continue checkout.
+  final bool returnToCart;
 
-  const BookingConfirmationScreen({Key? key, required this.booking}) : super(key: key);
+  const BookingConfirmationScreen({Key? key, required this.booking, this.returnToCart = false}) : super(key: key);
 
   @override
   Widget build(BuildContext context) {
@@ -253,10 +261,18 @@ class BookingConfirmationScreen extends StatelessWidget {
                 Expanded(
                   child: ElevatedButton.icon(
                     onPressed: () {
-                      Navigator.of(context).popUntil((route) => route.isFirst);
+                      if (returnToCart) {
+                        // This screen + the booking screen beneath it -
+                        // lands exactly back on the Cart that launched them.
+                        Navigator.of(context)
+                          ..pop()
+                          ..pop();
+                      } else {
+                        Navigator.of(context).popUntil((route) => route.isFirst);
+                      }
                     },
-                    icon: const Icon(Icons.home_rounded, size: 18, color: Colors.white),
-                    label: Text('Done'.tr(), style: const TextStyle(color: Colors.white)),
+                    icon: Icon(returnToCart ? Icons.arrow_back_rounded : Icons.home_rounded, size: 18, color: Colors.white),
+                    label: Text(returnToCart ? 'Back to Order'.tr() : 'Done'.tr(), style: const TextStyle(color: Colors.white)),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: AppThemeData.primary500,
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),

@@ -670,14 +670,18 @@ class _CartScreenState extends State<CartScreen> {
     }
   }
 
-  // Presented when a vendor has BOTH table booking and seat availability
-  // enabled (2026-08-25) - "Dining" alone is ambiguous between "reserve a
-  // table for later" and "I'm heading in now", so ask instead of guessing.
-  // Not shown at all when only one (or neither) is enabled - see the
-  // Dining tap handler above for those cases.
-  void _showDiningChoiceSheet() {
+  // Soft warning for a club/lounge venue with no existing booking today
+  // (2026-08-29 redesign - replaces the old hard redirect-to-booking-screen
+  // behavior for this venue type, and the old both-features-on
+  // "How would you like to dine?" chooser, which no longer exists now that
+  // Cart never forces a booking detour). Not a block - the app can't verify
+  // physical entry - just a warning plus a way to book if they want to.
+  // Returns true if the customer chose to continue without booking, false
+  // if they backed out (typically via "Book a Table", which navigates away
+  // on its own) or dismissed the sheet.
+  Future<bool> _showClubNoBookingWarning() async {
     final dark = isDarkMode(context);
-    showModalBottomSheet(
+    final result = await showModalBottomSheet<bool>(
       context: context,
       backgroundColor: Colors.transparent,
       isScrollControlled: true,
@@ -695,12 +699,21 @@ class _CartScreenState extends State<CartScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'How would you like to dine?'.tr(),
+              'No table booked here yet'.tr(),
               style: TextStyle(
                 fontSize: 18,
                 fontFamily: AppThemeData.bold,
                 fontWeight: FontWeight.w700,
                 color: dark ? AppThemeData.darkTextPrimary : AppThemeData.neutral900,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Book a table first, or you may not get seated without a reservation.'.tr(),
+              style: TextStyle(
+                fontSize: 14,
+                fontFamily: AppThemeData.regular,
+                color: dark ? AppThemeData.darkTextTertiary : AppThemeData.neutral500,
               ),
             ),
             const SizedBox(height: 18),
@@ -710,30 +723,25 @@ class _CartScreenState extends State<CartScreen> {
               title: 'Book a Table'.tr(),
               subtitle: 'Reserve for today or tomorrow'.tr(),
               onTap: () {
-                Navigator.of(sheetCtx).pop();
+                Navigator.of(sheetCtx).pop(false);
                 if (vendorModel != null) {
-                  push(context, DineInRestaurantDetailsScreen(vendorModel: vendorModel!));
+                  push(context, DineInRestaurantDetailsScreen(vendorModel: vendorModel!, returnToCartOnSuccess: true));
                 }
               },
             ),
             const SizedBox(height: 12),
             _diningChoiceCard(
               dark: dark,
-              icon: Icons.restaurant_rounded,
-              title: 'Dine Now'.tr(),
-              subtitle: 'Order food to eat here today'.tr(),
-              onTap: () {
-                Navigator.of(sheetCtx).pop();
-                setState(() {
-                  selectedDineawayType = 'Dining';
-                  isDineawaySelected = true;
-                });
-              },
+              icon: Icons.check_circle_outline_rounded,
+              title: "I'm already seated".tr(),
+              subtitle: 'Continue without booking'.tr(),
+              onTap: () => Navigator.of(sheetCtx).pop(true),
             ),
           ],
         ),
       ),
     );
+    return result ?? false;
   }
 
   Widget _diningChoiceCard({
@@ -3899,39 +3907,36 @@ class _CartScreenState extends State<CartScreen> {
           return;
         }
         if (title == 'Dining') {
+          // Table booking is no longer forced from the Cart's Dining tap for
+          // ANY vendor type (2026-08-29 redesign, superseding the
+          // 2026-08-25/26 versions of this block) - the user's call: a
+          // mid-checkout booking detour is worse than just letting the
+          // order through, and booking is now purely a proactive action
+          // from the Dine-In discovery screen for whoever wants to reserve
+          // ahead. Turnover ("rolling") venues get zero prompt either way -
+          // Dine Now always proceeds directly; their own seat-availability
+          // banner/guest picker (if configured) still surfaces later on
+          // PaymentScreen, unaffected by this change.
+          //
+          // Club/lounge (full_session) venues are the one exception that
+          // still needs SOME signal here: they have no live seat-occupancy
+          // count to fall back on (occupancy tracking is turnover-specific -
+          // a lounge doesn't "turn over" tables the same way), so an
+          // unbooked walk-in genuinely risks no table being available. Not
+          // a hard block though - the app has no way to verify physical
+          // entry, so it warns and lets the customer choose: book now, or
+          // continue anyway (e.g. they're already seated / arranged entry
+          // another way). Only shown when no eligible booking exists for
+          // today (or yesterday within the usual 6am buffer).
           final bookingEnabled = vendorModel?.enabledDiveInFuture == true;
-          final seatAvailEnabled = vendorModel?.seatAvailabilityEnabled == true &&
-              vendorModel?.seatAvailabilityOn == true;
           final isClubType = vendorModel?.seatingMode == 'full_session';
-
-          // Club/lounge with table booking: walk-in "Dine Now" isn't
-          // offered at all - a guest either already has a table booked for
-          // tonight, or needs to book one first (2026-08-26). Checked
-          // before the seat-availability chooser below since that doesn't
-          // apply the same way for this venue type.
           if (bookingEnabled && isClubType && vendorModel != null) {
             final hasBooking = await _hasEligibleBookingTonight(vendorModel!);
             if (!hasBooking) {
-              push(context, DineInRestaurantDetailsScreen(vendorModel: vendorModel!));
-              return;
+              final continueAnyway = await _showClubNoBookingWarning();
+              if (!continueAnyway) return;
             }
-            // Already has a table booked - fall through to a normal Dining
-            // selection below, same as any other confirmed-booking guest.
-          } else if (bookingEnabled && seatAvailEnabled) {
-            // Both features on for this vendor - let the customer pick
-            // between reserving ahead and eating now, instead of silently
-            // picking one for them (2026-08-25).
-            _showDiningChoiceSheet();
-            return;
-          } else if (bookingEnabled && vendorModel != null) {
-            // Table booking only, no live seat tracking - go straight to
-            // the booking flow rather than a normal Dining checkout, since
-            // that's the only Dining experience this vendor actually offers.
-            push(context, DineInRestaurantDetailsScreen(vendorModel: vendorModel!));
-            return;
           }
-          // Seat-availability-only (or neither) falls through to the normal
-          // Dining selection below - unchanged from before this feature.
         }
         if (!mounted) return;
         setState(() {

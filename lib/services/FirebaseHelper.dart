@@ -3017,16 +3017,28 @@ class FireStoreUtils {
         .where('authorID', isEqualTo: customerId)
         .get();
 
-    int? totalGuests;
+    // Picks the single most recent matching booking's guest count rather
+    // than summing across all of today's matches (2026-08-29 fix) - summing
+    // never made sense (two separate same-day bookings aren't one party of
+    // N), and became visibly wrong once a since-fixed gap let a customer
+    // rack up several duplicate bookings for the same day: this returned
+    // their combined guest count as if it were one party size.
+    Timestamp? latestCreatedAt;
+    int? guestsForLatest;
     for (final doc in snapshot.docs) {
       final data = doc.data();
       final status = data['status'] as String? ?? '';
       if (status == 'Cancelled' || status == 'Rejected') continue;
       if ((data['bookingDateKey'] as String?) != dateKey) continue;
-      final guestVal = data['totalGuest'];
-      totalGuests = (totalGuests ?? 0) + ((guestVal is num && guestVal > 0) ? guestVal.toInt() : 1);
+      final createdAt = data['createdAt'];
+      if (createdAt is! Timestamp) continue;
+      if (latestCreatedAt == null || createdAt.compareTo(latestCreatedAt) > 0) {
+        latestCreatedAt = createdAt;
+        final guestVal = data['totalGuest'];
+        guestsForLatest = (guestVal is num && guestVal > 0) ? guestVal.toInt() : 1;
+      }
     }
-    return totalGuests;
+    return guestsForLatest;
   }
 
   static String _capacityDocId({required String vendorId, required String bookingType, required String slotId, required String dateKey}) {
@@ -3223,7 +3235,11 @@ class FireStoreUtils {
   }) async {
     if (vendor.bookingType != 'flexible') return null;
     final capacity = vendor.guestCapacity;
-    if (capacity <= 0) return null;
+    // A null capacity means the vendor enabled table booking without ever
+    // setting one (2026-08-29: guestCapacity no longer defaults to 50) -
+    // treat exactly like "no availability info" rather than fabricating a
+    // ceiling.
+    if (capacity == null || capacity <= 0) return null;
 
     final bookingDoc = await firestore
         .collection(DINE_IN_CAPACITY)

@@ -995,7 +995,13 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
     final List<String> steps = isBillPay
         ? (isBillPayUnpaid ? ['Payment Not Initiated'] : ['Payment Confirmed'])
         : isDineAway
-            ? ['Placed', 'Preparing', 'Ready']
+            // 4th step added (2026-08-29) - the tracker previously topped
+            // out at 'Ready' even once the vendor marked the order fully
+            // Completed, contradicting the status banner above (which
+            // already correctly says "Order Served"/"Order Collected") and
+            // making a finished dine-in/takeaway order look permanently
+            // stuck mid-flow.
+            ? ['Placed', 'Preparing', 'Ready', order.orderType == 'Takeaway' ? 'Collected' : 'Served']
             : ['Placed', 'Preparing', 'Driver', 'Delivered'];
     int currentStep;
     if (isBillPay) {
@@ -1010,7 +1016,7 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
         case ORDER_STATUS_DRIVER_REJECTED: currentStep = 1; break;
         case ORDER_STATUS_SHIPPED:     currentStep = 2; break;
         case ORDER_STATUS_IN_TRANSIT:  currentStep = isDineAway ? 2 : 3; break;
-        case ORDER_STATUS_COMPLETED:   currentStep = isDineAway ? 2 : 3; break;
+        case ORDER_STATUS_COMPLETED:   currentStep = 3; break; // last step of both the 4-entry dine-away and delivery arrays
         default:                       currentStep = 0;
       }
     }

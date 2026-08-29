@@ -25,8 +25,11 @@ import 'package:intl/intl.dart';
 
 class DineInRestaurantDetailsScreen extends StatefulWidget {
   final VendorModel vendorModel;
+  // Set when opened from the Cart's "Dining -> Book a Table" choice
+  // (2026-08-29 fix) - see BookingConfirmationScreen.returnToCart for why.
+  final bool returnToCartOnSuccess;
 
-  const DineInRestaurantDetailsScreen({Key? key, required this.vendorModel})
+  const DineInRestaurantDetailsScreen({Key? key, required this.vendorModel, this.returnToCartOnSuccess = false})
       : super(key: key);
 
   @override
@@ -1310,12 +1313,28 @@ class _DineInRestaurantDetailsScreenState
     // otherwise both pass, and gives a 'flexible' vendor a real capacity
     // ceiling against vendor.guestCapacity for the first time (previously
     // flexible bookings had zero capacity enforcement at all).
+    // guestCapacity no longer defaults to 50 (2026-08-29) - a vendor who
+    // enabled table booking but never actually set it has no real ceiling
+    // to enforce, so the booking must be blocked rather than let through
+    // with a fabricated/zero capacity. Mirrors the seatCapacity "excluded
+    // from the feature entirely" rule for the sibling field.
+    if (!isSlotBased && vendor.guestCapacity == null) {
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('This restaurant hasn\'t finished setting up table booking yet.'.tr()),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
     bool capacityReserved = false;
     try {
       final slot = isSlotBased
           ? vendor.bookingSlots.firstWhere((s) => s.id == _selectedSlotId)
           : null;
-      final maxCapacity = isSlotBased ? slot!.maxCapacity : vendor.guestCapacity;
+      final maxCapacity = isSlotBased ? slot!.maxCapacity : vendor.guestCapacity!;
       await FireStoreUtils.reserveBookingCapacity(
         vendorId: vendor.id,
         bookingType: vendor.bookingType,
@@ -1476,7 +1495,7 @@ class _DineInRestaurantDetailsScreenState
       _paymentAlreadyConsumed = false;
 
       Navigator.pop(context);
-      push(context, BookingConfirmationScreen(booking: saved));
+      push(context, BookingConfirmationScreen(booking: saved, returnToCart: widget.returnToCartOnSuccess));
     } catch (e) {
       // The booking write (or something after a successful charge) failed.
       // Release the reservation - a retry will re-reserve it - but keep
