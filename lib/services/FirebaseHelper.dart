@@ -1953,20 +1953,34 @@ class FireStoreUtils {
     return vendors;
   }
 
+  // 2026-08-30 fix: was 'author.id' (a nested field) while
+  // firestore.rules' isOwner('authorID') check - and every other booking
+  // query in the codebase (server-side deposit matching, CartScreen's
+  // _hasEligibleBookingTonight, the auto-release sweep) - uses the flat
+  // authorID field instead. That mismatch made this the one place where a
+  // real customer's own My Bookings query could come back PERMISSION_DENIED.
+  // Worse, .listen() here had no onError handler at all, so that denial (or
+  // any other stream error) was silently swallowed - the StreamController
+  // never got anything pushed to it, its stream never emitted, and
+  // UpComingTableBooking/HistoryTableBooking's StreamBuilder stayed on
+  // ConnectionState.waiting forever instead of resolving to "No Upcoming
+  // Bookings". Also fixed: `orders` used to accumulate across every live
+  // snapshot update instead of being rebuilt fresh each time, since
+  // onData.docs is already the full current result set, not a delta - that
+  // silently duplicated every booking on any real-time update.
   Stream<List<BookTableModel>> getBookingOrders(String userID, bool isUpComing) async* {
-    List<BookTableModel> orders = [];
-
     if (isUpComing) {
       StreamController<List<BookTableModel>> upcomingordersStreamController = StreamController();
       firestore
           .collection(ORDERS_TABLE)
-          .where('author.id', isEqualTo: userID)
+          .where('authorID', isEqualTo: userID)
           .where('date', isGreaterThan: Timestamp.now())
           .where("section_id", isEqualTo: sectionConstantModel!.id)
           .orderBy('date', descending: true)
           .orderBy('createdAt', descending: true)
           .snapshots()
           .listen((onData) async {
+        final List<BookTableModel> orders = [];
         await Future.forEach(onData.docs, (QueryDocumentSnapshot<Map<String, dynamic>> element) {
           try {
             orders.add(BookTableModel.fromJson(element.data()));
@@ -1975,19 +1989,23 @@ class FireStoreUtils {
           }
         });
         upcomingordersStreamController.sink.add(orders);
+      }, onError: (e, s) {
+        print('getBookingOrders (upcoming) stream error: $e $s');
+        upcomingordersStreamController.sink.add(<BookTableModel>[]);
       });
       yield* upcomingordersStreamController.stream;
     } else {
       StreamController<List<BookTableModel>> bookedordersStreamController = StreamController();
       firestore
           .collection(ORDERS_TABLE)
-          .where('author.id', isEqualTo: userID)
+          .where('authorID', isEqualTo: userID)
           .where('date', isLessThan: Timestamp.now())
           .where("section_id", isEqualTo: sectionConstantModel!.id)
           .orderBy('date', descending: true)
           .orderBy('createdAt', descending: true)
           .snapshots()
           .listen((onData) async {
+        final List<BookTableModel> orders = [];
         await Future.forEach(onData.docs, (QueryDocumentSnapshot<Map<String, dynamic>> element) {
           try {
             orders.add(BookTableModel.fromJson(element.data()));
@@ -1996,6 +2014,9 @@ class FireStoreUtils {
           }
         });
         bookedordersStreamController.sink.add(orders);
+      }, onError: (e, s) {
+        print('getBookingOrders (history) stream error: $e $s');
+        bookedordersStreamController.sink.add(<BookTableModel>[]);
       });
       yield* bookedordersStreamController.stream;
     }
