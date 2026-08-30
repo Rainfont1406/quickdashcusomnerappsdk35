@@ -1239,6 +1239,7 @@ class PaymentScreenState extends State<PaymentScreen> {
         billPayRequestId: widget.billPayRequestId,
         expectedBillVersion: widget.expectedBillVersion,
         scheduleTimeMillis: widget.scheduleTime?.millisecondsSinceEpoch,
+        clientOrderType: widget.orderType,
       );
       debugPrint('[ORDER-PERF] createVerifiedOrderPayment — ${verifySw.elapsedMilliseconds}ms '
           '(TOTAL so far ${proceedSw.elapsedMilliseconds}ms)');
@@ -1344,6 +1345,7 @@ class PaymentScreenState extends State<PaymentScreen> {
           billPayRequestId: widget.billPayRequestId,
           expectedBillVersion: widget.expectedBillVersion,
           scheduleTimeMillis: widget.scheduleTime?.millisecondsSinceEpoch,
+          clientOrderType: widget.orderType,
         );
         debugPrint('[ORDER-PERF] createVerifiedWalletOrder — ${verifySw.elapsedMilliseconds}ms '
             '(TOTAL so far ${proceedSw.elapsedMilliseconds}ms)');
@@ -1601,6 +1603,7 @@ class PaymentScreenState extends State<PaymentScreen> {
       billPayRequestId: widget.billPayRequestId,
       expectedBillVersion: widget.expectedBillVersion,
       scheduleTimeMillis: widget.scheduleTime?.millisecondsSinceEpoch,
+      clientOrderType: widget.orderType,
     );
     dismissLoadingAndClearProcessing();
     if (!mounted) return;
@@ -1632,6 +1635,7 @@ class PaymentScreenState extends State<PaymentScreen> {
       billPayRequestId: widget.billPayRequestId,
       expectedBillVersion: widget.expectedBillVersion,
       scheduleTimeMillis: widget.scheduleTime?.millisecondsSinceEpoch,
+      clientOrderType: widget.orderType,
     );
     dismissLoadingAndClearProcessing();
     if (!mounted) return;
@@ -1749,6 +1753,7 @@ class PaymentScreenState extends State<PaymentScreen> {
       taxSetting: widget.taxModel,
       billPayRequestId: widget.billPayRequestId,
       expectedBillVersion: widget.expectedBillVersion,
+      clientOrderType: widget.orderType,
     );
     dismissLoadingAndClearProcessing();
     if (!mounted) return;

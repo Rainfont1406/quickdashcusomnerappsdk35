@@ -116,12 +116,20 @@ class RazorPayController {
     String? billPayRequestId,
     int? expectedBillVersion,
     // Epoch millis of the customer's chosen future delivery/pickup time, or
-    // null for an immediate order. Lets the server judge special-discount
-    // ("happy hour") eligibility and vendor-open status against when the
-    // order will actually be fulfilled, not the moment of checkout - see
-    // CartScreen's _discountEvalTime for the client-side half of this fix
-    // (2026-08-23).
+    // null for an immediate order. Lets the server judge vendor-open status
+    // against when the order will actually be fulfilled, not the moment of
+    // checkout - see CartScreen's _discountEvalTime for the client-side half
+    // of this fix (2026-08-23). NOTE: special-discount eligibility no longer
+    // uses this (2026-08-30 reversal) - see clientOrderType below instead.
     int? scheduleTimeMillis,
+    // The real order type ('Dining' / 'Takeaway' / 'Delivery' / null),
+    // distinct from the `takeAway` bool above which collapses Dining into
+    // Takeaway for special-discount tier-matching (existing, unchanged
+    // design). This is a separate signal used only to decide whether to
+    // attempt the table-booking discount lock below - 'Dining' is the only
+    // value that triggers it (2026-08-30, §11.21). Sourced from
+    // PaymentScreen's own widget.orderType.
+    String? clientOrderType,
   }) async {
     final idToken = await _idToken();
     if (idToken == null) {
@@ -150,6 +158,7 @@ class RazorPayController {
               'billPayRequestId': billPayRequestId,
               'expectedBillVersion': expectedBillVersion,
               'scheduleTimeMillis': scheduleTimeMillis,
+              'clientOrderType': clientOrderType,
             }),
           )
           .timeout(const Duration(seconds: 30));
@@ -219,8 +228,12 @@ class RazorPayController {
     // Bill Pay Accept & Pay only — see createVerifiedOrderPayment above.
     String? billPayRequestId,
     int? expectedBillVersion,
-    // See createVerifiedOrderPayment's doc comment - same 2026-08-23 fix.
+    // See createVerifiedOrderPayment's doc comment - same 2026-08-23 fix
+    // (vendor-open status only, not special-discount as of the 2026-08-30
+    // reversal).
     int? scheduleTimeMillis,
+    // See createVerifiedOrderPayment's doc comment - same §11.21 addition.
+    String? clientOrderType,
   }) async {
     final idToken = await _idToken();
     if (idToken == null) {
@@ -249,6 +262,7 @@ class RazorPayController {
               'billPayRequestId': billPayRequestId,
               'expectedBillVersion': expectedBillVersion,
               'scheduleTimeMillis': scheduleTimeMillis,
+              'clientOrderType': clientOrderType,
             }),
           )
           .timeout(const Duration(seconds: 30));

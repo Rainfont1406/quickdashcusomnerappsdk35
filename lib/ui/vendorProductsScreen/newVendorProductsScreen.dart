@@ -67,10 +67,19 @@ class _OfferLadderRung {
   final double thresholdAmount;
   final double savingAmount;
   final String? offerCode;
+  // Formatted "hh:mm a" end time of the special-discount slot that won this
+  // rung, e.g. "03:00 PM" — null when this rung's saving is pure coupon (no
+  // special discount contributed) or when the winning slot has no end time.
+  // Surfaced to the customer so a discount they see while browsing doesn't
+  // silently vanish later without warning if they end up ordering/scheduling
+  // past its window — see TABLE_BOOKING_CAPACITY_AND_DEPOSIT_PLAN.html's
+  // discussion of this exact gap, 2026-08-30.
+  final String? validTill;
   const _OfferLadderRung({
     required this.thresholdAmount,
     required this.savingAmount,
     this.offerCode,
+    this.validTill,
   });
 }
 
@@ -81,10 +90,12 @@ class _SpecialSlotCandidate {
   final double minAmount;
   final double rawDiscount;
   final bool isPercent;
+  final String? validTill;
   const _SpecialSlotCandidate({
     required this.minAmount,
     required this.rawDiscount,
     required this.isPercent,
+    this.validTill,
   });
 }
 
@@ -5297,10 +5308,16 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
         if (slot.orderType != null && slot.orderType!.isNotEmpty) {
           if (slot.orderType != orderType) continue;
         }
+        String? validTill;
+        try {
+          validTill =
+              DateFormat('hh:mm a').format(DateFormat('HH:mm').parse(slot.to!));
+        } catch (_) {}
         active.add(_SpecialSlotCandidate(
           minAmount: double.tryParse(slot.applicableAmount ?? '0') ?? 0,
           rawDiscount: double.tryParse(slot.discount ?? '0') ?? 0,
           isPercent: slot.type == 'percentage',
+          validTill: validTill,
         ));
       }
     }
@@ -5326,16 +5343,21 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
   // exactly. An older or smaller-minimum special discount can still win at a
   // bigger milestone if it's genuinely worth more there — never assume the
   // newest one is best.
-  double _bestSpecialValueAt(double amount, List<_SpecialSlotCandidate> slots) {
+  ({double value, String? validTill}) _bestSpecialValueAt(
+      double amount, List<_SpecialSlotCandidate> slots) {
     double best = 0;
+    String? bestValidTill;
     for (final slot in slots) {
       if (amount < slot.minAmount) continue;
       final actual = slot.isPercent
           ? amount * slot.rawDiscount / 100
           : (slot.rawDiscount > amount ? amount : slot.rawDiscount);
-      if (actual > best) best = actual;
+      if (actual > best) {
+        best = actual;
+        bestValidTill = slot.validTill;
+      }
     }
-    return best;
+    return (value: best, validTill: bestValidTill);
   }
 
   // Combines a coupon value and a special-discount value at [amount] using
@@ -5414,9 +5436,9 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
           bestCoupon = coupon;
         }
       }
-      final bestSpecialValue = _bestSpecialValueAt(amount, specialSlots);
+      final bestSpecial = _bestSpecialValueAt(amount, specialSlots);
 
-      final combo = _combineAndCap(amount, bestCouponValue, bestSpecialValue);
+      final combo = _combineAndCap(amount, bestCouponValue, bestSpecial.value);
       final totalSaving = combo.coupon + combo.special;
       if (totalSaving <= 0) continue;
 
@@ -5424,6 +5446,11 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
         thresholdAmount: amount,
         savingAmount: totalSaving,
         offerCode: combo.coupon > 0 ? bestCoupon?.offerCode : null,
+        // Only surface a time window when the special discount actually
+        // survived _combineAndCap's capping (combo.special > 0) - a rung
+        // where the coupon won outright has no time-boxed component to warn
+        // the customer about.
+        validTill: combo.special > 0 ? bestSpecial.validTill : null,
       ));
     }
 
@@ -5609,13 +5636,21 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
-                      // Only ever a coupon code — never "Applied
-                      // automatically" or any other explanation. A pure
-                      // special-discount rung is a single line.
-                      if (rung.offerCode != null) ...[
+                      // Second line: coupon code and/or the special
+                      // discount's time window, combined onto one line when
+                      // both apply to this rung so the card stays two lines
+                      // tall. "Valid till" exists so a discount the customer
+                      // sees while browsing doesn't silently disappear later
+                      // without warning if they order/schedule past it.
+                      if (rung.offerCode != null || rung.validTill != null) ...[
                         const SizedBox(height: 2),
                         Text(
-                          "${'Use'.tr()}: ${rung.offerCode}",
+                          [
+                            if (rung.offerCode != null)
+                              "${'Use'.tr()}: ${rung.offerCode}",
+                            if (rung.validTill != null)
+                              "${'Valid till'.tr()} ${rung.validTill}",
+                          ].join('  ·  '),
                           style: const TextStyle(
                             fontSize: 11,
                             fontFamily: AppThemeData.medium,
@@ -5762,23 +5797,52 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                         : AppThemeData.neutral800,
                   ),
                 ),
-                if (rung.offerCode != null) ...[
+                if (rung.offerCode != null || rung.validTill != null) ...[
                   const SizedBox(height: 6),
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                    decoration: BoxDecoration(
-                      color: AppThemeData.primary500.withValues(alpha: 0.12),
-                      borderRadius: BorderRadius.circular(6),
-                    ),
-                    child: Text(
-                      "${'Use'.tr()}: ${rung.offerCode}",
-                      style: const TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.bold,
-                        color: AppThemeData.primary500,
-                      ),
-                    ),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: [
+                      if (rung.offerCode != null)
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 3),
+                          decoration: BoxDecoration(
+                            color:
+                                AppThemeData.primary500.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Text(
+                            "${'Use'.tr()}: ${rung.offerCode}",
+                            style: const TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold,
+                              color: AppThemeData.primary500,
+                            ),
+                          ),
+                        ),
+                      // Time-boxed special discount — shown so the customer
+                      // sees upfront that this offer won't survive scheduling
+                      // (or simply ordering) past this time, rather than
+                      // discovering it's gone at checkout.
+                      if (rung.validTill != null)
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: AppThemeData.warning400.withValues(alpha: 0.15),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Text(
+                            "${'Valid till'.tr()} ${rung.validTill}",
+                            style: const TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold,
+                              color: AppThemeData.warning400,
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
                 ],
               ],

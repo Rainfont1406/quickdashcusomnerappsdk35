@@ -204,14 +204,22 @@ class _CartScreenState extends State<CartScreen> {
 
   DateTime get _serverAdjustedNow => DateTime.now().add(_serverTimeOffset);
 
-  // Special-discount ("happy hour") eligibility must be judged against when
-  // the order will actually be fulfilled, not when the customer happens to
-  // be checking out - found 2026-08-23: a scheduled order always evaluated
-  // against the live clock, so scheduling delivery for 8 PM inside a
-  // 6-9 PM slot while checking out at 2 PM wrongly denied the discount
-  // (and the reverse - checking out inside the window but scheduling
-  // delivery outside it - wrongly granted it). Server-side verification in
-  // paymentIntents.js/verifyOrder.js has the identical fix.
+  // Vendor-open status must be judged against when the order will actually
+  // be fulfilled, not when the customer happens to be checking out - found
+  // 2026-08-23. Server-side verification in paymentIntents.js/verifyOrder.js
+  // has the identical fix for this half.
+  //
+  // 2026-08-30 REVERSAL (user decision): special-discount ("happy hour")
+  // eligibility no longer uses this getter - it now always evaluates against
+  // the live clock (_serverAdjustedNow directly, see the two call sites in
+  // the discount-calculation code and _getActiveSpecialDiscounts()),
+  // regardless of scheduleTime. Rationale: a vendor may deliberately run a
+  // discount to reward placing/confirming an order right now, even if the
+  // customer chooses to receive it later - the discount is earned at order
+  // time, not fulfillment time. This getter is kept (and kept named for
+  // discount eval) only because vendor-open-status still needs schedule
+  // awareness for a different reason - don't let a customer schedule an
+  // order for a time the restaurant will actually be closed.
   DateTime get _discountEvalTime =>
       scheduleTime?.toDate() ?? _serverAdjustedNow;
 
@@ -3280,7 +3288,10 @@ class _CartScreenState extends State<CartScreen> {
       if (vendorModel!.specialDiscountEnable) {
         // Reset special discount amount at the beginning
         specialDiscountAmount = 0.0;
-        final now = _discountEvalTime;
+        // Live clock, not _discountEvalTime - 2026-08-30 reversal, see that
+        // getter's doc comment. A scheduled order's special discount is
+        // earned at order-placement time, not fulfillment time.
+        final now = _serverAdjustedNow;
         var day = DateFormat('EEEE', 'en_US').format(now);
         var date = DateFormat('dd-MM-yyyy').format(now);
         
@@ -5411,7 +5422,9 @@ class _CartScreenState extends State<CartScreen> {
       return [];
     }
 
-    final now = _discountEvalTime;
+    // Live clock, not _discountEvalTime - 2026-08-30 reversal, matches the
+    // main discount-calculation call site above.
+    final now = _serverAdjustedNow;
     final currentDay = DateFormat('EEEE', 'en_US').format(now);
     final dateStr = DateFormat('dd-MM-yyyy').format(now);
     final List<Map<String, dynamic>> active = [];

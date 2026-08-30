@@ -15,6 +15,7 @@ import 'package:emartconsumer/services/behavior/behavior_event_types.dart';
 import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/rozorpayConroller.dart';
+import 'package:emartconsumer/services/special_discount_preview.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/auth_screen/login_screen.dart';
 import 'package:emartconsumer/ui/dineInScreen/booking_confirmation_screen.dart';
@@ -55,6 +56,16 @@ class _DineInRestaurantDetailsScreenState
   // FireStoreUtils.getDateAvailabilitySnapshot's own comment.
   SeatAvailability? _dateAvailability;
   bool _checkingDateAvailability = false;
+
+  // Offers preview (2026-08-30, §11.21 follow-up) - shows what special
+  // discount/coupon is available right now, before the customer books, so
+  // they can see the value of booking during a live "advance booking"
+  // window. Pure computation over widget.vendorModel (already in memory,
+  // zero extra reads) + FireStoreUtils().getAllCoupons() (a 5-minute
+  // static app-wide cache shared with the vendor page/Cart - calling it
+  // here costs a real read only if nothing else fetched coupons recently).
+  List<SpecialOfferPreviewRung> _offerRungs = [];
+  bool _offersLoaded = false;
 
   // Header image carousel - uses the restaurant's own gallery (vendor.photos,
   // set via Add Store) rather than the retired Dine-In-only Menu Photos
@@ -145,6 +156,7 @@ class _DineInRestaurantDetailsScreenState
       _checkDateAvailability();
     }
     _fetchWalletBalance();
+    _loadOffers();
     _headerCtrl = PageController();
     final photos = _menuPhotos;
     if (photos.length > 1) {
@@ -220,6 +232,27 @@ class _DineInRestaurantDetailsScreenState
       }
     } catch (_) {
       if (mounted) setState(() => _walletLoaded = true);
+    }
+  }
+
+  Future<void> _loadOffers() async {
+    try {
+      final coupons = await FireStoreUtils().getAllCoupons();
+      if (!mounted) return;
+      setState(() {
+        _offerRungs = SpecialDiscountPreview.buildLadder(
+          vendor: widget.vendorModel,
+          coupons: coupons,
+          // Booking itself has no Delivery/Takeaway concept - this preview
+          // is about what a Dining visit booked now will be worth, and
+          // Dining collapses to 'Takeaway' for tier-matching everywhere
+          // else in this codebase (see CartScreen's own comment on this).
+          orderType: 'Takeaway',
+        );
+        _offersLoaded = true;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _offersLoaded = true);
     }
   }
 
@@ -362,6 +395,8 @@ class _DineInRestaurantDetailsScreenState
                 child: Column(
                   children: [
                     _buildRestaurantInfo(dark),
+                    const SizedBox(height: 8),
+                    _buildOffersPreview(dark),
                     const SizedBox(height: 8),
                     _buildDateSelector(dark),
                     const SizedBox(height: 8),
@@ -551,6 +586,62 @@ class _DineInRestaurantDetailsScreenState
               if (vendor.bookingPricingModel != 'free')
                 _chip(_pricingLabel(vendor), _accent),
             ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ─── Offers preview ───────────────────────────────────────────
+  // Shows what special discount/coupon is live right now, before the
+  // customer books - the whole point of this preview is that booking now
+  // locks this in for when they actually dine/pay (§11.21's table-booking-
+  // time-locked discount), even if this exact offer is gone by then.
+  Widget _buildOffersPreview(bool dark) {
+    if (!_offersLoaded || _offerRungs.isEmpty) return const SizedBox.shrink();
+    // Best (highest-saving) rung only - a short teaser, not the full ladder;
+    // the customer sees full detail in Cart/at checkout as usual.
+    final best = _offerRungs.reduce(
+        (a, b) => a.savingAmount >= b.savingAmount ? a : b);
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: (dark ? AppThemeData.primary400 : AppThemeData.primary500)
+            .withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+            color: AppThemeData.primary500.withValues(alpha: 0.35)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.local_offer_rounded,
+              size: 18, color: AppThemeData.primary500),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${'Save'.tr()} ${amountShow(amount: best.savingAmount.toStringAsFixed(2))} ${'on orders above'.tr()} ${amountShow(amount: best.thresholdAmount.toStringAsFixed(2))}',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    color: dark ? Colors.white : Colors.black87,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  best.validTill != null
+                      ? '${'Book now to lock this in for your visit - live until'.tr()} ${best.validTill}'
+                      : 'Book now to lock this in for your visit'.tr(),
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    color: dark ? Colors.white60 : Colors.grey.shade700,
+                  ),
+                ),
+              ],
+            ),
           ),
         ],
       ),
@@ -1673,20 +1764,37 @@ class _BookingSkeletonLoader extends StatefulWidget {
 
 class _BookingSkeletonLoaderState extends State<_BookingSkeletonLoader>
     with SingleTickerProviderStateMixin {
-  late AnimationController _ctrl;
-  late Animation<double> _anim;
+  late final AnimationController _ringCtrl;
+  Timer? _messageTimer;
+  int _messageIndex = 0;
+
+  // Cycled every couple seconds rather than one static line - a booking
+  // confirmation genuinely does several sequential steps server-side
+  // (capacity check, payment, write), so naming them keeps the customer
+  // reading instead of just staring at a spinner during the wait.
+  static const _messages = [
+    'Checking table availability...',
+    'Reserving your seats...',
+    'Confirming payment...',
+    'Almost there...',
+  ];
 
   @override
   void initState() {
     super.initState();
-    _ctrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 1200))
-      ..repeat(reverse: true);
-    _anim = CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut);
+    _ringCtrl = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 1100))
+      ..repeat();
+    _messageTimer = Timer.periodic(const Duration(milliseconds: 1600), (_) {
+      if (!mounted) return;
+      setState(() => _messageIndex = (_messageIndex + 1) % _messages.length);
+    });
   }
 
   @override
   void dispose() {
-    _ctrl.dispose();
+    _ringCtrl.dispose();
+    _messageTimer?.cancel();
     super.dispose();
   }
 
@@ -1696,7 +1804,7 @@ class _BookingSkeletonLoaderState extends State<_BookingSkeletonLoader>
       backgroundColor: Colors.transparent,
       elevation: 0,
       child: Container(
-        padding: const EdgeInsets.all(24),
+        padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 36),
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(20),
@@ -1704,44 +1812,51 @@ class _BookingSkeletonLoaderState extends State<_BookingSkeletonLoader>
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            AnimatedBuilder(
-              animation: _anim,
-              builder: (_, __) => Column(
-                children: [
-                  _shimmer(200, 16),
-                  const SizedBox(height: 10),
-                  _shimmer(150, 12),
-                  const SizedBox(height: 16),
-                  _shimmer(double.infinity, 12),
-                  const SizedBox(height: 8),
-                  _shimmer(double.infinity, 12),
-                  const SizedBox(height: 8),
-                  _shimmer(double.infinity, 12),
-                  const SizedBox(height: 20),
-                  _shimmer(160, 44),
-                ],
+            SizedBox(
+              width: 68,
+              height: 68,
+              child: RotationTransition(
+                turns: _ringCtrl,
+                child: Container(
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: SweepGradient(
+                      startAngle: 0,
+                      endAngle: 6.28319, // 2*pi - full ring sweep
+                      colors: [
+                        AppThemeData.primary500.withValues(alpha: 0.0),
+                        AppThemeData.primary500.withValues(alpha: 0.25),
+                        AppThemeData.primary500,
+                      ],
+                      stops: const [0.0, 0.55, 1.0],
+                    ),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(7),
+                    child: Container(
+                      decoration: const BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ),
               ),
             ),
-            const SizedBox(height: 16),
-            Text(
-              'Validating & Confirming Booking...'.tr(),
-              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: AppThemeData.primary500),
+            const SizedBox(height: 22),
+            AnimatedSwitcher(
+              duration: const Duration(milliseconds: 250),
+              child: Text(
+                _messages[_messageIndex].tr(),
+                key: ValueKey(_messageIndex),
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: AppThemeData.primary500),
+              ),
             ),
           ],
-        ),
-      ),
-    );
-  }
-
-  Widget _shimmer(double width, double height) {
-    return AnimatedBuilder(
-      animation: _anim,
-      builder: (_, __) => Container(
-        width: width,
-        height: height,
-        decoration: BoxDecoration(
-          color: Color.lerp(Colors.grey.shade200, Colors.grey.shade100, _anim.value),
-          borderRadius: BorderRadius.circular(8),
         ),
       ),
     );
