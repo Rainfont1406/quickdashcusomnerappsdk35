@@ -6,6 +6,7 @@ import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/OrderModel.dart';
 import 'package:emartconsumer/send_notification.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
@@ -198,7 +199,7 @@ class _PlaceOrderScreenState extends State<PlaceOrderScreen>
         final doc = await FireStoreUtils.firestore
             .collection(VENDORS)
             .doc(vendorId)
-            .get();
+            .getLogged('_sendVendorNotification:VENDORS');
         liveToken = (doc.data()?['fcmToken'] as String?) ?? '';
       }
 

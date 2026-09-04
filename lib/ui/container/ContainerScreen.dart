@@ -6,6 +6,7 @@ import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/User.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
@@ -209,7 +210,7 @@ class _ContainerScreen extends State<ContainerScreen> {
     _deliveryGateSub = FireStoreUtils.firestore
         .collection(SECTION)
         .doc(sectionId)
-        .snapshots()
+        .snapshotsLogged('_listenDeliveryGate:SECTION')
         .listen((snap) {
       if (!firstSnapshotSeen) {
         firstSnapshotSeen = true;

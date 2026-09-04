@@ -140,9 +140,10 @@ class UserPreference {
     await preferences.setString(_paytmKey, jsonData);
   }
 
-  static getPaytmData() async {
+  static Future<PaytmSettingData?> getPaytmData() async {
     final String? jsonData = preferences.getString(_paytmKey);
-    final paytmData = jsonDecode(jsonData!);
+    if (jsonData == null) return null;
+    final paytmData = jsonDecode(jsonData);
     return PaytmSettingData.fromJson(paytmData);
   }
 

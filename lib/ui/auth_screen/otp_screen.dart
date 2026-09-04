@@ -9,6 +9,7 @@ import 'package:emartconsumer/model/User.dart';
 import 'package:emartconsumer/model/referral_model.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/device_session_service.dart';
+import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/msg91_service.dart';
 import 'package:emartconsumer/services/notification_service.dart';
@@ -254,13 +255,13 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
         final userLookupSw = Stopwatch()..start();
         final existingUserId = widget.existingUserId;
         final userLookupFuture = existingUserId != null
-            ? FirebaseFirestore.instance.collection(USERS).doc(existingUserId).get()
+            ? FirebaseFirestore.instance.collection(USERS).doc(existingUserId).getLogged('_verifyOtp:USERS')
             : FirebaseFirestore.instance
                 .collection(USERS)
                 .where('phoneNumber', isEqualTo: phoneNumber)
                 .where('countryCode', isEqualTo: countryCode)
                 .where('role', isEqualTo: USER_ROLE_CUSTOMER)
-                .get();
+                .getLogged('_verifyOtp:USERS');
         final loginResults = await Future.wait<dynamic>([
           userLookupFuture,
           NotificationService.getToken(),
@@ -554,7 +555,7 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
     final normalized = email.trim().toLowerCase();
     if (normalized.isEmpty) return null;
     final snap =
-        await FirebaseFirestore.instance.collection(USERS).where('email', isEqualTo: normalized).get();
+        await FirebaseFirestore.instance.collection(USERS).where('email', isEqualTo: normalized).getLogged('_checkEmailAlreadyRegistered:USERS');
     final conflict =
         snap.docs.any((doc) => (doc.data()['role'] as String? ?? '') == USER_ROLE_CUSTOMER);
     return conflict ? 'This email is already registered.'.tr() : null;
@@ -662,7 +663,7 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
     final user = firebase_auth.FirebaseAuth.instance.currentUser;
     if (user != null) {
       try {
-        await FirebaseFirestore.instance.collection('failed_signups').add({
+        await FirebaseFirestore.instance.collection('failed_signups').addLogged({
           'deletedAuthUid': user.uid,
           'signupType': 'phone',
           'attemptedPhone': userModel.phoneNumber,
@@ -670,7 +671,7 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
           'reason': message,
           'createdAt': FieldValue.serverTimestamp(),
           'ttlAt': Timestamp.fromDate(DateTime.now().toUtc().add(const Duration(days: 30))),
-        });
+        }, '_abortOrphanedPhoneSignup:failed_signups');
       } catch (_) {}
       try {
         await user.delete();

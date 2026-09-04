@@ -30,6 +30,7 @@ import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/behavior/behavior_event_types.dart';
 import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/device_session_service.dart';
+import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/services/notification_service.dart';
@@ -37,11 +38,11 @@ import 'package:emartconsumer/services/paystack_url_genrater.dart';
 import 'package:emartconsumer/services/rozorpayConroller.dart';
 import 'package:emartconsumer/services/app_dialog.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
+import 'package:emartconsumer/services/upi_apps_service.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/theme/round_button_fill.dart';
 import 'package:emartconsumer/ui/auth_screen/login_screen.dart';
 import 'package:emartconsumer/ui/checkoutScreen/CheckoutScreen.dart';
-import 'package:emartconsumer/ui/payment/quickdash_payment_sheet.dart';
 import 'package:emartconsumer/ui/wallet/MercadoPagoScreen.dart';
 import 'package:emartconsumer/ui/wallet/PayFastScreen.dart';
 import 'package:emartconsumer/ui/wallet/payStackScreen.dart';
@@ -64,6 +65,7 @@ import 'package:razorpay_flutter/razorpay_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:phonepe_payment_sdk/phonepe_payment_sdk.dart';
 import 'package:uuid/uuid.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../model/MercadoPagoSettingsModel.dart';
 import '../../model/OrderModel.dart';
@@ -186,7 +188,33 @@ class PaymentScreenState extends State<PaymentScreen> {
   // the normal picker applies in that case.
   int? _existingBookingGuestCount;
 
+  // Guest-count sheet (2026-09-01, at the user's request) - the picker used
+  // to be a small inline banner on the default payment page, easy to miss.
+  // For a Dining order at a vendor with seat capacity configured, it's now
+  // asked in its own blocking modal sheet BEFORE the payment methods render
+  // at all - see _maybeShowGuestCountSheet, triggered once
+  // _loadSeatAvailability resolves _diningVendor. _guestSheetHandled guards
+  // against showing it more than once per screen visit; _guestCountConfirmed
+  // gates _buildDefaultPaymentPage's payment-methods section until "Next" is
+  // tapped. Both are irrelevant (treated as already-satisfied) whenever
+  // _showDiningGuestPicker is false.
+  bool _guestSheetHandled = false;
+  bool _guestCountConfirmed = false;
+
+  bool get _showDiningGuestPicker =>
+      widget.orderType == 'Dining' &&
+      _diningVendor?.effectiveSeatCapacity != null &&
+      _diningVendor?.seatAvailabilityEnabled == true &&
+      _diningVendor?.seatAvailabilityOn == true &&
+      _diningVendor?.seatingMode != 'full_session';
+
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
+
+  // Real installed-UPI-app detection (2026-08-31) - null while still
+  // loading, empty if none detected (or non-Android/detection failed, in
+  // which case the default payment page falls back to a single generic
+  // "Other UPI Apps" tile). See UpiAppsService/MainActivity.kt.
+  List<InstalledUpiApp>? _installedUpiApps;
 
   String paymentOption = 'Pay Via Wallet'.tr();
   RazorPayModel? razorPayData = UserPreference.getRazorPayData();
@@ -220,7 +248,7 @@ class PaymentScreenState extends State<PaymentScreen> {
     userQuery = FireStoreUtils.firestore
         .collection(USERS)
         .doc(MyAppState.currentUser!.userID)
-        .snapshots();
+        .snapshotsLogged('getPaymentSettingData:USERS');
 
     // CartScreen already triggered this on the way in here, but that call
     // is fire-and-forget — awaiting the same memoized Future is what
@@ -335,6 +363,10 @@ class PaymentScreenState extends State<PaymentScreen> {
     if (widget.orderType == 'Dining' && widget.products.isNotEmpty) {
       _loadSeatAvailability();
     }
+    UpiAppsService.getInstalledApps().then((apps) {
+      if (!mounted) return;
+      setState(() => _installedUpiApps = apps);
+    });
     super.initState();
   }
 
@@ -372,9 +404,189 @@ class PaymentScreenState extends State<PaymentScreen> {
       } catch (_) {
         // Non-critical - falls back to the normal interactive picker.
       }
+      _maybeShowGuestCountSheet();
     } catch (_) {
       // Non-critical - the footer just shows nothing if this fails.
     }
+  }
+
+  // Shows the blocking guest-count sheet once, as soon as _diningVendor has
+  // resolved enough to know _showDiningGuestPicker is actually true. A
+  // WidgetsBinding post-frame callback, not a direct call, because this runs
+  // from inside a setState-triggered rebuild still in flight - showModalBottomSheet
+  // needs a BuildContext whose widget tree has already finished building this frame.
+  void _maybeShowGuestCountSheet() {
+    if (_guestSheetHandled || !_showDiningGuestPicker) return;
+    _guestSheetHandled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+
+      // Wait for THIS screen's own push-in transition to finish before
+      // showing a modal on top of it (2026-09-01 fix). Reported symptom:
+      // opening a Dining order sometimes landed on a stuck "just the order
+      // total" screen with no sheet at all - going back and re-entering
+      // (a fresh screen instance, another chance to trigger) sometimes
+      // fixed it. Root cause: when _loadSeatAvailability's Firestore round
+      // trip happens to resolve fast (good/cached network), this callback
+      // fires while the push transition animation is still running -
+      // showModalBottomSheet called at that exact moment can silently fail
+      // to appear. Waiting for the route's own animation to finish removes
+      // the race entirely.
+      final animation = ModalRoute.of(context)?.animation;
+      if (animation != null && animation.status != AnimationStatus.completed) {
+        final completer = Completer<void>();
+        void listener(AnimationStatus status) {
+          if (status == AnimationStatus.completed) {
+            animation.removeStatusListener(listener);
+            if (!completer.isCompleted) completer.complete();
+          }
+        }
+        animation.addStatusListener(listener);
+        // Safety timeout in case the animation never reaches "completed"
+        // for some reason (route replaced/popped mid-transition, etc.) -
+        // never block the sheet forever over this wait alone.
+        await completer.future.timeout(const Duration(seconds: 2), onTimeout: () {
+          animation.removeStatusListener(listener);
+        });
+      }
+      if (!mounted) return;
+
+      try {
+        await _showGuestCountSheet();
+      } catch (e) {
+        // Fail-safe (2026-09-01): if showing the sheet itself throws for any
+        // reason, don't leave the customer stuck on the "just the order
+        // total" screen forever with no way forward - proceed with
+        // whatever guest count is already set (defaults to
+        // widget.diningGuestCount ?? 1) rather than block checkout entirely
+        // over a non-critical UI step.
+        debugPrint('[GuestCountSheet] failed to show: $e');
+        if (mounted) setState(() => _guestCountConfirmed = true);
+      }
+    });
+  }
+
+  Future<void> _showGuestCountSheet() async {
+    final dark = isDarkMode(context);
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      isDismissible: false,
+      enableDrag: false,
+      useRootNavigator: true,
+      backgroundColor: Colors.transparent,
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (sheetContext, sheetSetState) {
+            // Reuses this screen's own +/-\ stepper state (_diningGuestCount)
+            // via the outer widget's setState, so the stepper's changes are
+            // immediately visible here too without duplicating that state.
+            return PopScope(
+              // canPop: false (2026-09-02 fix) - isDismissible/enableDrag
+              // false above only block tap-outside and swipe; they do NOT
+              // stop the Android hardware/gesture back button, which by
+              // default still pops this modal route on its own. That silent
+              // dismissal used to leave _guestCountConfirmed permanently
+              // false with no way to re-summon this sheet (_guestSheetHandled
+              // is already true) - stranding the customer on a payment page
+              // showing only the order-total card forever, with no payment
+              // methods and no visible way forward. Reported symptom exactly
+              // matches this: "after the back button ... Guest count sheet
+              // is coming" / stuck blank payment screen.
+              //
+              // Back here now means "cancel checkout, not just cancel the
+              // sheet" - pops this sheet AND the whole PaymentScreen
+              // underneath in one motion, returning to Cart, rather than
+              // leaving a half-finished, unusable payment page behind.
+              canPop: false,
+              onPopInvokedWithResult: (didPop, _) {
+                if (didPop) return;
+                Navigator.of(sheetContext, rootNavigator: true).pop();
+                Navigator.of(context).maybePop();
+              },
+              child: SafeArea(
+                // top: false - this is a bottom sheet, never reaches the status
+                // bar. bottom: true is what actually matters here - keeps the
+                // Next button clear of a phone's gesture bar / on-screen back
+                // button, which is exactly what was overlapping before.
+                top: false,
+                child: Container(
+                padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(sheetContext).padding.bottom + 16),
+                decoration: BoxDecoration(
+                  color: dark ? AppThemeData.surfaceDark : Colors.white,
+                  borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Center(
+                      child: Container(
+                        width: 40,
+                        height: 4,
+                        margin: const EdgeInsets.only(bottom: 18),
+                        decoration: BoxDecoration(
+                          color: dark ? Colors.white24 : Colors.black12,
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                      ),
+                    ),
+                    Text(
+                      'Table for how many?'.tr(),
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontFamily: AppThemeData.bold,
+                        color: dark ? Colors.white : AppThemeData.neutral900,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'This helps the restaurant seat you faster.'.tr(),
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: dark ? Colors.white54 : AppThemeData.neutral500,
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+                    // onChanged forces THIS sheet's own StatefulBuilder to
+                    // rebuild too - the +/- taps' own setState only rebuilds
+                    // the page underneath, which this modal route doesn't
+                    // automatically follow (see _diningGuestCountPicker's
+                    // param doc). _diningGuestCountPicker already handles
+                    // both the editable stepper and the read-only
+                    // "already booked" display.
+                    _diningGuestCountPicker(dark, onChanged: () => sheetSetState(() {})),
+                    _seatAvailabilityFooterBanner(dark),
+                    const SizedBox(height: 4),
+                    SizedBox(
+                      width: double.infinity,
+                      height: 50,
+                      child: ElevatedButton(
+                        onPressed: () {
+                          Navigator.of(sheetContext).pop();
+                          setState(() => _guestCountConfirmed = true);
+                        },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: AppThemeData.primary500,
+                          foregroundColor: Colors.white,
+                          elevation: 0,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                        ),
+                        child: Text(
+                          'Next'.tr(),
+                          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              ),
+            );
+          },
+        );
+      },
+    );
   }
 
   // Low-availability warning threshold (2026-08-25) - max(20% of capacity,
@@ -392,8 +604,22 @@ class PaymentScreenState extends State<PaymentScreen> {
 
   String? selectedRadioTile;
 
+  // RazorPay is this deployment's only real gateway (2026-08-31) - when
+  // it's enabled from the admin panel, skip the multi-gateway chooser
+  // entirely and go straight to the default one-tap payment page (UPI apps
+  // detected on this device / Cards / Wallet / COD, each firing immediately
+  // on tap - see _buildDefaultPaymentPage). The old multi-gateway radio-tile
+  // list only remains reachable as a fallback for a deployment that has
+  // RazorPay OFF but some other gateway (Paytm, PayPal, etc.) on instead.
   @override
   Widget build(BuildContext context) {
+    if (razorPayData?.isEnabled == true) {
+      return _buildDefaultPaymentPage(context);
+    }
+    return _buildLegacyGatewayScaffold(context);
+  }
+
+  Widget _buildLegacyGatewayScaffold(BuildContext context) {
     return PopScope(
       canPop: !isProcessingOrder,
       onPopInvokedWithResult: (bool didPop, dynamic result) async {
@@ -463,20 +689,11 @@ class PaymentScreenState extends State<PaymentScreen> {
                     }),
                   ),
                 ),
-                Visibility(
-                  visible: razorPayData?.isEnabled == true,
-                  child: _pmCard(
-                    dark: isDarkMode(context), isSelected: razorPay, value: 'RazorPay',
-                    label: 'RazorPay'.tr(),
-                    logo: Image.asset('assets/images/razorpay_@3x.png', fit: BoxFit.contain),
-                    onChanged: (v) => setState(() {
-                      mercadoPago = false; flutterWave = false; stripe = false; razorPay = true;
-                      payTm = false; payFast = false; paypal = false; payStack = false;
-                      orange = false; Midtrans = false; xendit = false; wallet = false;
-                      phonePay = false; codPay = false; selectedRadioTile = v!;
-                    }),
-                  ),
-                ),
+                // RazorPay has no tile here (2026-08-31) - this legacy list
+                // only ever renders when razorPayData?.isEnabled != true
+                // (see build()'s branch), so a RazorPay tile could never
+                // actually be reachable inside it. See
+                // _buildDefaultPaymentPage for where RazorPay lives instead.
                 Visibility(
                   visible: payFastSettingData?.isEnable == true,
                   child: _pmCard(
@@ -613,7 +830,275 @@ class PaymentScreenState extends State<PaymentScreen> {
     );
   }
 
-  // â”€â”€â”€ UI helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ─── Default one-tap payment page (2026-08-31) ───────────────────────────
+  // Replaces the multi-gateway radio-tile-then-Pay-Now flow with a single
+  // scrollable page, Zomato/Swiggy-style: every row fires its own payment
+  // immediately on tap, no separate confirm button. Reached directly from
+  // CartScreen's "Place Order" whenever RazorPay is the enabled gateway.
+
+  Widget _buildDefaultPaymentPage(BuildContext context) {
+    final dark = isDarkMode(context);
+    // Guest count is asked in its own blocking modal sheet now (see
+    // _maybeShowGuestCountSheet/_showGuestCountSheet, triggered from
+    // _loadSeatAvailability) instead of this small inline banner - until
+    // it's confirmed there, the payment methods below stay hidden rather
+    // than showing underneath/behind the sheet.
+    final bool readyForPayment = !_showDiningGuestPicker || _guestCountConfirmed;
+
+    return PopScope(
+      canPop: !isProcessingOrder,
+      onPopInvokedWithResult: (bool didPop, dynamic result) async {
+        if (!didPop && isProcessingOrder) {
+          await _showBackDialog();
+        }
+      },
+      child: Scaffold(
+        key: _scaffoldKey,
+        backgroundColor: dark ? AppThemeData.surfaceDark : const Color(0xFFF2F4F8),
+        appBar: _buildAppBar(dark),
+        // top: false - _buildAppBar already accounts for the status bar.
+        // bottom: true is the actual fix here - without it, the last
+        // payment row could sit underneath a phone's gesture bar / on-
+        // screen back button once there's no sticky footer to hold the
+        // scroll content clear of it.
+        body: SafeArea(
+          top: false,
+          bottom: true,
+          child: SingleChildScrollView(
+            physics: const BouncingScrollPhysics(),
+            child: Padding(
+              padding: const EdgeInsets.only(bottom: 24),
+              child: !readyForPayment
+                  ? _buildOrderSummaryCard(dark)
+                  : Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _buildOrderSummaryCard(dark),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          child: _seatAvailabilityFooterBanner(dark),
+                        ),
+                        ..._buildUpiSections(dark),
+                        _paymentSectionLabel('Cards'.tr(), dark),
+                        _paymentRow(
+                          dark: dark,
+                          iconBg: const Color(0xFF4F46E5),
+                          icon: Icons.credit_card_rounded,
+                          title: 'Add credit / debit card'.tr(),
+                          subtitle: 'Visa, Mastercard, RuPay & more'.tr(),
+                          onTap: _handleCardSelected,
+                        ),
+                        if (UserPreference.getWalletData() ?? false) ...[
+                          _paymentSectionLabel('Wallet'.tr(), dark),
+                          _walletRow(dark),
+                        ],
+                        FutureBuilder<CodModel?>(
+                          future: futurecod,
+                          builder: (context, snapshot) {
+                            if (snapshot.connectionState == ConnectionState.waiting) {
+                              return const SizedBox();
+                            }
+                            if (snapshot.hasData && snapshot.data!.cod == true) {
+                              return Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  _paymentSectionLabel('Cash on Delivery'.tr(), dark),
+                                  _paymentRow(
+                                    dark: dark,
+                                    iconBg: const Color(0xFFD97706),
+                                    icon: Icons.payments_rounded,
+                                    title: 'Cash on Delivery'.tr(),
+                                    subtitle: 'Pay when your order arrives'.tr(),
+                                    onTap: () => _handleCodSelected(),
+                                  ),
+                                ],
+                              );
+                            }
+                            return const SizedBox();
+                          },
+                        ),
+                        const SizedBox(height: 8),
+                      ],
+                    ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // RECOMMENDED (top 3 detected apps) + PAY BY ANY UPI APP (the rest), or a
+  // single generic fallback tile while still loading / if detection came
+  // back empty (non-Android, or genuinely no UPI app installed).
+  List<Widget> _buildUpiSections(bool dark) {
+    final apps = _installedUpiApps;
+    if (apps == null || apps.isEmpty) {
+      return [
+        _paymentSectionLabel('Pay via UPI'.tr(), dark),
+        _paymentRow(
+          dark: dark,
+          iconBg: const Color(0xFF4CAF50),
+          icon: Icons.account_balance_rounded,
+          title: 'Pay by UPI'.tr(),
+          subtitle: 'Google Pay, PhonePe, Paytm & more'.tr(),
+          onTap: () => _handleUpiSelected('upi'),
+        ),
+      ];
+    }
+    final recommended = apps.take(3).toList();
+    final rest = apps.skip(3).toList();
+    final widgets = <Widget>[
+      _paymentSectionLabel('Recommended'.tr(), dark),
+      for (final app in recommended) _upiAppRow(dark, app),
+    ];
+    if (rest.isNotEmpty) {
+      widgets.add(_paymentSectionLabel('Pay by any UPI app'.tr(), dark));
+      widgets.addAll(rest.map((app) => _upiAppRow(dark, app)));
+    }
+    return widgets;
+  }
+
+  Widget _upiAppRow(bool dark, InstalledUpiApp app) {
+    return _paymentRow(
+      dark: dark,
+      iconBg: const Color(0xFF4CAF50),
+      icon: Icons.account_balance_wallet_outlined,
+      title: app.appName,
+      subtitle: '${'Pay directly with'.tr()} ${app.appName}',
+      leadingImage: app.icon,
+      onTap: () => _handleUpiSelected(app.appName, packageName: app.packageName),
+    );
+  }
+
+  Widget _walletRow(bool dark) {
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: userQuery,
+      builder: (context, snapshot) {
+        if (!snapshot.hasData || !snapshot.data!.exists) {
+          return _paymentRow(
+            dark: dark,
+            iconBg: const Color(0xFF059669),
+            icon: Icons.account_balance_wallet_rounded,
+            title: 'Wallet'.tr(),
+            subtitle: '',
+            onTap: null,
+          );
+        }
+        final userData = User.fromJson(snapshot.data!.data()!);
+        final bool sufficient = userData.wallet_amount >= widget.total;
+        walletBalanceError = sufficient;
+        return _paymentRow(
+          dark: dark,
+          iconBg: const Color(0xFF059669),
+          icon: Icons.account_balance_wallet_rounded,
+          title: 'Wallet'.tr(),
+          subtitle: sufficient
+              ? '${'Balance'.tr()}: ${amountShow(amount: userData.wallet_amount.toString())}'
+              : '${'Insufficient balance'.tr()} (${amountShow(amount: userData.wallet_amount.toString())})',
+          subtitleColor: sufficient ? null : Colors.red.shade400,
+          onTap: sufficient ? _handleWalletSelected : null,
+        );
+      },
+    );
+  }
+
+  Widget _paymentSectionLabel(String text, bool dark) => Padding(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
+        child: Text(
+          text.toUpperCase(),
+          style: TextStyle(
+            fontSize: 11,
+            fontFamily: AppThemeData.semiBold,
+            letterSpacing: 0.6,
+            color: dark ? Colors.white38 : AppThemeData.neutral500,
+          ),
+        ),
+      );
+
+  Widget _paymentRow({
+    required bool dark,
+    required Color iconBg,
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    VoidCallback? onTap,
+    Uint8List? leadingImage,
+    Color? subtitleColor,
+  }) {
+    final bool disabled = onTap == null;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+      child: GestureDetector(
+        onTap: disabled ? null : onTap,
+        child: AnimatedOpacity(
+          duration: const Duration(milliseconds: 150),
+          opacity: disabled ? 0.45 : 1.0,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+            decoration: BoxDecoration(
+              color: dark ? AppThemeData.darkBgSecondary : Colors.white,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: dark ? AppThemeData.darkBorderPrimary : AppThemeData.neutral200),
+              boxShadow: dark
+                  ? []
+                  : [BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 4, offset: const Offset(0, 2))],
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 42,
+                  height: 42,
+                  decoration: BoxDecoration(
+                    color: leadingImage != null ? Colors.white : iconBg.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(11),
+                    border: leadingImage != null ? Border.all(color: AppThemeData.neutral200) : null,
+                  ),
+                  child: leadingImage != null
+                      ? ClipRRect(
+                          borderRadius: BorderRadius.circular(11),
+                          child: Padding(
+                            padding: const EdgeInsets.all(6),
+                            child: Image.memory(leadingImage, fit: BoxFit.contain),
+                          ),
+                        )
+                      : Icon(icon, color: iconBg, size: 20),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontFamily: AppThemeData.medium,
+                          color: dark ? Colors.white : AppThemeData.neutral900,
+                        ),
+                      ),
+                      if (subtitle.isNotEmpty) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          subtitle,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: subtitleColor ?? (dark ? Colors.white54 : AppThemeData.neutral500),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                Icon(Icons.chevron_right_rounded, size: 20, color: dark ? Colors.white30 : AppThemeData.neutral300),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ─── UI helpers ────────────────────────────────────────────────────────
 
   // Full-page loading screen shown after online payment is captured but before
   // the order is written to Firestore. Replaces the payment screen entirely so
@@ -831,7 +1316,6 @@ class PaymentScreenState extends State<PaymentScreen> {
                 final User userData = User.fromJson(asyncSnapshot.data!.data()!);
                 final bool sufficient = userData.wallet_amount >= widget.total;
                 walletBalanceError = sufficient;
-                _cachedWalletAmount = userData.wallet_amount;
                 return Container(
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                   decoration: BoxDecoration(
@@ -1027,7 +1511,16 @@ class PaymentScreenState extends State<PaymentScreen> {
   // on the same screen). Only rendered when the caller already checked
   // widget.orderType == 'Dining' && _diningVendor?.seatCapacity != null &&
   // _diningVendor?.seatAvailabilityEnabled == true.
-  Widget _diningGuestCountPicker(bool dark) {
+  // onChanged: called (in addition to this State's own setState, which
+  // always runs first and is what actually mutates _diningGuestCount) after
+  // every +/- tap. Needed when this picker is shown inside a separately
+  // routed overlay (the guest-count modal sheet) - a plain setState on this
+  // State does not, by itself, cause that overlay's own builder to re-run,
+  // so the sheet passes its StatefulBuilder's setState here to force it to.
+  // The two normal in-page call sites (the default payment page's inline
+  // banner, the legacy footer) are part of this same widget tree already,
+  // so they don't need it and leave it null.
+  Widget _diningGuestCountPicker(bool dark, {VoidCallback? onChanged}) {
     // Already booked a table here today - show the count read-only instead
     // of re-asking (2026-08-28). No +/- stepper at all: this number came
     // from the booking, not from this screen, so it isn't editable here.
@@ -1078,7 +1571,7 @@ class PaymentScreenState extends State<PaymentScreen> {
           const SizedBox(width: 10),
           Expanded(
             child: Text(
-              'How many people?'.tr(),
+              'Guests'.tr(),
               style: TextStyle(
                 fontSize: 14,
                 fontWeight: FontWeight.w600,
@@ -1099,6 +1592,7 @@ class PaymentScreenState extends State<PaymentScreen> {
                   onTap: () {
                     if (_diningGuestCount <= 1) return;
                     setState(() => _diningGuestCount--);
+                    onChanged?.call();
                   },
                   child: Container(
                     width: 30,
@@ -1130,6 +1624,7 @@ class PaymentScreenState extends State<PaymentScreen> {
                   onTap: () {
                     if (_diningGuestCount >= 30) return;
                     setState(() => _diningGuestCount++);
+                    onChanged?.call();
                   },
                   child: Container(
                     width: 30,
@@ -1204,59 +1699,11 @@ class PaymentScreenState extends State<PaymentScreen> {
     // investigation. Remove once done.
     final proceedSw = Stopwatch()..start();
     debugPrint('[ORDER-PERF] _onProceed START — razorPay=$razorPay payFast=$payFast wallet=$wallet');
-    if (razorPay) {
-      paymentType = 'razorpay';
-      showLoadingAlert();
-      // Pre-generate our order ID before opening checkout so we can embed it
-      // in Razorpay notes — the webhook uses it to recover if the app dies.
-      final genIdSw = Stopwatch()..start();
-      final appOrderId = await generateOrderId();
-      debugPrint('[ORDER-PERF] generateOrderId — ${genIdSw.elapsedMilliseconds}ms');
-      _pendingOrderId = appOrderId;
-
-      // Stage a complete draft BEFORE any payment happens, mirroring the
-      // wallet flow's order_drafts mechanism - if the app dies after
-      // Razorpay charges the customer but before this client's own order
-      // write completes, razorpayWebhook (server-side, payment.captured)
-      // promotes this exact draft into vendor_orders/{appOrderId} instead of
-      // trying to reconstruct a full order from bare payment metadata.
-      final draftSw = Stopwatch()..start();
-      final draftOrderModel = await _buildOrderModel(appOrderId);
-      final draftRef = FirebaseFirestore.instance.collection('order_drafts').doc(appOrderId);
-      await draftRef.set(draftOrderModel.toJson());
-      debugPrint('[ORDER-PERF] build+stage razorpay draft — ${draftSw.elapsedMilliseconds}ms');
-
-      final verifySw = Stopwatch()..start();
-      final result = await RazorPayController().createVerifiedOrderPayment(
-        vendorID: widget.products.first.vendorID,
-        products: widget.products,
-        couponId: widget.couponId,
-        sectionId: sectionConstantModel?.id,
-        takeAway: widget.take_away ?? false,
-        deliveryCharge: widget.deliveryCharge,
-        tipValue: widget.tipValue,
-        taxSetting: widget.taxModel,
-        billPayRequestId: widget.billPayRequestId,
-        expectedBillVersion: widget.expectedBillVersion,
-        scheduleTimeMillis: widget.scheduleTime?.millisecondsSinceEpoch,
-        clientOrderType: widget.orderType,
-      );
-      debugPrint('[ORDER-PERF] createVerifiedOrderPayment — ${verifySw.elapsedMilliseconds}ms '
-          '(TOTAL so far ${proceedSw.elapsedMilliseconds}ms)');
-      // Dialog must come down regardless of widget lifecycle - a bare
-      // `mounted` guard here previously left it stuck forever whenever the
-      // widget happened to unmount between the await and this line.
-      dismissLoadingAndClearProcessing();
-      if (!context.mounted) return;
-      if (result.success) {
-        openCheckout(amount: result.amount, orderId: result.razorpayOrderId!, appOrderId: appOrderId);
-      } else {
-        // No Razorpay order was even created - nothing to recover from.
-        // Clean up so order_drafts doesn't accumulate abandoned attempts.
-        draftRef.delete().catchError((_) {});
-        _handleVerifiedPaymentFailure(result);
-      }
-    } else if (payFast) {
+    // (2026-08-31) RazorPay no longer has a tile in this legacy gateway
+    // list at all (see build()'s doc comment) - it's handled entirely by
+    // _buildDefaultPaymentPage instead, which never calls _onProceed. This
+    // dispatcher's razorPay branch was removed as dead code accordingly.
+    if (payFast) {
       paymentType = 'payfast';
       showLoadingAlert();
       PayStackURLGen.getPayHTML(payFastSettingData: payFastSettingData!, amount: widget.total.toString())
@@ -1323,7 +1770,7 @@ class PaymentScreenState extends State<PaymentScreen> {
         final draftSw = Stopwatch()..start();
         final orderModel = await _buildOrderModel(orderId);
         final draftRef = FirebaseFirestore.instance.collection('order_drafts').doc(orderId);
-        await draftRef.set(orderModel.toJson());
+        await draftRef.setLogged(orderModel.toJson(), '_onProceed:order_drafts');
         debugPrint('[ORDER-PERF] build+stage order draft — ${draftSw.elapsedMilliseconds}ms');
 
         // Server verifies price/coupon/special-discount/vendor-status,
@@ -1357,7 +1804,7 @@ class PaymentScreenState extends State<PaymentScreen> {
         if (!result.success) {
           // Nothing was charged - the draft was never promoted. Clean it up
           // so order_drafts doesn't accumulate abandoned attempts.
-          draftRef.delete().catchError((_) {});
+          draftRef.deleteLogged('_onProceed:order_drafts').catchError((_) {});
           _handleVerifiedPaymentFailure(result);
           return;
         }
@@ -1537,9 +1984,11 @@ class PaymentScreenState extends State<PaymentScreen> {
   bool isOrderPlaced = false;
   bool _isPlacingOrder = false; // debounce for placeOrder()
   bool _paymentCollected = false; // true once Razorpay (or any online gateway) has debited the user
-  double _cachedWalletAmount = 0.0;
-  // Order ID generated before opening Razorpay checkout — passed in notes so
-  // the webhook can recover the order if the app dies after payment.
+  // Order ID generated before opening Razorpay checkout - embedded in the
+  // Razorpay notes for support/reconciliation lookups. NOTE: there is no
+  // webhook that reads this to recover the order server-side (verified
+  // 2026-08-31 - no such Cloud Function is deployed); _buildAndPlaceOrder is
+  // the only thing that ever creates the order for a RazorPay payment.
   String? _pendingOrderId;
 
   // ─────────────────────────────────────────────────────────────
@@ -1553,44 +2002,81 @@ class PaymentScreenState extends State<PaymentScreen> {
     return phone;
   }
 
-  Future<void> _showPaymentSheet(BuildContext context) async {
-    final codModel = await futurecod;
-    final isCodEnabled = codModel?.cod == true;
-    if (!context.mounted) return;
-
-    showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      useRootNavigator: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => QuickDashPaymentSheet(
-        amount: widget.total,
-        isWalletEnabled: UserPreference.getWalletData() ?? false,
-        walletBalance: _cachedWalletAmount,
-        walletHasSufficientBalance: walletBalanceError,
-        isCodEnabled: isCodEnabled,
-        isRazorpayEnabled: razorPayData?.isEnabled == true,
-        onUpiSelected: _handleUpiSelected,
-        onCardSelected: _handleCardSelected,
-        onWalletSelected: _handleWalletSelected,
-        onCodSelected: _handleCodSelected,
-        onMoreOptions: () => _onProceed(context),
-      ),
-    );
-  }
-
   // All UPI tiles route through Razorpay's own checkout with UPI pre-selected.
   // Direct UPI Intent (upi:// scheme) is not supported for Razorpay's
   // rzp@rxaxis virtual VPAs — those VPAs are Razorpay-internal and can only
   // be resolved through Razorpay's own collect flow, not NPCI's public registry.
-  void _handleUpiSelected(String appHint) async {
+  // packageName, when given, is a real installed app detected by
+  // UpiAppsService - _launchUpiIntentAndPoll uses it to open that exact app
+  // directly instead of letting Android show its own chooser. appHint is
+  // only a display/debug label at this point.
+  void _handleUpiSelected(String appHint, {String? packageName}) async {
     paymentType = 'razorpay';
     showLoadingAlert();
     final appOrderId = await generateOrderId();
     _pendingOrderId = appOrderId;
     final draftOrderModel = await _buildOrderModel(appOrderId);
     final draftRef = FirebaseFirestore.instance.collection('order_drafts').doc(appOrderId);
-    await draftRef.set(draftOrderModel.toJson());
+    await draftRef.setLogged(draftOrderModel.toJson(), '_handleUpiSelected:order_drafts');
+
+    // S2S UPI Intent (2026-08-31) - tried first so the customer leaves this
+    // app's UI entirely and pays in their own UPI app, instead of inside
+    // Razorpay's hosted Checkout screen (see upiIntentPayments.js's
+    // top-of-file comment for the full picture). Falls back to the
+    // pre-existing openCheckoutUpi flow below on ANY failure - including
+    // S2S simply not being enabled for UPI on this Razorpay account yet -
+    // so this can ship without waiting on that approval, and keeps working
+    // exactly as before if Razorpay ever disables it.
+    final phone = _formatPhone(MyAppState.currentUser!.phoneNumber);
+    if (phone.isNotEmpty) {
+      final s2sResult = await RazorPayController().createS2SUpiIntent(
+        vendorID: widget.products.first.vendorID,
+        products: widget.products,
+        contact: phone,
+        email: MyAppState.currentUser!.email,
+        couponId: widget.couponId,
+        sectionId: sectionConstantModel?.id,
+        takeAway: widget.take_away ?? false,
+        deliveryCharge: widget.deliveryCharge,
+        tipValue: widget.tipValue,
+        billPayRequestId: widget.billPayRequestId,
+        expectedBillVersion: widget.expectedBillVersion,
+        scheduleTimeMillis: widget.scheduleTime?.millisecondsSinceEpoch,
+        clientOrderType: widget.orderType,
+      );
+      if (s2sResult.success && s2sResult.intentUrl != null) {
+        dismissLoadingAndClearProcessing();
+        if (!mounted) return;
+        await _launchUpiIntentAndPoll(
+          intentUrl: s2sResult.intentUrl!,
+          razorpayOrderId: s2sResult.razorpayOrderId!,
+          razorpayPaymentId: s2sResult.razorpayPaymentId!,
+          appOrderId: appOrderId,
+          draftRef: draftRef,
+          packageName: packageName,
+        );
+        return;
+      }
+      // billUpdated/deviceSuperseded/vendor_closed are real, final answers
+      // from server-side verification (not "S2S unavailable") - surface
+      // those directly instead of silently falling back to a Checkout
+      // payment for a bill/device state the customer already needs to
+      // address first.
+      if (s2sResult.billUpdated || s2sResult.deviceSuperseded) {
+        dismissLoadingAndClearProcessing();
+        if (!mounted) return;
+        draftRef.deleteLogged('_handleUpiSelected:order_drafts').catchError((_) {});
+        _handleVerifiedPaymentFailure(VerifiedPaymentOrderResult(
+          errorMessage: s2sResult.errorMessage,
+          deviceSuperseded: s2sResult.deviceSuperseded,
+          billUpdated: s2sResult.billUpdated,
+          updatedTotal: s2sResult.updatedTotal,
+        ));
+        return;
+      }
+      debugPrint('[S2S UPI] falling back to Checkout: ${s2sResult.errorMessage}');
+    }
+
     final result = await RazorPayController().createVerifiedOrderPayment(
       vendorID: widget.products.first.vendorID,
       products: widget.products,
@@ -1610,9 +2096,257 @@ class PaymentScreenState extends State<PaymentScreen> {
     if (result.success) {
       openCheckoutUpi(amount: result.amount, orderId: result.razorpayOrderId!, appOrderId: appOrderId);
     } else {
-      draftRef.delete().catchError((_) {});
+      draftRef.deleteLogged('_handleUpiSelected:order_drafts').catchError((_) {});
       _handleVerifiedPaymentFailure(result);
     }
+  }
+
+  // Launches the S2S UPI intent link (hands off to whichever UPI app the
+  // customer picks) and polls verifyPayment until Razorpay reports the
+  // payment as captured, failed, or this simply times out. There's no SDK
+  // success callback the way Checkout provides one - polling is the only
+  // signal available on this path (see upiIntentPayments.js's comment on
+  // the still-missing webhook for the "app killed mid-payment" edge case
+  // this doesn't cover, same gap the existing Checkout flow already has).
+  Future<void> _launchUpiIntentAndPoll({
+    required String intentUrl,
+    required String razorpayOrderId,
+    required String razorpayPaymentId,
+    required String appOrderId,
+    required DocumentReference draftRef,
+    // A specific installed app's package name (from UpiAppsService) - when
+    // given, opens that exact app directly (native Intent.setPackage, no
+    // chooser). Falls back to the generic launchUrl below if that package
+    // can no longer handle the intent, or if none was given at all (the
+    // "Other UPI Apps" tile), in which case Android shows its own chooser.
+    String? packageName,
+  }) async {
+    bool launched = false;
+    if (packageName != null) {
+      launched = await UpiAppsService.launchForPackage(intentUrl, packageName);
+    }
+    if (!launched) {
+      final uri = Uri.parse(intentUrl);
+      try {
+        launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      } catch (_) {
+        launched = false;
+      }
+    }
+    if (!launched) {
+      if (!mounted) return;
+      draftRef.deleteLogged('_launchUpiIntentAndPoll:order_drafts').catchError((_) {});
+      AppDialog.showWarning(
+        _scaffoldKey.currentContext!,
+        title: 'No UPI App Found'.tr(),
+        message: 'Could not find an app to handle UPI payments on this device.'.tr(),
+      );
+      return;
+    }
+    if (!mounted) return;
+
+    // 'success' / 'failed' / 'timeout' / 'cancelled' - decided inside the
+    // poll loop, the timeout timer, or the Cancel button, read back once the
+    // dialog itself has closed so navigation never happens while it's still
+    // on-screen.
+    String outcome = 'cancelled';
+    String? failureMessage;
+
+    // Guards against a real, observed failure mode (2026-08-31): the poll's
+    // HTTP call can still be in flight when the 3-minute timeout fires and
+    // pops the dialog. Without this guard, that in-flight call completes
+    // moments later and ALSO calls Navigator.pop() - but by then showDialog
+    // has already returned and the caller has moved on (e.g. already pushed
+    // PlaceOrderScreen for a genuinely successful payment). That second,
+    // unguarded pop() doesn't error - it just pops whatever real route is on
+    // top at that moment, which can be PlaceOrderScreen itself, yanking the
+    // customer back to this PaymentScreen mid-order-creation while the order
+    // write proceeds/completes independently. That leaves them stuck staring
+    // at a frozen "Pay Now" spinner (isProcessingOrder was already set true
+    // for the push and nothing here ever resets it) despite the payment
+    // having actually succeeded and the order having actually been placed -
+    // exactly the symptom reported 2026-08-31. Only the FIRST of {poll
+    // result, timeout, manual cancel} may now act; every later arrival is a
+    // no-op.
+    bool decided = false;
+
+    final pollTimer = Timer.periodic(const Duration(seconds: 3), (timer) async {
+      final verifyResult = await RazorPayController().verifyPayment(
+        razorpayOrderId: razorpayOrderId,
+        razorpayPaymentId: razorpayPaymentId,
+        purpose: 'order',
+      );
+      if (decided) return; // dialog already resolved (timeout/cancel) while this call was in flight
+      if (verifyResult.pending) return; // customer hasn't finished paying yet - keep polling
+      decided = true;
+      timer.cancel();
+      outcome = verifyResult.success ? 'success' : 'failed';
+      failureMessage = verifyResult.errorMessage;
+      if (_scaffoldKey.currentContext != null && Navigator.of(_scaffoldKey.currentContext!, rootNavigator: true).canPop()) {
+        Navigator.of(_scaffoldKey.currentContext!, rootNavigator: true).pop();
+      }
+    });
+    // 3 minutes - generous for switching to a UPI app, entering a PIN, and
+    // coming back, without leaving the customer stuck on this dialog
+    // forever if they abandon the payment instead of tapping Cancel.
+    final timeoutTimer = Timer(const Duration(minutes: 3), () {
+      if (decided) return;
+      decided = true;
+      if (outcome == 'cancelled') outcome = 'timeout';
+      if (_scaffoldKey.currentContext != null && Navigator.of(_scaffoldKey.currentContext!, rootNavigator: true).canPop()) {
+        Navigator.of(_scaffoldKey.currentContext!, rootNavigator: true).pop();
+      }
+    });
+
+    // ignore: use_build_context_synchronously
+    await showDialog<void>(
+      context: _scaffoldKey.currentContext!,
+      useRootNavigator: true,
+      barrierDismissible: false,
+      barrierColor: Colors.black.withValues(alpha: 0.7),
+      builder: (dialogCtx) {
+        final dark = isDarkMode(dialogCtx);
+        return PopScope(
+          canPop: false,
+          child: Dialog(
+            backgroundColor: Colors.transparent,
+            elevation: 0,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 32),
+              decoration: BoxDecoration(
+                color: dark ? AppThemeData.darkBgSecondary : Colors.white,
+                borderRadius: BorderRadius.circular(20),
+                boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.18), blurRadius: 30, offset: const Offset(0, 10))],
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SizedBox(
+                    width: 56, height: 56,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 3.5,
+                      color: AppThemeData.primary500,
+                      backgroundColor: AppThemeData.primary500.withValues(alpha: 0.12),
+                    ),
+                  ),
+                  const SizedBox(height: 22),
+                  Text(
+                    'Waiting for Payment'.tr(),
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontFamily: AppThemeData.semiBold,
+                      color: dark ? AppThemeData.darkTextPrimary : AppThemeData.neutral900,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    'Complete the payment in your UPI app, then come back here.'.tr(),
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontFamily: AppThemeData.regular,
+                      color: dark ? AppThemeData.darkTextSecondary : AppThemeData.neutral500,
+                      height: 1.5,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 20),
+                  TextButton(
+                    onPressed: () {
+                      if (decided) return;
+                      decided = true;
+                      outcome = 'cancelled';
+                      Navigator.of(dialogCtx, rootNavigator: true).pop();
+                    },
+                    child: Text('Cancel'.tr(), style: TextStyle(color: AppThemeData.primary500, fontFamily: AppThemeData.medium)),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+    pollTimer.cancel();
+    timeoutTimer.cancel();
+
+    // A 'timeout' means our 3-minute poll window closed before we saw a
+    // final state - NOT that the payment failed. Before showing "still
+    // waiting" and stranding the customer, ask Razorpay directly one more
+    // time: if the payment actually did capture (a slow bank confirmation,
+    // the app having been backgrounded and throttled while polling, etc.),
+    // treat it exactly like a normal success and take the customer straight
+    // to their order instead of a dead-end warning for a payment that
+    // genuinely went through.
+    if (outcome == 'timeout' && mounted) {
+      final finalCheck = await RazorPayController().verifyPayment(
+        razorpayOrderId: razorpayOrderId,
+        razorpayPaymentId: razorpayPaymentId,
+        purpose: 'order',
+      );
+      if (finalCheck.success) {
+        outcome = 'success';
+      } else if (!finalCheck.pending) {
+        // A definite, non-pending failure now (not just "still don't know")
+        // - treat like any other confirmed failure below.
+        outcome = 'failed';
+        failureMessage = finalCheck.errorMessage;
+      }
+      // else: still genuinely pending - outcome stays 'timeout', and the
+      // draft is kept (not deleted) below so it isn't lost either way.
+    }
+
+    if (outcome == 'success') {
+      _pendingS2SRazorpayOrderId = razorpayOrderId;
+      _pendingOrderId = appOrderId;
+      if (!mounted) return;
+      setState(() {
+        isOrderPlaced = true;
+        isProcessingOrder = true;
+        _paymentCollected = true;
+      });
+      push(_scaffoldKey.currentContext!, PlaceOrderScreen(
+        orderFactory: () => _buildAndPlaceOrder(appOrderId),
+        isPaymentVerified: true,
+      ));
+      return;
+    }
+
+    // cancelled / failed: verifyPayment only reaches 'success' on a
+    // genuinely captured payment, so a real 'failed' means nothing was
+    // charged and the draft is safe to discard. 'cancelled' (the customer
+    // tapped Cancel) is the same - Razorpay never captured anything for an
+    // intent the customer's own UPI app never completed.
+    //
+    // 'timeout' is NOT the same as 'failed' - it means "we don't know",
+    // not "nothing was charged". Deleting the draft here used to happen
+    // unconditionally, and the message below still promises an automatic
+    // refund if money was deducted - but there is no Cloud Function that
+    // performs that (checked functions/index.js: no razorpayWebhook, no
+    // reconciliation job for order_drafts at all, unlike the wallet path's
+    // healMissingWalletCredits). If the payment actually did capture just
+    // slightly after the 3-minute window, deleting the draft here would
+    // destroy the only record that could ever recover it, with the promised
+    // refund never actually happening. Keep the draft on timeout so a
+    // reconciliation job can be built to act on it; only delete for the two
+    // outcomes that are genuinely final.
+    if (outcome != 'timeout') {
+      draftRef.deleteLogged('_launchUpiIntentAndPoll:order_drafts').catchError((_) {});
+    }
+    if (!mounted) return;
+    if (outcome == 'timeout') {
+      AppDialog.showWarning(
+        _scaffoldKey.currentContext!,
+        title: 'Still Waiting?'.tr(),
+        message: 'We couldn\'t confirm your payment yet. Please do not pay again - check your Orders screen in a few minutes before retrying.'.tr(),
+      );
+    } else if (outcome == 'failed') {
+      AppDialog.showWarning(
+        _scaffoldKey.currentContext!,
+        title: 'Payment Failed'.tr(),
+        message: failureMessage ?? 'Your UPI payment could not be completed. Please try again.'.tr(),
+      );
+    }
+    // 'cancelled': the customer tapped Cancel themselves - no extra dialog needed.
   }
 
   void _handleCardSelected() async {
@@ -1622,7 +2356,7 @@ class PaymentScreenState extends State<PaymentScreen> {
     _pendingOrderId = appOrderId;
     final draftOrderModel = await _buildOrderModel(appOrderId);
     final draftRef = FirebaseFirestore.instance.collection('order_drafts').doc(appOrderId);
-    await draftRef.set(draftOrderModel.toJson());
+    await draftRef.setLogged(draftOrderModel.toJson(), '_handleCardSelected:order_drafts');
     final result = await RazorPayController().createVerifiedOrderPayment(
       vendorID: widget.products.first.vendorID,
       products: widget.products,
@@ -1642,7 +2376,7 @@ class PaymentScreenState extends State<PaymentScreen> {
     if (result.success) {
       openCheckoutCard(amount: result.amount, orderId: result.razorpayOrderId!, appOrderId: appOrderId);
     } else {
-      draftRef.delete().catchError((_) {});
+      draftRef.deleteLogged('_handleCardSelected:order_drafts').catchError((_) {});
       _handleVerifiedPaymentFailure(result);
     }
   }
@@ -1739,7 +2473,7 @@ class PaymentScreenState extends State<PaymentScreen> {
     // created" gap.
     final orderModel = await _buildOrderModel(orderId);
     final draftRef = FirebaseFirestore.instance.collection('order_drafts').doc(orderId);
-    await draftRef.set(orderModel.toJson());
+    await draftRef.setLogged(orderModel.toJson(), '_handleWalletSelected:order_drafts');
 
     final result = await RazorPayController().createVerifiedWalletOrder(
       vendorID: widget.products.first.vendorID,
@@ -1759,7 +2493,7 @@ class PaymentScreenState extends State<PaymentScreen> {
     if (!mounted) return;
 
     if (!result.success) {
-      draftRef.delete().catchError((_) {});
+      draftRef.deleteLogged('_handleWalletSelected:order_drafts').catchError((_) {});
       _handleVerifiedPaymentFailure(result);
       return;
     }
@@ -1919,19 +2653,37 @@ class PaymentScreenState extends State<PaymentScreen> {
       Navigator.of(_scaffoldKey.currentContext!, rootNavigator: true).pop();
     }
 
+    // Use the order ID that was pre-generated before checkout opened.
+    //
+    // NOTE (2026-08-31 correction): the comment this used to carry claimed
+    // "the webhook can recover the order if the app dies before
+    // _buildAndPlaceOrder completes" - there is NO such webhook deployed
+    // (checked functions/index.js's full export list: no razorpayWebhook,
+    // no payment.captured handler anywhere). _buildAndPlaceOrder below is
+    // the ONLY thing that ever creates the order for a RazorPay payment -
+    // if this method returns without reaching it, the customer is charged
+    // with nothing to show for it, permanently.
+    final orderId = _pendingOrderId;
+    _pendingOrderId = null;
+
+    // razorpay_flutter is known to sometimes deliver EVENT_PAYMENT_SUCCESS
+    // twice for one payment. The FIRST call already consumed _pendingOrderId
+    // (set to null above) and pushed PlaceOrderScreen - a second call must
+    // not try to push it again (double order), but it must also NOT just
+    // silently bail: the isProcessingOrder=true set below would otherwise be
+    // set with nothing ever resetting it, permanently freezing the Pay Now
+    // button on this screen even though the order already placed correctly
+    // via the first call. Bailing BEFORE touching isProcessingOrder is what
+    // makes that safe.
+    if (orderId == null) return;
+    if (!mounted) return;
+
     // Money is now debited — lock back navigation.
     setState(() {
       isOrderPlaced = true;
       isProcessingOrder = true;
       _paymentCollected = true;
     });
-
-    // Use the order ID that was pre-generated before checkout opened.
-    // This same ID is in the Razorpay notes so the webhook can recover
-    // the order if the app dies before _buildAndPlaceOrder completes.
-    final orderId = _pendingOrderId;
-    _pendingOrderId = null;
-    if (orderId == null || !mounted) return;
 
     // Carried into _buildAndPlaceOrder so it can verify the Razorpay
     // signature server-side (and stamp razorpayOrderId onto the order)
@@ -1945,6 +2697,9 @@ class PaymentScreenState extends State<PaymentScreen> {
   }
 
   PaymentSuccessResponse? _pendingRazorpayResponse;
+  // S2S UPI Intent's equivalent of _pendingRazorpayResponse - see
+  // _buildOrderModel's matching branch and _handleUpiIntentSelected below.
+  String? _pendingS2SRazorpayOrderId;
 
   void _handleExternalWaller(ExternalWalletResponse response) {
     paymentInProgressNotifier.value = false;
@@ -3065,6 +3820,12 @@ class PaymentScreenState extends State<PaymentScreen> {
         throw Exception(verifyResult.errorMessage ?? 'Payment verification failed. Please contact support.');
       }
       razorpayOrderId = pendingResponse.orderId;
+    } else if (_pendingS2SRazorpayOrderId != null) {
+      // S2S UPI Intent (2026-08-31) - already confirmed 'captured' by the
+      // polling loop in _handleUpiIntentSelected before this was ever
+      // called, so there's nothing left to verify here - just stamp the id.
+      razorpayOrderId = _pendingS2SRazorpayOrderId;
+      _pendingS2SRazorpayOrderId = null;
     }
 
     final List<CartProduct> tempProduc = [];
@@ -3202,7 +3963,7 @@ class PaymentScreenState extends State<PaymentScreen> {
     // delete fails, razorpayWebhook's own existence-check against
     // vendor_orders/{oid} still makes a leftover draft harmless (it just
     // never gets read).
-    FirebaseFirestore.instance.collection('order_drafts').doc(oid).delete().catchError((_) {});
+    FirebaseFirestore.instance.collection('order_drafts').doc(oid).deleteLogged('_buildAndPlaceOrder:order_drafts').catchError((_) {});
 
     // NOTE (2026-07-22): purchase-preference tracking (kEvtOrderCompleted/
     // kEvtProductOrdered) deliberately does NOT fire here anymore - a

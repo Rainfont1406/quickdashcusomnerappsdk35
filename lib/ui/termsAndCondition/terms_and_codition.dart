@@ -1,6 +1,7 @@
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:flutter/material.dart';
@@ -28,7 +29,7 @@ class _TermsAndConditionState extends State<TermsAndCondition> {
       final doc = await FireStoreUtils.firestore
           .collection(Setting)
           .doc("termsAndConditions")
-          .get();
+          .getLogged('_loadContent:Setting');
       if (mounted) {
         setState(() {
           _content = doc['terms_and_condition'] as String?;

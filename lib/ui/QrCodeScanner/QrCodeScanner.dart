@@ -17,6 +17,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:permission_handler/permission_handler.dart';
+import '../../services/firestore_instrumentation.dart';
 import '../vendorProductsScreen/newVendorProductsScreen.dart';
 
 // ── Phase states ─────────────────────────────────────────────────────────────
@@ -177,7 +178,7 @@ class _QrCodeScannerState extends State<QrCodeScanner>
           .collection(VENDORS)
           .where('id', isEqualTo: qrValue)
           .limit(1)
-          .get();
+          .getLogged('onDetect:VENDORS');
 
       if (!mounted) return;
 

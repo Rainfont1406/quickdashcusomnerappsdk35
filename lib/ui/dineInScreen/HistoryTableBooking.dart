@@ -25,6 +25,12 @@ class _HistoryTableBookingState extends State<HistoryTableBooking> {
   }
 
   @override
+  void dispose() {
+    fireStoreUtils.closeBookingOrdersStream();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return StreamBuilder<List<BookTableModel>>(
       stream: _stream,

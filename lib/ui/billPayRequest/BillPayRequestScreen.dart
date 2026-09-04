@@ -7,6 +7,7 @@ import 'package:emartconsumer/model/OrderModel.dart';
 import 'package:emartconsumer/send_notification.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/app_dialog.dart';
+import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
@@ -163,7 +164,7 @@ class _BillPayRequestScreenState extends State<BillPayRequestScreen> {
       final vendorId = order.vendor.id;
       if (vendorId.isEmpty) return;
       final doc =
-          await FireStoreUtils.firestore.collection(VENDORS).doc(vendorId).get();
+          await FireStoreUtils.firestore.collection(VENDORS).doc(vendorId).getLogged('_notifyVendorOfDecline:VENDORS');
       final liveToken = (doc.data()?['fcmToken'] as String?) ?? '';
       if (liveToken.isEmpty) return;
       final payload = <String, dynamic>{

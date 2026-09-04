@@ -99,28 +99,30 @@ class _LocalOffersListScreenState extends State<LocalOffersListScreen> {
     final offers = _onlyActive(results[1] as List<LocalOfferModel>)..sort(_compareOffers);
     setState(() {
       _categories = results[0] as List<LocalOfferCategoryModel>;
+      _allOffersUnfiltered
+        ..clear()
+        ..addAll(offers);
       _allOffers = offers;
       _loading = false;
     });
     _applyFilters();
   }
 
-  /// Switches category server-side (a fresh query) rather than filtering the
-  /// already-loaded "All" list, since a category the user hasn't visited yet
-  /// may not be in it.
-  Future<void> _selectCategory(String? categoryId) async {
+  /// Filters the already-loaded "All" list client-side (2026-08-31) - _load()
+  /// fetches every active offer with no categoryId filter at all (up to the
+  /// 300-doc safety cap), so it already has every category's offers in
+  /// memory. This used to re-query Firestore from scratch on every single
+  /// category tap - wasted reads, and repeat taps (or tapping back and forth
+  /// between categories) cost another full round-trip each time for data
+  /// already sitting in _allOffers.
+  final List<LocalOfferModel> _allOffersUnfiltered = [];
+
+  void _selectCategory(String? categoryId) {
     setState(() {
       _selectedCategoryId = categoryId;
-      _loading = true;
-      _allOffers = [];
-      _visibleOffers = [];
-    });
-    final offers = _onlyActive(await FireStoreUtils.getAllActiveLocalOffers(categoryId: categoryId))
-      ..sort(_compareOffers);
-    if (!mounted) return;
-    setState(() {
-      _allOffers = offers;
-      _loading = false;
+      _allOffers = categoryId == null
+          ? _allOffersUnfiltered
+          : _allOffersUnfiltered.where((o) => o.categoryId == categoryId).toList();
     });
     _applyFilters();
   }

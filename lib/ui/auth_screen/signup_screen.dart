@@ -10,6 +10,7 @@ import 'package:emartconsumer/model/User.dart';
 import 'package:emartconsumer/model/referral_model.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/device_session_service.dart';
+import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/notification_service.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
@@ -99,7 +100,7 @@ class _SignupScreenState extends State<SignupScreen> {
     final normalized = email.trim().toLowerCase();
     if (normalized.isEmpty || validateEmail(normalized) != null) return null;
     final snap =
-        await FirebaseFirestore.instance.collection(USERS).where('email', isEqualTo: normalized).get();
+        await FirebaseFirestore.instance.collection(USERS).where('email', isEqualTo: normalized).getLogged('_checkEmailAlreadyRegistered:USERS');
     final conflict =
         snap.docs.any((doc) => (doc.data()['role'] as String? ?? '') == USER_ROLE_CUSTOMER);
     return conflict ? 'This email is already registered.'.tr : null;
@@ -111,7 +112,7 @@ class _SignupScreenState extends State<SignupScreen> {
     final snap = await FirebaseFirestore.instance
         .collection(USERS)
         .where('phoneNumber', isEqualTo: trimmed)
-        .get();
+        .getLogged('_checkPhoneAlreadyRegistered:USERS');
     final conflict = snap.docs.any((doc) {
       final data = doc.data();
       return (data['role'] as String? ?? '') == USER_ROLE_CUSTOMER &&
@@ -257,12 +258,12 @@ class _SignupScreenState extends State<SignupScreen> {
         ? FirebaseFirestore.instance
             .collection(USERS)
             .where('email', isEqualTo: normalizedEmail)
-            .get()
+            .getLogged('_findExistingCustomerConflict:USERS')
         : null;
     final phoneFuture = FirebaseFirestore.instance
         .collection(USERS)
         .where('phoneNumber', isEqualTo: phoneNumber.trim())
-        .get();
+        .getLogged('_findExistingCustomerConflict:USERS');
 
     if (emailFuture != null) {
       final emailSnap = await emailFuture;
@@ -319,7 +320,7 @@ class _SignupScreenState extends State<SignupScreen> {
       // (2026-08-27, vendor request). Best-effort: a logging failure must
       // never block the actual account cleanup below.
       try {
-        await FirebaseFirestore.instance.collection('failed_signups').add({
+        await FirebaseFirestore.instance.collection('failed_signups').addLogged({
           'deletedAuthUid': user.uid,
           'signupType': type.isEmpty ? 'email' : type,
           'attemptedEmail': emailEditingController.text.trim().toLowerCase(),
@@ -331,7 +332,7 @@ class _SignupScreenState extends State<SignupScreen> {
           // auto-deletes this doc 30 days after it's written - admin-only
           // tracking, not meant to accumulate indefinitely (2026-08-27).
           'ttlAt': Timestamp.fromDate(DateTime.now().toUtc().add(const Duration(days: 30))),
-        });
+        }, '_abortOrphanedSignup:failed_signups');
       } catch (_) {}
       try {
         await user.delete();

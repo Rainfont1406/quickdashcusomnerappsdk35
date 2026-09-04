@@ -27,6 +27,12 @@ class _UpComingTableBookingState extends State<UpComingTableBooking> {
   }
 
   @override
+  void dispose() {
+    fireStoreUtils.closeBookingOrdersStream();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final bool dark = isDarkMode(context);
     return StreamBuilder<List<BookTableModel>>(

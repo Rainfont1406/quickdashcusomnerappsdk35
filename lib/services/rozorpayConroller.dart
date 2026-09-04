@@ -87,8 +87,43 @@ class VerifiedPaymentOrderResult {
 class VerifyPaymentResult {
   final bool success;
   final String? errorMessage;
+  // True when the S2S UPI payment hasn't reached a final state yet (still
+  // 'created'/'authorized' at Razorpay, i.e. the customer hasn't finished -
+  // or Razorpay hasn't finished settling - the payment in their UPI app
+  // yet). The caller should keep polling, not treat this as a failure.
+  final bool pending;
 
-  VerifyPaymentResult({this.success = false, this.errorMessage});
+  VerifyPaymentResult({this.success = false, this.errorMessage, this.pending = false});
+}
+
+// Result of createS2SUpiIntent - see upiIntentPayments.js's top-of-file
+// comment for what this checkout path is.
+class S2SUpiIntentResult {
+  final bool success;
+  final String? errorMessage;
+  final String? razorpayOrderId;
+  final String? razorpayPaymentId;
+  final String? intentUrl;
+  final double amount;
+  final double verifiedDiscount;
+  final double verifiedSpecialDiscount;
+  final bool deviceSuperseded;
+  final bool billUpdated;
+  final double? updatedTotal;
+
+  S2SUpiIntentResult({
+    this.success = false,
+    this.errorMessage,
+    this.razorpayOrderId,
+    this.razorpayPaymentId,
+    this.intentUrl,
+    this.amount = 0,
+    this.verifiedDiscount = 0,
+    this.verifiedSpecialDiscount = 0,
+    this.deviceSuperseded = false,
+    this.billUpdated = false,
+    this.updatedTotal,
+  });
 }
 
 class RazorPayController {
@@ -573,10 +608,15 @@ class RazorPayController {
   // same as createWalletTopupOrder above) - 'order'/'gift_card' stay on
   // Cloud Functions' verifyRazorpayPayment, which is the only place that
   // implements those two branches.
+  // razorpaySignature is optional (2026-08-31): the Checkout SDK flow always
+  // has one (Razorpay hands it back in the success callback) and the server
+  // verifies it; the S2S UPI Intent flow has no SDK callback to produce one,
+  // so it's omitted and the server instead confirms the payment directly
+  // with Razorpay itself (see verifyRazorpayPayment's signature-less branch).
   Future<VerifyPaymentResult> verifyPayment({
     required String razorpayOrderId,
     required String razorpayPaymentId,
-    required String razorpaySignature,
+    String? razorpaySignature,
     required String purpose,
   }) async {
     final idToken = await _idToken();
@@ -594,7 +634,7 @@ class RazorPayController {
             body: jsonEncode({
               'razorpayOrderId': razorpayOrderId,
               'razorpayPaymentId': razorpayPaymentId,
-              'razorpaySignature': razorpaySignature,
+              if (razorpaySignature != null) 'razorpaySignature': razorpaySignature,
               'purpose': purpose,
             }),
           )
@@ -604,11 +644,106 @@ class RazorPayController {
         return VerifyPaymentResult(success: true);
       }
       final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      if (resp.statusCode == 202 && data['pending'] == true) {
+        return VerifyPaymentResult(pending: true);
+      }
       return VerifyPaymentResult(
           errorMessage: data['error']?.toString() ?? 'Payment verification failed. Please contact support.');
     } catch (e) {
       debugPrint('[verifyPayment] $e');
       return VerifyPaymentResult(errorMessage: 'Payment verification failed. Please contact support.');
+    }
+  }
+
+  // S2S UPI Intent (2026-08-31) - creates the payment directly against
+  // Razorpay's S2S UPI API (flow=intent) instead of a hosted Checkout order,
+  // returning a genuine upi://pay deep link for the caller to launch via
+  // url_launcher. See upiIntentPayments.js's top-of-file comment for the
+  // full picture, including why this is untested against a real account.
+  Future<S2SUpiIntentResult> createS2SUpiIntent({
+    required String vendorID,
+    required List<CartProduct> products,
+    required String contact,
+    String? email,
+    String? couponId,
+    String? sectionId,
+    bool takeAway = false,
+    String? deliveryCharge,
+    String? tipValue,
+    String currency = 'INR',
+    String? billPayRequestId,
+    int? expectedBillVersion,
+    int? scheduleTimeMillis,
+    String? clientOrderType,
+  }) async {
+    final idToken = await _idToken();
+    if (idToken == null) {
+      return S2SUpiIntentResult(errorMessage: 'Not signed in.');
+    }
+    try {
+      final deviceId = await DeviceSessionService.getDeviceId();
+
+      final resp = await http
+          .post(
+            Uri.parse('$CloudFunctionsBaseURL/createS2SUpiIntent'),
+            headers: {'Authorization': 'Bearer $idToken', 'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'vendorID': vendorID,
+              'products': products.map((p) => p.toJson()).toList(),
+              'contact': contact,
+              'email': email,
+              'couponId': couponId,
+              'sectionId': sectionId,
+              'takeAway': takeAway,
+              'deliveryCharge': deliveryCharge,
+              'tipValue': tipValue,
+              'currency': currency,
+              'deviceId': deviceId,
+              'billPayRequestId': billPayRequestId,
+              'expectedBillVersion': expectedBillVersion,
+              'scheduleTimeMillis': scheduleTimeMillis,
+              'clientOrderType': clientOrderType,
+            }),
+          )
+          .timeout(const Duration(seconds: 30));
+
+      final data = jsonDecode(resp.body) as Map<String, dynamic>;
+      if (resp.statusCode == 200) {
+        return S2SUpiIntentResult(
+          success: true,
+          razorpayOrderId: data['razorpayOrderId']?.toString(),
+          razorpayPaymentId: data['razorpayPaymentId']?.toString(),
+          intentUrl: data['intentUrl']?.toString(),
+          amount: (data['verifiedTotal'] as num?)?.toDouble() ?? 0,
+          verifiedDiscount: (data['verifiedDiscount'] as num?)?.toDouble() ?? 0,
+          verifiedSpecialDiscount: (data['verifiedSpecialDiscount'] as num?)?.toDouble() ?? 0,
+        );
+      }
+      if (data['error'] == 'bill_updated') {
+        return S2SUpiIntentResult(
+          billUpdated: true,
+          updatedTotal: (data['updatedTotal'] as num?)?.toDouble(),
+          errorMessage: 'The restaurant updated this bill. Please review it before paying.',
+        );
+      }
+      if (data['error'] == 'vendor_closed') {
+        return S2SUpiIntentResult(errorMessage: 'This restaurant is currently closed.');
+      }
+      if (data['error'] == 'device_superseded') {
+        final retryAtRaw = data['retry_at'] as String?;
+        final retryAt = retryAtRaw != null ? DateTime.tryParse(retryAtRaw) : null;
+        final baseMessage = (data['message'] as String?) ??
+            'This account is active on another device. You can switch devices after 2 hours.';
+        return S2SUpiIntentResult(
+          deviceSuperseded: true,
+          errorMessage: DeviceSessionService.withRetryTime(baseMessage, retryAt),
+        );
+      }
+      return S2SUpiIntentResult(
+          errorMessage: data['error']?.toString() ?? 'Unable to start UPI payment. Please try again later.');
+    } catch (e) {
+      debugPrint('[createS2SUpiIntent] $e');
+      return S2SUpiIntentResult(errorMessage: 'Unable to start UPI payment. Please try again later.');
     }
   }
 

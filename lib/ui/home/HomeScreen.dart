@@ -16,6 +16,7 @@ import 'package:emartconsumer/services/behavior/behavior_counters.dart';
 import 'package:firebase_auth/firebase_auth.dart' as auth;
 import 'package:emartconsumer/services/behavior/behavior_event_types.dart';
 import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
+import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/services/perf_diagnostic_file_service.dart';
@@ -710,7 +711,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       }),
       _timedStep(
               'getBanner -> story setting doc get',
-              () => FireStoreUtils.firestore.collection(Setting).doc('story').get())
+              () => FireStoreUtils.firestore.collection(Setting).doc('story').getLogged('getBanner:Setting'))
           .then((value) {
         setState(() {
           storyEnable = value.data()?['isEnabled'] ?? false;
@@ -2025,7 +2026,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           .collection('story_views')
           .where('userID', isEqualTo: userID)
           .where('dateKey', isEqualTo: dateKey)
-          .get();
+          .getLogged('_loadViewedTodayIds:story_views');
       final fromFirestore = snap.docs
           .map((d) => (d.data()['storyID'] as String?) ?? '')
           .where((id) => id.isNotEmpty)

@@ -1,6 +1,7 @@
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:flutter/material.dart';
@@ -20,7 +21,7 @@ class _PrivacyPolicyScreenState extends State<PrivacyPolicyScreen> {
   @override
   void initState() {
     super.initState();
-    FireStoreUtils.firestore.collection(Setting).doc('privacyPolicy').get().then((value) {
+    FireStoreUtils.firestore.collection(Setting).doc('privacyPolicy').getLogged('initState:Setting').then((value) {
       if (mounted) {
         setState(() {
           _privacyHtml = value['privacy_policy']?.toString();

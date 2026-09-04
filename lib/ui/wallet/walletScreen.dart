@@ -25,6 +25,7 @@ import 'package:emartconsumer/payment/orangePayScreen.dart';
 import 'package:emartconsumer/payment/xenditModel.dart';
 import 'package:emartconsumer/payment/xenditScreen.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/services/device_session_service.dart';
 import 'package:emartconsumer/services/paystack_url_genrater.dart';
 import 'package:emartconsumer/services/rozorpayConroller.dart';
@@ -123,11 +124,11 @@ class WalletScreenState extends State<WalletScreen> {
         .where('user_id', isEqualTo: userId)
         .orderBy('date', descending: true)
         .limit(20)
-        .snapshots();
+        .snapshotsLogged('_attachWalletListeners:Wallet');
     userQuery = FireStoreUtils.firestore
         .collection(USERS)
         .doc(MyAppState.currentUser!.userID)
-        .snapshots();
+        .snapshotsLogged('_attachWalletListeners:USERS');
   }
 
   bool _gatewaySettingsLoadedForTopup = false;
@@ -778,7 +779,7 @@ class WalletScreenState extends State<WalletScreen> {
     await FireStoreUtils.firestore
         .collection("wallet")
         .doc(wallet.id)
-        .set(wallet.toJson())
+        .setLogged(wallet.toJson(), 'paymentCompleted:wallet')
         .then((value) async {
       await FireStoreUtils.updateWalletAmount(amount: _amountController.text)
           .then((value) async {
@@ -1071,7 +1072,7 @@ class WalletScreenState extends State<WalletScreen> {
                                       FireStoreUtils.firestore
                                           .collection(ORDERS)
                                           .doc(topupTranHistory.order_id)
-                                          .get()
+                                          .getLogged('viewOrderFromTopupHistory:ORDERS')
                                           .then((value) {
                                         if (!value.exists || value.data() == null) return;
                                         OrderModel orderModel = OrderModel.fromJson(value.data()!);

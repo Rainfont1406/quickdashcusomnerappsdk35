@@ -9,6 +9,7 @@ import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/gift_cards_order_model.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/ui/container/ContainerScreen.dart';
 import 'package:emartconsumer/ui/wallet/walletScreen.dart';
@@ -170,7 +171,7 @@ class _GiftCardRedeemScreenState extends State<GiftCardRedeemScreen> {
                         transactionUser: "customer",
                         note: 'Gift Voucher');
 
-                    await FireStoreUtils.firestore.collection("wallet").doc(wallet.id).set(wallet.toJson()).then((value) async {
+                    await FireStoreUtils.firestore.collection("wallet").doc(wallet.id).setLogged(wallet.toJson(), 'redeemButton:wallet').then((value) async {
                       await FireStoreUtils.updateWalletAmount(amount: double.parse(giftCodeModel.price.toString())).then((value) async {
                         await FireStoreUtils.sendTopUpMail(paymentMethod: "Gift Voucher", amount: giftCodeModel.price.toString(), tractionId: wallet.id);
                         await FireStoreUtils().placeGiftCardOrder(giftCodeModel).then((value) {

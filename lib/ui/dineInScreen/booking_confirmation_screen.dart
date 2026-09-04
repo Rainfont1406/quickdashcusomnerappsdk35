@@ -1,9 +1,7 @@
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart' show amountShow, ORDER_STATUS_ACCEPTED;
 import 'package:emartconsumer/model/BookTableModel.dart';
-import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/helper.dart';
-import 'package:emartconsumer/services/special_discount_preview.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/dineInScreen/my_booking_screen.dart';
 import 'package:flutter/material.dart';
@@ -241,8 +239,6 @@ class BookingConfirmationScreen extends StatelessWidget {
                 ),
               ),
 
-            const SizedBox(height: 16),
-            _LockedInOffers(booking: booking, dark: dark),
             const SizedBox(height: 24),
 
             // ── Action buttons ──────────────────────────────────────
@@ -344,118 +340,4 @@ class BookingConfirmationScreen extends StatelessWidget {
         height: 1,
         color: dark ? Colors.white12 : Colors.grey.shade100,
       );
-}
-
-// Shows what special discount/coupon got locked in by making this booking
-// (2026-08-30, §11.21 follow-up) - evaluated at booking.createdAt, the exact
-// same instant the server's table-booking-time-lock uses for the real
-// Dining/Bill Pay order later, so this is a true preview of what checkout
-// will actually apply, not a generic "offers available" list. booking.vendor
-// is already embedded on BookTableModel (no extra read); coupons come from
-// the same 5-minute static cache every other offers display in the app uses.
-class _LockedInOffers extends StatefulWidget {
-  final BookTableModel booking;
-  final bool dark;
-  const _LockedInOffers({required this.booking, required this.dark});
-
-  @override
-  State<_LockedInOffers> createState() => _LockedInOffersState();
-}
-
-class _LockedInOffersState extends State<_LockedInOffers> {
-  List<SpecialOfferPreviewRung> _rungs = [];
-  bool _loaded = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  Future<void> _load() async {
-    try {
-      final coupons = await FireStoreUtils().getAllCoupons();
-      if (!mounted) return;
-      setState(() {
-        _rungs = SpecialDiscountPreview.buildLadder(
-          vendor: widget.booking.vendor,
-          coupons: coupons,
-          orderType: 'Takeaway',
-          at: widget.booking.createdAt.toDate(),
-        );
-        _loaded = true;
-      });
-    } catch (_) {
-      if (mounted) setState(() => _loaded = true);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (!_loaded || _rungs.isEmpty) return const SizedBox.shrink();
-    final dark = widget.dark;
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: (dark ? AppThemeData.primary400 : AppThemeData.primary500)
-            .withOpacity(0.10),
-        borderRadius: BorderRadius.circular(16),
-        border:
-            Border.all(color: AppThemeData.primary500.withOpacity(0.3)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Icon(Icons.local_offer_rounded,
-                  size: 18, color: AppThemeData.primary500),
-              const SizedBox(width: 8),
-              Text(
-                'Locked in for your visit'.tr(),
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w700,
-                  color: dark ? Colors.white : Colors.black87,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 4),
-          Text(
-            'These offers were live when you booked, and will still apply when you dine or pay - even if they end before then.'
-                .tr(),
-            style: TextStyle(
-              fontSize: 11.5,
-              color: dark ? Colors.white60 : Colors.grey.shade700,
-            ),
-          ),
-          const SizedBox(height: 10),
-          ..._rungs.map((r) => Padding(
-                padding: const EdgeInsets.only(bottom: 6),
-                child: Row(
-                  children: [
-                    Icon(Icons.check_circle_rounded,
-                        size: 14,
-                        color: dark
-                            ? AppThemeData.primary300
-                            : AppThemeData.primary600),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        '${'Save'.tr()} ${amountShow(amount: r.savingAmount.toStringAsFixed(2))} ${'on orders above'.tr()} ${amountShow(amount: r.thresholdAmount.toStringAsFixed(2))}',
-                        style: TextStyle(
-                          fontSize: 12.5,
-                          color: dark ? Colors.white70 : Colors.black87,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              )),
-        ],
-      ),
-    );
-  }
 }

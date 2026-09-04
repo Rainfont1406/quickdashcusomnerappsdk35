@@ -12,6 +12,7 @@ import 'package:emartconsumer/model/conversation_model.dart';
 import 'package:emartconsumer/model/inbox_model.dart';
 import 'package:emartconsumer/send_notification.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/fullScreenImageViewer/FullScreenImageViewer.dart';
@@ -79,7 +80,7 @@ class _ChatScreensState extends State<ChatScreens> {
         .doc(widget.orderId)
         .collection("thread")
         .orderBy('createdAt', descending: false)
-        .snapshots();
+        .snapshotsLogged('ChatScreens.initState:thread');
   }
 
   // Returns "hh:mm a" for today/yesterday messages (the date-separator chip

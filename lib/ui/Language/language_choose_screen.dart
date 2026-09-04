@@ -7,6 +7,8 @@ import 'package:emartconsumer/theme/round_button_fill.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:emartconsumer/services/firestore_instrumentation.dart';
+
 import 'language_model.dart';
 
 class LanguageChooseScreen extends StatefulWidget {
@@ -43,7 +45,7 @@ class _LanguageChooceScreenState extends State<LanguageChooseScreen> with Single
 
   void loadData() async {
     languageList.clear();
-    await FireStoreUtils.firestore.collection(Setting).doc("languages").get().then((value) {
+    await FireStoreUtils.firestore.collection(Setting).doc("languages").getLogged('loadData:Setting').then((value) {
       if (!value.exists || value.data() == null) return;
       List list = value.data()!["list"];
       for (int i = 0; i < list.length; i++) {

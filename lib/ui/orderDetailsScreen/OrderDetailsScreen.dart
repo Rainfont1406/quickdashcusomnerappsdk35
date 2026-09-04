@@ -61,6 +61,25 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
   }
 
   FireStoreUtils fireStoreUtils = FireStoreUtils();
+
+  // This screen's body rebuilds on every watchOrderStatus stream tick (the
+  // StreamBuilder's own builder), and Firestore delivers 2 emissions per
+  // listener attach (an immediate local-cache snapshot, then a server
+  // snapshot) - so constructing the stream/futures inline in build() re-runs
+  // getProductByID for every line item, and re-subscribes a fresh
+  // watchOrderStatus listener, on every single one of those ticks. Cached
+  // here instead - orderModel.id and each product id are stable for this
+  // screen's lifetime, so "create once, reuse" is correct, not stale.
+  Stream<DocumentSnapshot<Map<String, dynamic>>>? _orderStatusStream;
+  final Map<String, Future<ProductModel>> _productByIdFutureCache = {};
+
+  Stream<DocumentSnapshot<Map<String, dynamic>>> _cachedOrderStatusStream(String orderId) {
+    return _orderStatusStream ??= fireStoreUtils.watchOrderStatus(orderId);
+  }
+
+  Future<ProductModel> _cachedProductByID(String id) {
+    return _productByIdFutureCache.putIfAbsent(id, () => FireStoreUtils().getProductByID(id));
+  }
   int estimatedSecondsFromDriverToStore = 900;
   late String orderStatus;
   bool isTakeAway = false;
@@ -301,7 +320,7 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
       ),
       body: orderModel != null
           ? StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-              stream: fireStoreUtils.watchOrderStatus(orderModel!.id),
+              stream: _cachedOrderStatusStream(orderModel!.id),
               builder: (context, snapshot) {
                 if (snapshot.hasData && snapshot.data!.exists && snapshot.data!.data() != null) {
                   OrderModel orderModel = OrderModel.fromJson(snapshot.data!.data()!);
@@ -684,7 +703,7 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
             itemBuilder: (context, index) {
               final CartProduct item = order.products[index];
               return FutureBuilder<ProductModel>(
-                future: FireStoreUtils().getProductByID(item.id.split('~').first),
+                future: _cachedProductByID(item.id.split('~').first),
                 builder: (context, snapshot) {
                   final bool isVeg = snapshot.data?.veg ?? false;
                   final bool isNonVeg = snapshot.data?.nonveg ?? false;
@@ -1539,7 +1558,7 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                     .toList();
               }
               return FutureBuilder<ProductModel>(
-                future: FireStoreUtils().getProductByID(item.id),
+                future: _cachedProductByID(item.id),
                 builder: (context, snapshot) {
                   return Padding(
                     padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
@@ -1715,14 +1734,23 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
     List<TaxModel> taxesToDisplay = [];
     double totalTaxAmount = 0.0;
     if (orderModel.taxModel != null) {
-      // See the matching comment in OrdersScreen.dart's tax loop - takeAway
-      // alone no longer means "any non-delivery order" now that it's fixed
-      // to only mean genuine Takeaway.
-      final bool isNonDelivery = (orderModel.takeAway ?? false) ||
+      // isTakeaway on a tax entry means "applies to any Dineaway order" -
+      // Dining, Takeaway, AND Bill Pay all collapse into this one bucket
+      // (confirmed 2026-08-31 against BillPayRequestScreen.dart's own
+      // untouched, original comment: "Bill Pay is a Dineaway flow... only
+      // taxes tagged isTakeaway == true apply, same as Takeaway/Dining
+      // elsewhere") - isTakeaway==false/absent is exclusively real Delivery.
+      // A prior same-night fix here had this backwards (routed Dining into
+      // the false/Delivery bucket) before that reference file was found -
+      // takeAway alone can't detect Dining/Bill Pay (narrowed to mean only
+      // genuine Takeaway by the 2026-08-26 fix, for an unrelated
+      // Vendor-App-button-gating reason), so orderType is needed too.
+      final bool isDineaway = (orderModel.takeAway ?? false) ||
           ((orderModel.orderType ?? '').isNotEmpty);
       for (var element in orderModel.taxModel!) {
-        bool shouldApplyTax = (!isNonDelivery && (element.isTakeaway == false || element.isTakeaway == null)) ||
-            (isNonDelivery && element.isTakeaway == true);
+        bool shouldApplyTax = isDineaway
+            ? element.isTakeaway == true
+            : (element.isTakeaway == false || element.isTakeaway == null);
         if (shouldApplyTax) {
           double taxAmount = getTaxValue(amount: (total - discount - specialDiscountAmount).toString(), taxModel: element);
           totalTaxAmount += taxAmount;

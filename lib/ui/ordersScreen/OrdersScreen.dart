@@ -196,18 +196,23 @@ class _OrdersScreenState extends State<OrdersScreen> {
 
     double totalTaxAmount = 0.0;
     if (orderModel.taxModel != null) {
-      // takeAway alone used to double as "any non-delivery order" (Dining/
-      // Bill Pay included), matching how tax rules' own isTakeaway field
-      // buckets "non-delivery" - takeAway is now narrower (only genuine
-      // Takeaway, since the client bug writing it true for every Dineaway
-      // order was fixed 2026-08-26), so orderType is needed here too or
-      // Dining/Bill Pay orders silently lose their non-delivery tax lines.
-      final bool isNonDelivery = (orderModel.takeAway ?? false) ||
+      // isTakeaway on a tax entry means "applies to any Dineaway order" -
+      // Dining, Takeaway, AND Bill Pay all collapse into this one bucket
+      // (confirmed 2026-08-31 against BillPayRequestScreen.dart's own
+      // untouched, original comment: "Bill Pay is a Dineaway flow... only
+      // taxes tagged isTakeaway == true apply, same as Takeaway/Dining
+      // elsewhere") - isTakeaway==false/absent is exclusively real Delivery.
+      // A prior same-night fix here had this backwards (routed Dining into
+      // the false/Delivery bucket) before that reference file was found -
+      // takeAway alone can't detect Dining/Bill Pay (narrowed to mean only
+      // genuine Takeaway by the 2026-08-26 fix, for an unrelated
+      // Vendor-App-button-gating reason), so orderType is needed too.
+      final bool isDineaway = (orderModel.takeAway ?? false) ||
           ((orderModel.orderType ?? '').isNotEmpty);
       for (var element in orderModel.taxModel!) {
-        bool shouldApplyTax = (!isNonDelivery &&
-                (element.isTakeaway == false || element.isTakeaway == null)) ||
-            (isNonDelivery && element.isTakeaway == true);
+        bool shouldApplyTax = isDineaway
+            ? element.isTakeaway == true
+            : (element.isTakeaway == false || element.isTakeaway == null);
         if (shouldApplyTax) {
           double taxAmount = getTaxValue(
             amount: (total - discount - specialDiscountAmount).toString(),

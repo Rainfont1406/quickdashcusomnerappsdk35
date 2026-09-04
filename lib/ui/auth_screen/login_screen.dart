@@ -4,6 +4,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:country_code_picker/country_code_picker.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
+import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/msg91_service.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
@@ -79,7 +80,7 @@ class _LoginScreenState extends State<LoginScreen> {
           .where('phoneNumber', isEqualTo: phone)
           .where('countryCode', isEqualTo: _countryCode)
           .where('role', isEqualTo: USER_ROLE_CUSTOMER)
-          .get();
+          .getLogged('_sendOtp:USERS');
       isNewUser = snap.docs.isEmpty;
     } catch (_) {
       ShowToastDialog.closeLoader();

@@ -306,6 +306,7 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
     // RecommendationConfig.current still holds production-identical
     // defaults synchronously in the meantime.
     _authStateStream = auth.FirebaseAuth.instance.authStateChanges().listen((user) {
+      FireStoreUtils.onAuthUidChanged(user?.uid);
       if (user != null) {
         PurchaseCompletionListener.start(user.uid);
       } else {

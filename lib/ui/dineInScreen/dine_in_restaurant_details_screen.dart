@@ -6,19 +6,18 @@ import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/BookTableModel.dart';
 import 'package:emartconsumer/model/BookingSlotModel.dart';
-import 'package:emartconsumer/model/User.dart';
-import 'package:emartconsumer/model/topupTranHistory.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/behavior/behavior_counters.dart';
 import 'package:emartconsumer/services/behavior/behavior_event_types.dart';
 import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
+import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/rozorpayConroller.dart';
-import 'package:emartconsumer/services/special_discount_preview.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/auth_screen/login_screen.dart';
 import 'package:emartconsumer/ui/dineInScreen/booking_confirmation_screen.dart';
+import 'package:emartconsumer/ui/vendorProductsScreen/newVendorProductsScreen.dart';
 import 'package:emartconsumer/ui/wallet/walletScreen.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
@@ -56,16 +55,6 @@ class _DineInRestaurantDetailsScreenState
   // FireStoreUtils.getDateAvailabilitySnapshot's own comment.
   SeatAvailability? _dateAvailability;
   bool _checkingDateAvailability = false;
-
-  // Offers preview (2026-08-30, §11.21 follow-up) - shows what special
-  // discount/coupon is available right now, before the customer books, so
-  // they can see the value of booking during a live "advance booking"
-  // window. Pure computation over widget.vendorModel (already in memory,
-  // zero extra reads) + FireStoreUtils().getAllCoupons() (a 5-minute
-  // static app-wide cache shared with the vendor page/Cart - calling it
-  // here costs a real read only if nothing else fetched coupons recently).
-  List<SpecialOfferPreviewRung> _offerRungs = [];
-  bool _offersLoaded = false;
 
   // Header image carousel - uses the restaurant's own gallery (vendor.photos,
   // set via Add Store) rather than the retired Dine-In-only Menu Photos
@@ -156,7 +145,6 @@ class _DineInRestaurantDetailsScreenState
       _checkDateAvailability();
     }
     _fetchWalletBalance();
-    _loadOffers();
     _headerCtrl = PageController();
     final photos = _menuPhotos;
     if (photos.length > 1) {
@@ -232,27 +220,6 @@ class _DineInRestaurantDetailsScreenState
       }
     } catch (_) {
       if (mounted) setState(() => _walletLoaded = true);
-    }
-  }
-
-  Future<void> _loadOffers() async {
-    try {
-      final coupons = await FireStoreUtils().getAllCoupons();
-      if (!mounted) return;
-      setState(() {
-        _offerRungs = SpecialDiscountPreview.buildLadder(
-          vendor: widget.vendorModel,
-          coupons: coupons,
-          // Booking itself has no Delivery/Takeaway concept - this preview
-          // is about what a Dining visit booked now will be worth, and
-          // Dining collapses to 'Takeaway' for tier-matching everywhere
-          // else in this codebase (see CartScreen's own comment on this).
-          orderType: 'Takeaway',
-        );
-        _offersLoaded = true;
-      });
-    } catch (_) {
-      if (mounted) setState(() => _offersLoaded = true);
     }
   }
 
@@ -395,8 +362,6 @@ class _DineInRestaurantDetailsScreenState
                 child: Column(
                   children: [
                     _buildRestaurantInfo(dark),
-                    const SizedBox(height: 8),
-                    _buildOffersPreview(dark),
                     const SizedBox(height: 8),
                     _buildDateSelector(dark),
                     const SizedBox(height: 8),
@@ -592,58 +557,38 @@ class _DineInRestaurantDetailsScreenState
     );
   }
 
-  // ─── Offers preview ───────────────────────────────────────────
-  // Shows what special discount/coupon is live right now, before the
-  // customer books - the whole point of this preview is that booking now
-  // locks this in for when they actually dine/pay (§11.21's table-booking-
-  // time-locked discount), even if this exact offer is gone by then.
-  Widget _buildOffersPreview(bool dark) {
-    if (!_offersLoaded || _offerRungs.isEmpty) return const SizedBox.shrink();
-    // Best (highest-saving) rung only - a short teaser, not the full ladder;
-    // the customer sees full detail in Cart/at checkout as usual.
-    final best = _offerRungs.reduce(
-        (a, b) => a.savingAmount >= b.savingAmount ? a : b);
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 16),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      decoration: BoxDecoration(
-        color: (dark ? AppThemeData.primary400 : AppThemeData.primary500)
-            .withValues(alpha: 0.10),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(
-            color: AppThemeData.primary500.withValues(alpha: 0.35)),
-      ),
-      child: Row(
-        children: [
-          const Icon(Icons.local_offer_rounded,
-              size: 18, color: AppThemeData.primary500),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  '${'Save'.tr()} ${amountShow(amount: best.savingAmount.toStringAsFixed(2))} ${'on orders above'.tr()} ${amountShow(amount: best.thresholdAmount.toStringAsFixed(2))}',
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700,
-                    color: dark ? Colors.white : Colors.black87,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  best.validTill != null
-                      ? '${'Book now to lock this in for your visit - live until'.tr()} ${best.validTill}'
-                      : 'Book now to lock this in for your visit'.tr(),
-                  style: TextStyle(
-                    fontSize: 11.5,
-                    color: dark ? Colors.white60 : Colors.grey.shade700,
-                  ),
-                ),
-              ],
+  // Compact "View menu" link (2026-09-01, moved beside the Select Date
+  // header at the user's request - was previously its own full-width row).
+  // Lets the customer check the menu/offers before committing to a booking,
+  // without leaving this flow - NewVendorProductsScreen always renders its
+  // own back arrow (automaticallyImplyLeading: false + a custom leading
+  // InkWell -> Navigator.pop, see that screen's SliverAppBar), so a plain
+  // push() here already returns cleanly to this exact booking screen.
+  Widget _buildMenuLink(bool dark) {
+    return GestureDetector(
+      onTap: () => push(context, NewVendorProductsScreen(vendorModel: widget.vendorModel)),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: AppThemeData.primary500.withValues(alpha: 0.10),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: AppThemeData.primary500.withValues(alpha: 0.3)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.restaurant_menu_rounded, size: 13, color: AppThemeData.primary500),
+            const SizedBox(width: 5),
+            Text(
+              'View menu'.tr(),
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: AppThemeData.primary500,
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -670,7 +615,13 @@ class _DineInRestaurantDetailsScreenState
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _sectionTitle(dark, Icons.calendar_today_rounded, 'Select Date'.tr()),
+          Row(
+            children: [
+              _sectionTitle(dark, Icons.calendar_today_rounded, 'Select Date'.tr()),
+              const Spacer(),
+              _buildMenuLink(dark),
+            ],
+          ),
           const SizedBox(height: 14),
           if (dates.isEmpty)
             Text(
@@ -1573,12 +1524,12 @@ class _DineInRestaurantDetailsScreenState
 
       // Vendor push notification (best-effort)
       try {
-        await FireStoreUtils.firestore.collection('notifications').add({
+        await FireStoreUtils.firestore.collection('notifications').addLogged({
           'to': vendor.fcmToken,
           'title': 'New Table Booking',
           'body': '${user.firstName} ${user.lastName} booked a table for $_guestCount guests on ${booking.bookingDate}',
           'createdAt': Timestamp.now(),
-        });
+        }, '_confirmBooking:notifications');
       } catch (_) {}
 
       // Fresh state for the next booking - this one succeeded.

@@ -155,6 +155,7 @@ class _DineInScreenState extends State<DineInScreen> {
 
   @override
   void dispose() {
+    _fireStoreUtils.closeDineInStream();
     _searchCtrl.dispose();
     super.dispose();
   }

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
 import '../../theme/app_them_data.dart';
+import '../../services/firestore_instrumentation.dart';
 import '../../services/helper.dart';
 import '../../main.dart';
 
@@ -48,7 +49,7 @@ class _AdminChatScreenState extends State<AdminChatScreen> {
     if (widget.orderId?.isNotEmpty ?? false) {
       query = query.where('orderId', isEqualTo: widget.orderId);
     }
-    _messagesStream = query.snapshots();
+    _messagesStream = query.snapshotsLogged('AdminChatScreen.initState:messages');
 
     if (widget.initialMessage?.isNotEmpty ?? false) {
       _controller.text = widget.initialMessage!;
@@ -76,7 +77,7 @@ class _AdminChatScreenState extends State<AdminChatScreen> {
     _sending = true;
     _controller.clear();
     try {
-      await FirebaseFirestore.instance.collection('messages').add({
+      await FirebaseFirestore.instance.collection('messages').addLogged({
         'content': content,
         'timestamp': Timestamp.now(),
         'userId': _userId,
@@ -85,7 +86,7 @@ class _AdminChatScreenState extends State<AdminChatScreen> {
         'isNewMsg': true,
         'isNewMsgCustomer': false,
         'isNewMsgAdmin': true,
-      });
+      }, '_send:messages');
       // Scroll is handled by the stream's postFrameCallback when the new
       // message arrives — no setState, no competing animateTo here.
     } catch (e) {

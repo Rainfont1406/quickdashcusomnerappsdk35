@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:developer';
 import 'dart:io';
@@ -42,7 +43,15 @@ class DeviceSessionResult {
 /// Distinct from a plain bool so the offline gate can tell "confirmed still
 /// active" apart from "couldn't get a definitive answer" — the latter fails
 /// open (closes the gate) rather than being treated as invalidated.
-enum ReconnectCheckResult { active, invalidated, unknown }
+///
+/// [offline] is deliberately separate from [unknown] (2026-09-01 fix): a
+/// genuine connectivity failure (no real internet, despite the OS reporting
+/// a WiFi/data connection - captive portal, DNS issue, etc.) must NOT fail
+/// open, or the offline gate's own "Retry" button would dismiss itself while
+/// still offline. [unknown] stays reserved for a response our own server
+/// side actually returned that we couldn't make sense of - a different
+/// failure that should keep failing open the way it always has.
+enum ReconnectCheckResult { active, invalidated, unknown, offline }
 
 /// One-active-device login gate with a 2-hour device-switch cooldown,
 /// enforced server-side (see DeviceSessionController::authorizeLogin on the
@@ -336,6 +345,18 @@ class DeviceSessionService {
         return ReconnectCheckResult.invalidated;
       }
       return ReconnectCheckResult.active;
+    } on SocketException catch (e) {
+      // No real network reachability - exactly the case the offline gate
+      // exists to catch, so it must NOT be treated as "unknown, fail open".
+      log('[DeviceSession] verifyOnReconnect: no connectivity: $e');
+      return ReconnectCheckResult.offline;
+    } on TimeoutException catch (e) {
+      // A 15s timeout with no response at all reads the same way - can't
+      // distinguish "our server is slow" from "request never left the
+      // device" from here, so treat it the same as a genuine offline signal
+      // rather than risk closing the gate while still offline.
+      log('[DeviceSession] verifyOnReconnect: timed out: $e');
+      return ReconnectCheckResult.offline;
     } catch (e) {
       log('[DeviceSession] verifyOnReconnect error: $e');
       return ReconnectCheckResult.unknown;

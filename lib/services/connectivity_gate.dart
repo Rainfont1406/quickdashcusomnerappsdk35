@@ -108,6 +108,14 @@ class _ConnectivityGateState extends State<ConnectivityGate> with WidgetsBinding
           // offline) — one of BehaviorTracker's three flush triggers.
           if (wasOffline) BehaviorTracker.onReconnected();
           break;
+        case ReconnectCheckResult.offline:
+          // Genuinely still offline (2026-09-01 fix) - do NOT close the
+          // gate. Tapping "Retry" while still offline used to dismiss this
+          // screen anyway (verifyOnReconnect's network failure was
+          // indistinguishable from "unknown", which fails open) and show
+          // the app underneath with no real connection. Leave _offline as
+          // it already is (true) so the gate stays up.
+          break;
       }
     } finally {
       _checking = false;

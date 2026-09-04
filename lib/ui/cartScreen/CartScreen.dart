@@ -23,6 +23,7 @@ import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/behavior/behavior_event_types.dart';
 import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/app_dialog.dart';
+import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
@@ -34,7 +35,6 @@ import 'package:uuid/uuid.dart';
 
 import 'package:emartconsumer/ui/productDetailsScreen/ProductDetailsScreen.dart';
 import 'package:emartconsumer/ui/vendorProductsScreen/newVendorProductsScreen.dart';
-import 'package:emartconsumer/ui/dineInScreen/dine_in_restaurant_details_screen.dart';
 import 'package:emartconsumer/widget/product_options_dialog.dart';
 import 'package:emartconsumer/widget/savings_banner.dart';
 import 'package:flutter/material.dart';
@@ -504,7 +504,7 @@ class _CartScreenState extends State<CartScreen> {
     await FireStoreUtils.firestore
         .collection(Setting)
         .doc('specialDiscountOffer')
-        .get()
+        .getLogged('getFoodType:Setting')
         .then((value) {
       debugPrint('[CART-PERF][getFoodType] Firestore Future resolved — ${sw.elapsedMilliseconds}ms');
       specialDiscountEnable = value.data()?['isEnable'] ?? false;
@@ -642,174 +642,11 @@ class _CartScreenState extends State<CartScreen> {
     return true;
   }
 
-  // Club/lounge venues don't offer walk-in "Dine Now" - this decides
-  // whether the current customer already has a table booked for tonight
-  // at this vendor, so the Dining tap handler above can either let them
-  // proceed or redirect them to Book a Table instead (2026-08-26). Mirrors
-  // findMatchingBookingId's own "today, or yesterday before 6am" window
-  // (Cloud Functions, orderVerification.js) so the two stay consistent.
-  Future<bool> _hasEligibleBookingTonight(VendorModel vendor) async {
-    final uid = MyAppState.currentUser?.userID ?? '';
-    if (uid.isEmpty) return false;
-    String dateKey(DateTime d) =>
-        '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
-    final now = DateTime.now();
-    final todayKey = dateKey(now);
-    final yesterdayKey = dateKey(now.subtract(const Duration(days: 1)));
-    final yesterdayEligible = now.hour < 6;
-
-    try {
-      final snap = await FirebaseFirestore.instance
-          .collection(ORDERS_TABLE)
-          .where('authorID', isEqualTo: uid)
-          .where('vendorID', isEqualTo: vendor.id)
-          .get();
-      return snap.docs.any((doc) {
-        final data = doc.data();
-        final status = data['status'] as String? ?? '';
-        if (status == ORDER_STATUS_REJECTED || status == ORDER_STATUS_CANCELLED) return false;
-        final key = data['bookingDateKey'] as String? ?? '';
-        return key == todayKey || (yesterdayEligible && key == yesterdayKey);
-      });
-    } catch (_) {
-      // Fails safe toward "no booking found" -> redirected to Book a
-      // Table, never silently lets a walk-in skip booking on an error.
-      return false;
-    }
-  }
-
-  // Soft warning for a club/lounge venue with no existing booking today
-  // (2026-08-29 redesign - replaces the old hard redirect-to-booking-screen
-  // behavior for this venue type, and the old both-features-on
-  // "How would you like to dine?" chooser, which no longer exists now that
-  // Cart never forces a booking detour). Not a block - the app can't verify
-  // physical entry - just a warning plus a way to book if they want to.
-  // Returns true if the customer chose to continue without booking, false
-  // if they backed out (typically via "Book a Table", which navigates away
-  // on its own) or dismissed the sheet.
-  Future<bool> _showClubNoBookingWarning() async {
-    final dark = isDarkMode(context);
-    final result = await showModalBottomSheet<bool>(
-      context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      builder: (sheetCtx) => Container(
-        padding: EdgeInsets.only(
-          left: 20, right: 20, top: 24,
-          bottom: MediaQuery.of(sheetCtx).padding.bottom + 24,
-        ),
-        decoration: BoxDecoration(
-          color: dark ? AppThemeData.darkBgSecondary : Colors.white,
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'No table booked here yet'.tr(),
-              style: TextStyle(
-                fontSize: 18,
-                fontFamily: AppThemeData.bold,
-                fontWeight: FontWeight.w700,
-                color: dark ? AppThemeData.darkTextPrimary : AppThemeData.neutral900,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Book a table first, or you may not get seated without a reservation.'.tr(),
-              style: TextStyle(
-                fontSize: 14,
-                fontFamily: AppThemeData.regular,
-                color: dark ? AppThemeData.darkTextTertiary : AppThemeData.neutral500,
-              ),
-            ),
-            const SizedBox(height: 18),
-            _diningChoiceCard(
-              dark: dark,
-              icon: Icons.event_seat_rounded,
-              title: 'Book a Table'.tr(),
-              subtitle: 'Reserve for today or tomorrow'.tr(),
-              onTap: () {
-                Navigator.of(sheetCtx).pop(false);
-                if (vendorModel != null) {
-                  push(context, DineInRestaurantDetailsScreen(vendorModel: vendorModel!, returnToCartOnSuccess: true));
-                }
-              },
-            ),
-            const SizedBox(height: 12),
-            _diningChoiceCard(
-              dark: dark,
-              icon: Icons.check_circle_outline_rounded,
-              title: "I'm already seated".tr(),
-              subtitle: 'Continue without booking'.tr(),
-              onTap: () => Navigator.of(sheetCtx).pop(true),
-            ),
-          ],
-        ),
-      ),
-    );
-    return result ?? false;
-  }
-
-  Widget _diningChoiceCard({
-    required bool dark,
-    required IconData icon,
-    required String title,
-    required String subtitle,
-    required VoidCallback onTap,
-  }) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: dark ? AppThemeData.darkBgTertiary : AppThemeData.neutral50,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: dark ? AppThemeData.darkBorderSecondary : AppThemeData.neutral200),
-        ),
-        child: Row(
-          children: [
-            Container(
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: AppThemeData.primary500,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Icon(icon, size: 22, color: Colors.white),
-            ),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    style: TextStyle(
-                      fontSize: 15,
-                      fontFamily: AppThemeData.semiBold,
-                      fontWeight: FontWeight.w600,
-                      color: dark ? AppThemeData.darkTextPrimary : AppThemeData.neutral900,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    subtitle,
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontFamily: AppThemeData.regular,
-                      color: dark ? AppThemeData.darkTextTertiary : AppThemeData.neutral500,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Icon(Icons.chevron_right_rounded, color: dark ? AppThemeData.grey400 : AppThemeData.grey500),
-          ],
-        ),
-      ),
-    );
-  }
+  // _hasEligibleBookingTonight / _showClubNoBookingWarning /
+  // _diningChoiceCard removed (2026-09-02, at the user's request) - Cart's
+  // Dining tap no longer nudges/warns/redirects toward table booking for
+  // any vendor type, including club/lounge. See the (now much shorter)
+  // Dining branch of the onTap handler above for what replaced this.
 
   String _lastPermCartHash = '';
 
@@ -3230,7 +3067,19 @@ class _CartScreenState extends State<CartScreen> {
         subTotal += double.parse(e.extras_price!) * e.quantity;
       }
       subTotal += double.parse(e.price) * e.quantity;
-      grandtotal = subTotal + double.parse(deliveryCharges) + tipValue;
+      // Guarded on order type (2026-08-31), not just trusting deliveryCharges/
+      // tipValue to already be zero for Dineaway - both fields are only ever
+      // reset back to '0.0'/0 by the Delivery<->Dineaway switch handler,
+      // which is dead code in the current build (nothing calls it anymore -
+      // the actual Delivery/Dineaway toggle lives elsewhere and this screen
+      // only reads the saved preference via getFoodType()). A value set
+      // during an earlier Delivery session in the same app run could
+      // otherwise linger and silently add a delivery charge/tip to a
+      // Dineaway order's total.
+      final bool isDeliveryOrder = selctedOrderTypeValue == "Delivery";
+      grandtotal = subTotal +
+          (isDeliveryOrder ? double.parse(deliveryCharges) : 0) +
+          (isDeliveryOrder ? tipValue : 0);
     }
 
     // Re-validate the applied coupon's minimum-order condition against the
@@ -3470,11 +3319,29 @@ class _CartScreenState extends State<CartScreen> {
     List<TaxModel> taxesToDisplay = [];
 
     if (taxList != null) {
+      // isTakeaway on a tax entry means "applies to genuine Takeaway
+      // orders only" (matches getVerifiedTaxSetting's server-side lookup
+      // exactly - see its `takeAway ? isTakeaway===true : ...` filter).
+      // Dining and Bill Pay are Dineaway-selected but NOT Takeaway, so they
+      // must fall into the same isTakeaway==false/null bucket as Delivery -
+      // the previous condition only ever matched isTakeaway==true slots
+      // for any Dineaway order, silently dropping every isTakeaway==false
+      // tax/fee (a vendor's flat "cart charge" among them) whenever the
+      // customer picked Dining or Bill Pay instead of Takeaway.
+      // isTakeaway on a tax entry means "applies to any Dineaway order" -
+      // Dining, Takeaway, AND Bill Pay all collapse into this one bucket
+      // (confirmed 2026-08-31 against BillPayRequestScreen.dart's own
+      // untouched, original comment: "Bill Pay is a Dineaway flow... only
+      // taxes tagged isTakeaway == true apply, same as Takeaway/Dining
+      // elsewhere") - isTakeaway==false/absent is exclusively real Delivery.
+      // A prior same-night fix here had this backwards (routed Dining into
+      // the false/Delivery bucket) before that reference file was found.
+      final bool isDineaway = selctedOrderTypeValue == "Dineaway";
       for (var element in taxList!) {
         // Check if the tax applies to the current order type
-        bool shouldApplyTax = (selctedOrderTypeValue == "Delivery" &&
-                (element.isTakeaway == false || element.isTakeaway == null)) ||
-            (selctedOrderTypeValue == "Dineaway" && element.isTakeaway == true);
+        bool shouldApplyTax = isDineaway
+            ? element.isTakeaway == true
+            : (element.isTakeaway == false || element.isTakeaway == null);
 
         print('Tax check - Tax: ${element.title}, shouldApplyTax: $shouldApplyTax, isTakeaway: ${element.isTakeaway}, orderType: $selctedOrderTypeValue');
 
@@ -3917,38 +3784,15 @@ class _CartScreenState extends State<CartScreen> {
           }
           return;
         }
-        if (title == 'Dining') {
-          // Table booking is no longer forced from the Cart's Dining tap for
-          // ANY vendor type (2026-08-29 redesign, superseding the
-          // 2026-08-25/26 versions of this block) - the user's call: a
-          // mid-checkout booking detour is worse than just letting the
-          // order through, and booking is now purely a proactive action
-          // from the Dine-In discovery screen for whoever wants to reserve
-          // ahead. Turnover ("rolling") venues get zero prompt either way -
-          // Dine Now always proceeds directly; their own seat-availability
-          // banner/guest picker (if configured) still surfaces later on
-          // PaymentScreen, unaffected by this change.
-          //
-          // Club/lounge (full_session) venues are the one exception that
-          // still needs SOME signal here: they have no live seat-occupancy
-          // count to fall back on (occupancy tracking is turnover-specific -
-          // a lounge doesn't "turn over" tables the same way), so an
-          // unbooked walk-in genuinely risks no table being available. Not
-          // a hard block though - the app has no way to verify physical
-          // entry, so it warns and lets the customer choose: book now, or
-          // continue anyway (e.g. they're already seated / arranged entry
-          // another way). Only shown when no eligible booking exists for
-          // today (or yesterday within the usual 6am buffer).
-          final bookingEnabled = vendorModel?.enabledDiveInFuture == true;
-          final isClubType = vendorModel?.seatingMode == 'full_session';
-          if (bookingEnabled && isClubType && vendorModel != null) {
-            final hasBooking = await _hasEligibleBookingTonight(vendorModel!);
-            if (!hasBooking) {
-              final continueAnyway = await _showClubNoBookingWarning();
-              if (!continueAnyway) return;
-            }
-          }
-        }
+        // Table booking is never nudged/warned/redirected from Cart's Dining
+        // tap, for ANY vendor type including club/lounge (2026-09-02, at the
+        // user's request - removed the club-specific booking-warning sheet
+        // that used to live here). Booking a table is purely a proactive
+        // action from the dedicated Dine-In discovery screen for whoever
+        // wants to reserve ahead - selecting Dining here always proceeds
+        // straight through. Turnover ("rolling") venues' own seat-
+        // availability banner/guest picker (if configured) still surfaces
+        // later on PaymentScreen, unaffected by this.
         if (!mounted) return;
         setState(() {
           selectedDineawayType = title;
