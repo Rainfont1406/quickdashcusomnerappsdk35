@@ -7,11 +7,11 @@ import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/OrderModel.dart';
 import 'package:emartconsumer/model/variant_info.dart';
-import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/app_dialog.dart';
 import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
+import 'package:emartconsumer/services/shared_orders_watcher.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/utils/network_image_widget.dart';
 import 'package:emartconsumer/ui/orderDetailsScreen/OrderDetailsScreen.dart';
@@ -33,26 +33,29 @@ class OrdersScreen extends StatefulWidget {
 
 class _OrdersScreenState extends State<OrdersScreen> {
   late Stream<List<OrderModel>> ordersFuture;
-  final FireStoreUtils _fireStoreUtils = FireStoreUtils();
   List<OrderModel> ordersList = [];
   late CartDatabase cartDatabase;
 
   @override
   void initState() {
     super.initState();
-    ordersFuture = _fireStoreUtils.getOrders(MyAppState.currentUser!.userID);
+    // 2026-09-06: routed through the shared, session-scoped watcher instead
+    // of FireStoreUtils.getOrders() - see SharedOrdersWatcher's own doc
+    // comment for why (ContainerScreen's drawer reuses this screen's
+    // Element/State across visits with no key, so a per-screen listener
+    // opened here only ever ran once per app session; a customer's Orders
+    // list could stay frozen on whatever it last saw, straight through
+    // real new orders, for days). Deliberately no dispose() override
+    // anymore - this listener is NOT screen-owned, so closing it just
+    // because this particular screen instance closed would defeat the
+    // point; it's torn down on logout instead (see main.dart).
+    ordersFuture = SharedOrdersWatcher.watch(MyAppState.currentUser!.userID);
   }
 
   @override
   void didChangeDependencies() {
     cartDatabase = Provider.of<CartDatabase>(context, listen: false);
     super.didChangeDependencies();
-  }
-
-  @override
-  void dispose() {
-    FireStoreUtils().closeOrdersStream();
-    super.dispose();
   }
 
   Future<void> _startReOrder(
@@ -102,12 +105,23 @@ class _OrdersScreenState extends State<OrdersScreen> {
               }
               final allOrders = snapshot.data ?? [];
 
-              // Delivery is off: hide only Delivery-type orders from
-              // history (Dineaway/Takeaway order history stays visible),
-              // same per-order isTakeaway check CartScreen uses for tax.
+              // Delivery is off: hide only genuine Delivery-type orders from
+              // history (Dineaway/Takeaway order history stays visible).
+              //
+              // 2026-09-07 fix: the old check (`takeAway == false ||
+              // takeAway == null`) was wrong - orderType is only ever set
+              // for the Dineaway feature ("Takeaway" or "Dining"), and a
+              // genuine Dining order also has takeAway == false (that field
+              // only distinguishes Takeaway pickup from Dining eat-in
+              // WITHIN Dineaway, it says nothing about Delivery vs Dineaway
+              // on its own). A real Delivery order never sets orderType at
+              // all, so that's the correct, unambiguous signal. Confirmed
+              // live: with delivery_active currently false in production,
+              // this bug hid every one of a real customer's last 8 Dining
+              // orders from their own Orders screen, leaving only much
+              // older genuine Takeaway orders visible.
               final visibleOrders = allOrders.where((order) {
-                final bool isDeliveryOrder =
-                    order.takeAway == false || order.takeAway == null;
+                final bool isDeliveryOrder = order.orderType == null;
                 return !(isDeliveryOrder && !deliveryActive);
               }).where((order) {
                 // A Bill Pay request the vendor sent (initiatedBy=='vendor')
