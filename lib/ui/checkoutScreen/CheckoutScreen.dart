@@ -1110,7 +1110,16 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         payment_method: widget.paymentType,
         tipValue: widget.tipValue,
         sectionId: sectionConstantModel?.id ?? '',
-        adminCommission: (widget.take_away ?? false)
+        // widget.take_away alone is narrow (true only for genuine Takeaway
+        // pickup, false for both Delivery AND Dining) - the admin panel only
+        // ever configures two commission tiers ("Admin Commission Delivery"
+        // and "Admin Commission Takeaway", see section/edit.blade.php), with
+        // no separate Dining tier, matching the same Dineaway-collapse
+        // already used for tax/special-discount everywhere else in this
+        // codebase. orderType included so Dining/Bill Pay get the Takeaway
+        // tier too, not the Delivery one. See
+        // ORDER_TYPE_NAMING_AUDIT_2026-09-07.html §bug9.
+        adminCommission: ((widget.take_away ?? false) || widget.orderType != null)
             ? (sectionConstantModel?.adminCommision?.takeawayCommission ?? 0).toString()
             : (sectionConstantModel?.adminCommision?.commission ?? 0).toString(),
         adminCommissionType: sectionConstantModel?.adminCommision?.type,
