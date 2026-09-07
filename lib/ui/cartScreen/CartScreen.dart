@@ -795,7 +795,14 @@ class _CartScreenState extends State<CartScreen> {
 
     // Restore the original order's service type BEFORE any await so that
     // getDeliveyData() / _validateCart() later use the correct mode.
-    final bool wasDineaway = orderModel.takeAway == true;
+    // orderModel.takeAway alone is narrow (true only for genuine Takeaway
+    // pickup, false for both Delivery and Dining) — re-ordering a past
+    // Dining or Bill Pay order would otherwise silently reset it to
+    // Delivery. orderType is set for all three Dineaway sub-types, so
+    // combine both, same as the isDineaway pattern used elsewhere.
+    // See ORDER_TYPE_NAMING_AUDIT_2026-09-07.html §bug5.
+    final bool wasDineaway = (orderModel.takeAway ?? false) ||
+        ((orderModel.orderType ?? '').isNotEmpty);
     final String restoredOrderType = wasDineaway ? 'Dineaway' : 'Delivery';
     final String? restoredDineawayType = wasDineaway ? orderModel.orderType : null;
     if (mounted) {
