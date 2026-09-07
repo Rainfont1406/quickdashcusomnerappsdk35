@@ -1440,7 +1440,8 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                             ? 'Type : Dineaway (Dining)'.tr()
                             : orderModel.orderType == "Takeaway"
                                 ? 'Type : Dineaway (Takeaway)'.tr()
-                                : 'Type : Takeaway'.tr(),
+                                // Bill Pay (vendor-initiated) — see ORDER_TYPE_NAMING_AUDIT_2026-09-07.html §bug3
+                                : 'Type : Dineaway (Bill Pay)'.tr(),
                         style: TextStyle(
                             fontSize: 13,
                             letterSpacing: 0.5,
@@ -1733,6 +1734,15 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
     }
     List<TaxModel> taxesToDisplay = [];
     double totalTaxAmount = 0.0;
+    // isDineaway covers Dining, Takeaway, AND Bill Pay - takeAway alone can't
+    // detect Dining/Bill Pay (narrowed to mean only genuine Takeaway by the
+    // 2026-08-26 fix), so orderType is needed too. Hoisted out of the
+    // taxModel block below so the Delivery Charges/Tip Amount row gates
+    // further down can reuse it instead of the narrower takeAway==false
+    // check, which incorrectly showed those Delivery-only rows for Dining
+    // orders too - see ORDER_TYPE_NAMING_AUDIT_2026-09-07.html §bug4.
+    final bool isDineaway = (orderModel.takeAway ?? false) ||
+        ((orderModel.orderType ?? '').isNotEmpty);
     if (orderModel.taxModel != null) {
       // isTakeaway on a tax entry means "applies to any Dineaway order" -
       // Dining, Takeaway, AND Bill Pay all collapse into this one bucket
@@ -1745,8 +1755,6 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
       // takeAway alone can't detect Dining/Bill Pay (narrowed to mean only
       // genuine Takeaway by the 2026-08-26 fix, for an unrelated
       // Vendor-App-button-gating reason), so orderType is needed too.
-      final bool isDineaway = (orderModel.takeAway ?? false) ||
-          ((orderModel.orderType ?? '').isNotEmpty);
       for (var element in orderModel.taxModel!) {
         bool shouldApplyTax = isDineaway
             ? element.isTakeaway == true
@@ -1795,9 +1803,9 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
             _billRow('Special Discount'.tr(), '- ${amountShow(amount: orderModel.specialDiscount!['special_discount'].toString())}', valueColor: AppThemeData.primary500),
           if ((double.tryParse(discount.toString()) ?? 0.0) > 0.0)
             _billRow('Discount'.tr(), '- ${amountShow(amount: discount.toString())}', valueColor: AppThemeData.primary500),
-          if (orderModel.takeAway == false && (double.tryParse(orderModel.deliveryCharge.toString()) ?? 0.0) > 0.0)
+          if (!isDineaway && (double.tryParse(orderModel.deliveryCharge.toString()) ?? 0.0) > 0.0)
             _billRow('Delivery Charges'.tr(), orderModel.deliveryCharge == null ? amountShow(amount: "0") : amountShow(amount: orderModel.deliveryCharge!)),
-          if (orderModel.takeAway == false && (double.tryParse(orderModel.tipValue.toString()) ?? 0.0) > 0.0)
+          if (!isDineaway && (double.tryParse(orderModel.tipValue.toString()) ?? 0.0) > 0.0)
             _billRow('Tip Amount'.tr(), orderModel.tipValue!.isEmpty ? amountShow(amount: "0.0") : amountShow(amount: orderModel.tipValue)),
           ListView.builder(
             itemCount: taxesToDisplay.length,
@@ -1881,10 +1889,13 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
     // here that they saw at checkout instead of one opaque "Tax" total.
     final double taxBase = (subtotalAmount - discountAmount - specialDiscountAmount).clamp(0.0, double.infinity);
     List<TaxModel> taxesToDisplay = [];
+    // See the matching comment further up this file's tax loop. Hoisted out
+    // of the taxModel block below so the Delivery Charges/Tip Amount row
+    // gates further down can reuse it - see
+    // ORDER_TYPE_NAMING_AUDIT_2026-09-07.html §bug4.
+    final bool isNonDelivery = (orderModel.takeAway ?? false) ||
+        ((orderModel.orderType ?? '').isNotEmpty);
     if (orderModel.taxModel != null) {
-      // See the matching comment further up this file's tax loop.
-      final bool isNonDelivery = (orderModel.takeAway ?? false) ||
-          ((orderModel.orderType ?? '').isNotEmpty);
       for (var element in orderModel.taxModel!) {
         bool shouldApplyTax = (!isNonDelivery && (element.isTakeaway == false || element.isTakeaway == null)) ||
             (isNonDelivery && element.isTakeaway == true);
@@ -1922,9 +1933,9 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
             _billRow('Special Discount'.tr(), '- ${amountShow(amount: specialDiscountAmount.toString())}', valueColor: AppThemeData.primary500),
           if (discountAmount > 0)
             _billRow('Discount'.tr(), '- ${amountShow(amount: discountAmount.toString())}', valueColor: AppThemeData.primary500),
-          if (orderModel.takeAway == false && deliveryChargeAmount > 0)
+          if (!isNonDelivery && deliveryChargeAmount > 0)
             _billRow('Delivery Charges'.tr(), amountShow(amount: deliveryChargeAmount.toString())),
-          if (orderModel.takeAway == false && tipAmount > 0)
+          if (!isNonDelivery && tipAmount > 0)
             _billRow('Tip Amount'.tr(), amountShow(amount: tipAmount.toString())),
           if (taxesToDisplay.isNotEmpty)
             ...taxesToDisplay.map((taxModel) => _billRow(
