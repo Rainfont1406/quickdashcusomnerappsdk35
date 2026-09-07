@@ -122,8 +122,13 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     if (widget.isPaymentDone) {
       // Payment already collected — validate address then place order
       WidgetsBinding.instance.addPostFrameCallback((_) async {
-        final bool isTakeaway = widget.take_away ?? false;
-        if (!isTakeaway && widget.address == null) {
+        // 2026-09-07 fix: was `widget.take_away ?? false`, which is only
+        // true for genuine Takeaway pickup - false for both Delivery AND
+        // Dining, so this required a delivery address for Dining orders
+        // too. widget.orderType is null only for genuine Delivery (see
+        // ORDER_TYPE_NAMING_AUDIT_2026-09-07.html).
+        final bool isDeliveryOrder = widget.orderType == null;
+        if (isDeliveryOrder && widget.address == null) {
           if (mounted) {
             ScaffoldMessenger.of(context)
               ..hideCurrentSnackBar()
@@ -143,9 +148,19 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
   // ── UI helpers ──────────────────────────────────────────────────────────────
 
-  // Order-type pill helpers — aware of Dining / Bill Pay sub-types
-  Color _pillColor(bool isTakeaway) {
-    if (!isTakeaway) return AppThemeData.primary500; // delivery
+  // Order-type pill helpers — aware of Dining / Bill Pay sub-types.
+  //
+  // 2026-09-07 fix: these took a bool param that every call site filled
+  // with `widget.take_away ?? false` (narrow: true only for genuine
+  // Takeaway, false for both Delivery AND Dining) and gated on `if
+  // (!isTakeaway) return <delivery thing>` BEFORE the switch below ever
+  // ran - so the "aware of Dining / Bill Pay" switch was unreachable dead
+  // code for those two cases, and every Dine-In checkout showed a
+  // "Delivery Order" pill. No parameter needed at all: widget.orderType
+  // alone (null only for genuine Delivery) is the correct, complete signal
+  // - see ORDER_TYPE_NAMING_AUDIT_2026-09-07.html.
+  Color _pillColor() {
+    if (widget.orderType == null) return AppThemeData.primary500; // delivery
     switch (widget.orderType) {
       case 'Dining':
         return Colors.purple;
@@ -156,8 +171,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     }
   }
 
-  IconData _pillIcon(bool isTakeaway) {
-    if (!isTakeaway) return Icons.delivery_dining_rounded;
+  IconData _pillIcon() {
+    if (widget.orderType == null) return Icons.delivery_dining_rounded;
     switch (widget.orderType) {
       case 'Dining':
         return Icons.restaurant_rounded;
@@ -168,8 +183,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     }
   }
 
-  String _pillLabel(bool isTakeaway) {
-    if (!isTakeaway) return 'Delivery Order'.tr();
+  String _pillLabel() {
+    if (widget.orderType == null) return 'Delivery Order'.tr();
     switch (widget.orderType) {
       case 'Dining':
         return 'Dine-In Order'.tr();
@@ -208,7 +223,15 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   @override
   Widget build(BuildContext context) {
     final bool dark = isDarkMode(context);
-    final bool isTakeaway = widget.take_away ?? false;
+    // 2026-09-07 fix: was `widget.take_away ?? false` (narrow: true only
+    // for genuine Takeaway, false for both Delivery AND Dining), used below
+    // to decide whether to show the "Delivering to [address]" card - which
+    // meant a Dine-In checkout would show it too whenever widget.address
+    // happened to be non-null (e.g. a returning customer's saved address
+    // riding along regardless of order type). orderType == null is the
+    // correct, complete "is this genuinely a Delivery order" signal - see
+    // ORDER_TYPE_NAMING_AUDIT_2026-09-07.html.
+    final bool isDeliveryOrder = widget.orderType == null;
 
     return Scaffold(
       backgroundColor: dark ? AppThemeData.surfaceDark : AppThemeData.grey100,
@@ -299,22 +322,22 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                     padding:
                         const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
                     decoration: BoxDecoration(
-                      color: _pillColor(isTakeaway).withOpacity(0.1),
+                      color: _pillColor().withOpacity(0.1),
                       borderRadius: BorderRadius.circular(20),
                     ),
                     child: Row(mainAxisSize: MainAxisSize.min, children: [
                       Icon(
-                        _pillIcon(isTakeaway),
+                        _pillIcon(),
                         size: 14,
-                        color: _pillColor(isTakeaway),
+                        color: _pillColor(),
                       ),
                       const SizedBox(width: 6),
                       Text(
-                        _pillLabel(isTakeaway),
+                        _pillLabel(),
                         style: TextStyle(
                           fontSize: 12,
                           fontFamily: AppThemeData.semiBold,
-                          color: _pillColor(isTakeaway),
+                          color: _pillColor(),
                         ),
                       ),
                     ]),
@@ -343,7 +366,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                 const SizedBox(height: 12),
 
                 // ── Delivery address ─────────────────────────────────────────
-                if (!isTakeaway && widget.address != null)
+                if (isDeliveryOrder && widget.address != null)
                   _SectionCard(
                     dark: dark,
                     child: Padding(
@@ -393,7 +416,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                       ),
                     ),
                   ),
-                if (!isTakeaway && widget.address != null)
+                if (isDeliveryOrder && widget.address != null)
                   const SizedBox(height: 12),
 
                 // ── Schedule ─────────────────────────────────────────────────
@@ -663,8 +686,15 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
   // Returns true if the order can proceed, false if it should be blocked.
   Future<bool> _validateAndConfirmDelivery() async {
-    final bool isTakeaway = widget.take_away ?? false;
-    if (isTakeaway) return true; // takeaway needs no delivery address
+    // 2026-09-07 fix: was `widget.take_away ?? false`, which is only true
+    // for genuine Takeaway - false for both Delivery AND Dining, so this
+    // function would fall through and require a delivery address for
+    // Dining orders too (blocking checkout with "Please add a delivery
+    // address to continue." for any dine-in customer with no address on
+    // file). orderType == null is the correct "is this genuinely a
+    // Delivery order" signal - see ORDER_TYPE_NAMING_AUDIT_2026-09-07.html.
+    final bool isDeliveryOrder = widget.orderType == null;
+    if (!isDeliveryOrder) return true; // Dineaway (Dining/Takeaway/Bill Pay) needs no delivery address
 
     // ── Case 1: address is null ──────────────────────────────────────────────
     if (widget.address == null) {
