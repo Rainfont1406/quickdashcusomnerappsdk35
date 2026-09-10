@@ -253,22 +253,81 @@ class OrderModel {
     return null;
   }
 
+  // Trimmed snapshot of the embedded vendor written into every order - full
+  // VendorModel.toJson() writes ~65 fields (~11KB, ~65% of a typical order
+  // document). A cross-app field-usage trace (Sept 2026) found only these
+  // are ever read, across the Customer App, Vendor App, Vendor Web, the
+  // Admin Panel's Blade views, and its 4 order-triggered Cloud Functions
+  // (verifyOrder/reconcileBillPay/dineOccupancy/vendorEarnings - confirmed
+  // clean, they key off vendorID, never this embedded copy). VendorModel/
+  // User.fromJson() default every field not present, so omitted fields
+  // just read back as empty/false/0 everywhere this doc is read - not a
+  // partial-parse risk. `id` deliberately omitted - order.vendorID is the
+  // canonical field; the 2 read sites that used to read vendor.id now read
+  // vendorID directly instead. specialDiscountEnable is kept because it
+  // gates whether a discount that applied at order time still shows on old
+  // receipts - it must reflect state at order time, not the vendor's
+  // current setting, so it can't just be looked up live.
+  static Map<String, dynamic> _vendorSnapshot(VendorModel v) => {
+    'title': v.title,
+    'photo': v.photo,
+    'phonenumber': v.phonenumber,
+    'author': v.author,
+    'location': v.location,
+    'locality': v.locality,
+    'landmark': v.landmark,
+    'latitude': v.latitude,
+    'longitude': v.longitude,
+    'specialDiscountEnable': v.specialDiscountEnable,
+    'enableBillPaymentTimer': v.enableBillPaymentTimer,
+    'section_id': v.section_id,
+    'fcmToken': v.fcmToken,
+  };
+
+  // Same reasoning as _vendorSnapshot above, for the embedded customer
+  // (~40 User fields down to these 7, ~3KB down to a few hundred bytes).
+  // `id` (not `userID`) matches User.toJson()'s own key convention, so a
+  // round trip through User.fromJson() is unaffected. `location` is kept
+  // because it freezes the delivery address as it was at order time.
+  static Map<String, dynamic> _authorSnapshot(User a) => {
+    'id': a.userID,
+    'firstName': a.firstName,
+    'lastName': a.lastName,
+    'phoneNumber': a.phoneNumber,
+    'email': a.email,
+    'fcmToken': a.fcmToken,
+    'location': a.location.toJson(),
+  };
+
+  // Every product in an order shares the order's own vendorID (single-vendor
+  // cart, enforced at add-to-cart time in CartDatabase.addProduct) - blanked
+  // here instead of repeating the same ~20-char id on every line item. Kept
+  // as an empty string, not omitted, so CartProduct.fromJson's non-nullable
+  // vendorID field doesn't throw on read. Anything needing a line item's
+  // vendor must read the order's own vendorID instead - see
+  // OrderDetailsScreen's reorder buttons, updated accordingly.
+  static Map<String, dynamic> _productSnapshot(CartProduct e) {
+    final json = e.toJson();
+    json['vendorID'] = '';
+    return json;
+  }
+
   Map<String, dynamic> toJson() {
     return {
       'address': address == null ? null : this.address!.toJson(),
-      'author': author.toJson(),
+      'author': _authorSnapshot(author),
       'authorID': authorID,
       'payment_method': payment_method,
       'createdAt': createdAt,
       'id': id,
-      'products': products.map((e) => e.toJson()).toList(),
+      'products': products.map((e) => _productSnapshot(e)).toList(),
       'status': status,
       'discount': discount,
       'couponCode': couponCode,
       'couponId': couponId,
       'notes': notes,
       'payment_shared': payment_shared,
-      'vendor': vendor.toJson(),
+      'vendor': _vendorSnapshot(vendor),
       'vendorID': vendorID,
       'section_id': sectionId,
       'adminCommission': adminCommission,

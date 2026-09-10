@@ -9,6 +9,7 @@ import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/app_dialog.dart';
 import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/services/helper.dart';
+import 'package:emartconsumer/services/order_extras_parsing.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
@@ -161,7 +162,7 @@ class _BillPayRequestScreenState extends State<BillPayRequestScreen> {
 
   Future<void> _notifyVendorOfDecline(OrderModel order) async {
     try {
-      final vendorId = order.vendor.id;
+      final vendorId = order.vendorID;
       if (vendorId.isEmpty) return;
       final doc =
           await FireStoreUtils.firestore.collection(VENDORS).doc(vendorId).getLogged('_notifyVendorOfDecline:VENDORS');
@@ -302,15 +303,27 @@ class _BillPayRequestScreenState extends State<BillPayRequestScreen> {
                       fontSize: 12,
                       color: AppThemeData.neutral400,
                     ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                   ),
-                if (item.extras != null && (item.extras as List).isNotEmpty)
+                // parseOrderExtras (shared, defensive - see
+                // order_extras_parsing.dart): this was previously a raw
+                // `.join(', ')` with zero cleaning AND no maxLines/overflow -
+                // the least defended of every extras-rendering spot found in
+                // this app, in the screen customers use to review a
+                // vendor-sent bill. A corrupted extras entry here would have
+                // rendered completely unbounded, worse than the OrdersScreen
+                // bug this whole fix traces back to.
+                if (parseOrderExtras(item.extras).isNotEmpty)
                   Text(
-                    '+ ${(item.extras as List).join(', ')}',
+                    '+ ${parseOrderExtras(item.extras).join(', ')}',
                     style: TextStyle(
                       fontFamily: AppThemeData.regular,
                       fontSize: 12,
                       color: AppThemeData.neutral400,
                     ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                   ),
               ],
             ),

@@ -15,6 +15,7 @@ import 'package:emartconsumer/model/TaxModel.dart';
 import 'package:emartconsumer/model/User.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/model/variant_info.dart';
+import 'package:emartconsumer/services/order_extras_parsing.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/device_session_service.dart';
 import 'package:emartconsumer/services/helper.dart';
@@ -719,22 +720,9 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                     try { variantInfo = VariantInfo.fromJson(jsonDecode(rawVariant)); } catch (_) {}
                   }
 
-                  // Parse extras inside builder
-                  List<String> addons = [];
-                  final dynamic rawExtras = item.extras;
-                  if (rawExtras is List) {
-                    addons = rawExtras
-                        .map((e) => e.toString().replaceAll('"', '').replaceAll('\\', '').trim())
-                        .where((s) => s.isNotEmpty && s != 'null' && s != '[]')
-                        .toList();
-                  } else if (rawExtras is String && rawExtras.isNotEmpty && rawExtras != '[]') {
-                    addons = rawExtras
-                        .replaceAll('[', '').replaceAll(']', '').replaceAll('"', '')
-                        .split(',')
-                        .map((s) => s.trim())
-                        .where((s) => s.isNotEmpty)
-                        .toList();
-                  }
+                  // Parse extras (shared, defensive parser - see
+                  // order_extras_parsing.dart)
+                  final List<String> addons = parseOrderExtras(item.extras);
 
                   return Padding(
                     padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
@@ -1536,28 +1524,9 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                   variantIno = VariantInfo.fromJson(jsonDecode(rawVi2));
                 } catch (_) {}
               }
-              // Parse extras defensively from dynamic field
-              List<String> addon = [];
-              final dynamic rawExtras2 = item.extras;
-              if (rawExtras2 is List) {
-                addon = rawExtras2
-                    .map((e) =>
-                        e.toString().replaceAll('"', '').replaceAll('\\', '').trim())
-                    .where((s) => s.isNotEmpty && s != 'null' && s != '[]')
-                    .toList();
-              } else if (rawExtras2 is String &&
-                  rawExtras2.isNotEmpty &&
-                  rawExtras2 != '[]') {
-                final cleaned = rawExtras2
-                    .replaceAll('[', '')
-                    .replaceAll(']', '')
-                    .replaceAll('"', '');
-                addon = cleaned
-                    .split(',')
-                    .map((s) => s.trim())
-                    .where((s) => s.isNotEmpty)
-                    .toList();
-              }
+              // Parse extras (shared, defensive parser - see
+              // order_extras_parsing.dart)
+              final List<String> addon = parseOrderExtras(item.extras);
               return FutureBuilder<ProductModel>(
                 future: _cachedProductByID(item.id),
                 builder: (context, snapshot) {
@@ -1645,7 +1614,7 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                             if (productModel!.itemAttributes != null) {
                               if (productModel!.itemAttributes!.variants!.where((element) => element.variant_sku == variantIno?.variant_sku).isNotEmpty) {
                                 if (int.parse(productModel!.itemAttributes!.variants!.where((element) => element.variant_sku == variantIno?.variant_sku).first.variant_quantity.toString()) >= item.quantity) {
-                                  cartDatabase.reAddProduct(CartProduct(id: item.id + "~" + (variantIno != null ? variantIno.variant_id.toString() : ""), name: item.name, photo: item.photo, price: item.price, discountPrice: item.discountPrice, vendorID: item.vendorID, quantity: item.quantity, extras_price: item.extras_price, extras: item.extras, category_id: item.category_id, variant_info: variantIno));
+                                  cartDatabase.reAddProduct(CartProduct(id: item.id + "~" + (variantIno != null ? variantIno.variant_id.toString() : ""), name: item.name, photo: item.photo, price: item.price, discountPrice: item.discountPrice, vendorID: orderModel.vendorID, quantity: item.quantity, extras_price: item.extras_price, extras: item.extras, category_id: item.category_id, variant_info: variantIno));
                                   await hideProgress();
                                   ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Product is added in cart".tr())));
                                 } else {
@@ -1654,7 +1623,7 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                                 }
                               } else {
                                 if (productModel!.quantity >= item.quantity || productModel!.quantity == -1) {
-                                  cartDatabase.reAddProduct(CartProduct(id: item.id + "~" + (variantIno != null ? variantIno.variant_id.toString() : ""), name: item.name, photo: item.photo, price: item.price, discountPrice: item.discountPrice, vendorID: item.vendorID, quantity: item.quantity, extras_price: item.extras_price, extras: item.extras, category_id: item.category_id, variant_info: variantIno));
+                                  cartDatabase.reAddProduct(CartProduct(id: item.id + "~" + (variantIno != null ? variantIno.variant_id.toString() : ""), name: item.name, photo: item.photo, price: item.price, discountPrice: item.discountPrice, vendorID: orderModel.vendorID, quantity: item.quantity, extras_price: item.extras_price, extras: item.extras, category_id: item.category_id, variant_info: variantIno));
                                   await hideProgress();
                                   ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Product is added in cart".tr())));
                                 } else {
@@ -1670,7 +1639,7 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                                   CartProduct element = cartProducts.firstWhere((product) => product.id == productModel!.id + "~" + (productModel!.variant_info != null ? productModel!.variant_info!.variant_id.toString() : ""));
                                   await cartDatabase.updateProduct(CartProduct(id: element.id, name: element.name, photo: element.photo, price: element.price, vendorID: element.vendorID, quantity: element.quantity + element.quantity, category_id: element.category_id, extras_price: element.extras_price, extras: element.extras, discountPrice: element.discountPrice));
                                 } else {
-                                  cartDatabase.reAddProduct(CartProduct(id: item.id + "~" + (variantIno != null ? variantIno.variant_id.toString() : ""), name: item.name, photo: item.photo, price: item.price, discountPrice: item.discountPrice, vendorID: item.vendorID, quantity: item.quantity, extras_price: item.extras_price, extras: item.extras, category_id: item.category_id, variant_info: variantIno));
+                                  cartDatabase.reAddProduct(CartProduct(id: item.id + "~" + (variantIno != null ? variantIno.variant_id.toString() : ""), name: item.name, photo: item.photo, price: item.price, discountPrice: item.discountPrice, vendorID: orderModel.vendorID, quantity: item.quantity, extras_price: item.extras_price, extras: item.extras, category_id: item.category_id, variant_info: variantIno));
                                 }
                                 await hideProgress();
                                 ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Product is added in cart".tr())));
@@ -2539,6 +2508,11 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
           letterSpacing: 0.1,
           color: textColor,
         ),
+        // Rendering-level safety net (2026-09-09) - see
+        // order_extras_parsing.dart's own comment for why this matters
+        // independent of upstream parsing.
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
       ),
     );
   }

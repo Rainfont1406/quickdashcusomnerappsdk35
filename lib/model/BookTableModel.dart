@@ -121,16 +121,54 @@ class BookTableModel {
         capacityReleased: parsedJson['capacityReleased'] == true);
   }
 
+  // Same trim as OrderModel._vendorSnapshot (2026-09-06) - full
+  // VendorModel.toJson() dumped ~65 fields into every booking (confirmed
+  // live: a recent booked_table document ran ~15KB of embedded vendor
+  // alone). A cross-app field-usage trace found only these fields are ever
+  // read off booking.vendor across the Customer App, Vendor App, and
+  // Vendor Web. VendorModel.fromJson() defaults every omitted field, so
+  // this isn't a partial-parse risk on read.
+  static Map<String, dynamic> _vendorSnapshot(VendorModel v) => {
+    'title': v.title,
+    'photo': v.photo,
+    'phonenumber': v.phonenumber,
+    'author': v.author,
+    'location': v.location,
+    'locality': v.locality,
+    'landmark': v.landmark,
+    'latitude': v.latitude,
+    'longitude': v.longitude,
+    'specialDiscountEnable': v.specialDiscountEnable,
+    'enableBillPaymentTimer': v.enableBillPaymentTimer,
+    'section_id': v.section_id,
+    'fcmToken': v.fcmToken,
+  };
+
+  // Same trim as OrderModel._authorSnapshot - the booking's own
+  // guestFirstName/guestLastName/guestPhone fields already carry the
+  // actually-displayed guest details (see the field docs above), so this
+  // embed only needs to cover the handful of author.X reads found on
+  // booking.author (map-directions location, fcmToken for notifications).
+  static Map<String, dynamic> _authorSnapshot(User a) => {
+    'id': a.userID,
+    'firstName': a.firstName,
+    'lastName': a.lastName,
+    'phoneNumber': a.phoneNumber,
+    'email': a.email,
+    'fcmToken': a.fcmToken,
+    'location': a.location.toJson(),
+  };
+
   Map<String, dynamic> toJson() {
     return {
-      'author': author.toJson(),
+      'author': _authorSnapshot(author),
       'authorID': authorID,
       'createdAt': createdAt,
       'date': date,
       'id': id,
       'section_id': section_id,
       'status': status,
-      'vendor': vendor.toJson(),
+      'vendor': _vendorSnapshot(vendor),
       'vendorID': vendorID,
       'guestEmail': guestEmail,
       'guestFirstName': guestFirstName,

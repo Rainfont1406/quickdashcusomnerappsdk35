@@ -20,6 +20,7 @@ import 'package:emartconsumer/model/offer_model.dart';
 import 'package:emartconsumer/utils/network_image_widget.dart';
 import 'package:emartconsumer/model/variant_info.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/order_extras_parsing.dart';
 import 'package:emartconsumer/services/behavior/behavior_event_types.dart';
 import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/app_dialog.dart';
@@ -446,28 +447,13 @@ class _CartScreenState extends State<CartScreen> {
   // network path itself (getFoodType's one SharedPreferences read is a
   // separate, unrelated local value, not a cache of the Firestore call).
   Future<void> getTaxData() async {
-    // This screen's own `taxList` field (above) shadows the GLOBAL `taxList`
-    // in constants.dart that ContainerScreen.getTaxList() already populates
-    // once per session, before CartScreen ever mounts — unqualified
-    // `taxList` inside this class always meant the local field, so the
-    // previous version of this guard never actually reused Container's
-    // fetch, only CartScreen's own repeat calls (getDeliveyData,
-    // _populateFromBillPay). Checking `globalTaxList.taxList` explicitly
-    // (via the prefixed import above) is what actually closes that gap.
-    // getTaxList()'s query is section-wide, not order-type-scoped (confirmed
-    // against TaxModel.isTakeaway — the flag exists for consumers to filter
-    // by afterward, not something the fetch itself branches on), so the
-    // same global list is valid to reuse regardless of Delivery/Takeaway/
-    // Dineaway mode. Falls through to a real fetch if the global is still
-    // empty (nothing has populated it yet, or a section genuinely has zero
-    // enabled tax rates) or on a caught error below, so correctness never
-    // depends on call order — and a fresh fetch here also writes back to
-    // the global, so whichever screen fetches first benefits the other.
-    if (globalTaxList.taxList != null && globalTaxList.taxList!.isNotEmpty) {
-      taxList = globalTaxList.taxList;
-      debugPrint('[CART-PERF][getTaxData] skipped — reused ContainerScreen.getTaxList() (${taxList!.length} rates)');
-      return;
-    }
+    // 2026-09-06: no longer short-circuits on "global list is non-empty" -
+    // that reused ContainerScreen's very first fetch for the rest of the
+    // whole app session with no expiry at all. FireStoreUtils.getTaxList()
+    // now has its own explicit 2-minute TTL cache, so calling it
+    // unconditionally here is already free within that window and correctly
+    // bounded past it - a real admin tax-rate change now reaches Cart within
+    // 2 minutes instead of potentially never, for the rest of the session.
     final sw = Stopwatch()..start();
     debugPrint('[CART-PERF][getTaxData] source=Firestore(tax collection, '
         'compound where sectionId+enable) request START at ${DateTime.now().toIso8601String()}');
@@ -898,7 +884,10 @@ class _CartScreenState extends State<CartScreen> {
           photo: cp.photo,
           price: freshPrice,
           discountPrice: fresh.disPrice ?? '',
-          vendorID: cp.vendorID,
+          // cp.vendorID is blanked on the order-embedded line item (see
+          // OrderModel._productSnapshot) - use the order's own vendorID,
+          // which every line item is guaranteed to share.
+          vendorID: orderModel.vendorID,
           quantity: cp.quantity,
           extras_price: cp.extras_price,
           extras: cp.extras,
@@ -937,7 +926,27 @@ class _CartScreenState extends State<CartScreen> {
       await cartDatabase.deleteAllProducts();
       for (final cp in order.products) {
         try {
-          await cartDatabase.reAddProduct(cp);
+          // cp.vendorID is blanked on the order-embedded line item (see
+          // OrderModel._productSnapshot) - restore it from the request's
+          // own vendorID before inserting into the local cart, otherwise
+          // every item added here ends up with vendorID: ''. Built via the
+          // explicit constructor, not copyWith() - CartProduct.copyWith's
+          // generated fallback calls `this.variant_info.toJson()` whenever
+          // variant_info isn't passed, which throws on every plain
+          // (non-variant) product, where variant_info is null.
+          await cartDatabase.reAddProduct(CartProduct(
+            id: cp.id,
+            category_id: cp.category_id,
+            name: cp.name,
+            photo: cp.photo,
+            price: cp.price,
+            discountPrice: cp.discountPrice,
+            vendorID: order.vendorID,
+            quantity: cp.quantity,
+            extras_price: cp.extras_price,
+            extras: cp.extras,
+            variant_info: cp.variant_info,
+          ));
         } catch (_) {}
       }
       vendorModel = await _fireStoreUtils.getVendorByVendorID(order.vendorID);
@@ -1052,6 +1061,23 @@ class _CartScreenState extends State<CartScreen> {
         baseProductIds.map((id) => productsById[id]).toList();
     debugPrint('[CART-PERF] fetchProductsByIds x${baseProductIds.toSet().length} distinct '
         '(${cartSnapshot.length} line item(s)) — ${fetchProductsSw.elapsedMilliseconds}ms');
+
+    // 2026-09-09: _modernCartItem() (the actual list-item widget) keeps its
+    // own separate _productCache and, on a cache miss, fires its own
+    // individual getProductByID() call - completely uncoordinated with this
+    // method's batched fetch above, so every cart open was fetching each
+    // product twice (confirmed live via device log: fetchProductsByIds and
+    // getProductByID both firing for the same single item on an ordinary,
+    // non-reorder cart visit). Pre-warming _productCache with what this
+    // batched call already fetched means _modernCartItem's cache check
+    // finds it warm and skips its own redundant fetch entirely.
+    if (mounted) {
+      setState(() {
+        for (final entry in productsById.entries) {
+          _productCache[entry.key] = entry.value;
+        }
+      });
+    }
 
     // ── Process results (no more async Firestore calls inside this loop) ──────
     final List<String> idsToRemove = [];
@@ -4687,10 +4713,16 @@ class _CartScreenState extends State<CartScreen> {
                               isVariant: true,
                             ),
                           ),
+                        // parseOrderExtras (shared, defensive - see
+                        // order_extras_parsing.dart) instead of the previous
+                        // inline quote-strip only: that left this render path
+                        // with no backslash defense, the exact gap that let a
+                        // real corrupted order (thousands of literal
+                        // backslashes in one extras entry, confirmed live
+                        // against Firestore) render as a giant broken block -
+                        // found first in OrdersScreen, same underlying field.
                         if (hasAddons)
-                          ...addOnVal
-                              .map((e) => e.toString().replaceAll('"', '').trim())
-                              .where((e) => e.isNotEmpty)
+                          ...parseOrderExtras(addOnVal)
                               .map((e) => _buildChip(e, e.hashCode, isDark: dark)),
                       ],
                     ),
@@ -7031,6 +7063,8 @@ Widget _buildChip(String label, int attributesOptionIndex,
         letterSpacing: 0.1,
         color: textColor,
       ),
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
     ),
   );
 }

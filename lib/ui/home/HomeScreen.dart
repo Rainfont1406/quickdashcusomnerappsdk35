@@ -20,6 +20,7 @@ import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/services/perf_diagnostic_file_service.dart';
+import 'package:emartconsumer/services/shared_vendors_watcher.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/theme/responsive.dart';
@@ -150,13 +151,9 @@ class HomeScreen extends StatefulWidget {
   }
 }
 
-class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
+class _HomeScreenState extends State<HomeScreen> {
   late CartDatabase cartDatabase;
   int cartCount = 0;
-
-  // Tracks when the app was last sent to background so we only refresh
-  // if the user was away long enough for data to go stale.
-  DateTime? _pausedAt;
 
   @override
   void didChangeDependencies() {
@@ -545,7 +542,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
     _tryHideSkeleton();
     // Now that the page is visible, it's safe to start the whole-catalog
-    // product fetch without it competing for bandwidth with first paint.
+    // product fetch without it competing for bandwidth with first paint -
+    // but only if it'll actually be shown (see _startProductsFetchIfNeeded's
+    // own comment on why this is Delivery-only).
     _startProductsFetchIfNeeded();
   }
 
@@ -553,7 +552,27 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   // previews, and wires up processing of its result. Only fires once per
   // getData() cycle â€” see the reset in getData() â€” and only after the
   // skeleton has already been dismissed.
+  //
+  // 2026-09-06: gated to Delivery mode only - its one and only consumer is
+  // the "Top Selling" row at `if (isDelivery && lstNearByFood.isNotEmpty)`,
+  // which is unconditionally hidden in Dineaway/Takeaway mode. Since
+  // Dineaway is the default (Delivery is currently gated behind a
+  // "Coming Soon" block via isDeliveryActiveNotifier), this fetch - the
+  // single largest cold-start read in the app per the 2026-09-06 audit
+  // (~97KB/85 docs on the sampled section) - was running and being fully
+  // discarded for the majority of real visits.
+  //
+  // Also requires isDeliveryActiveNotifier.value: when Delivery mode is
+  // selected but the admin has switched delivery off section-wide (the
+  // LIVE production state as of 2026-09-06 - confirmed via a direct
+  // Firestore check, sections/{Restaurants}.delivery_active=false), the
+  // entire body collapses to just `ComingSoonView` (see the
+  // `(isDelivery && !isDeliveryActiveNotifier.value) ? [ComingSoonView...]`
+  // branch above) - Top Selling is never reached either way, so fetching
+  // for it here would be pure waste on top of the Dineaway case.
   void _startProductsFetchIfNeeded() {
+    if (selctedOrderTypeValue != "Delivery") return;
+    if (!isDeliveryActiveNotifier.value) return;
     if (_productsFetchStarted) return;
     _productsFetchStarted = true;
     debugPrint(
@@ -624,7 +643,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       debugPrint(
           '[HOME-PERF] MILESTONE: first frame rendered (skeleton) — ${_homeInitStopwatch.elapsedMilliseconds}ms since initState');
     });
-    WidgetsBinding.instance.addObserver(this);
     print("AK DEBUG: HomeScreen initState");
     // The live listener itself lives in ContainerScreen (one listener for the
     // whole app); this screen just rebuilds when the shared notifiers change.
@@ -668,6 +686,30 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   void _onDeliveryGateChanged() {
     if (mounted) setState(() {});
+    // Rare edge case: an admin flips delivery_active on while a user happens
+    // to already be sitting on the Delivery tab - the ComingSoonView just
+    // disappeared and the real content is about to render, but the
+    // category/product fetches were skipped earlier since delivery was off
+    // then. Catch up now that it's actually needed.
+    if (selctedOrderTypeValue == "Delivery" && isDeliveryActiveNotifier.value) {
+      _startProductsFetchIfNeeded();
+      if (vendorCategoryModel.isEmpty) {
+        fireStoreUtils.getCuisines().then((value) {
+          if (!mounted) return;
+          setState(() {
+            vendorCategoryModel = value;
+            allProductCategoriesList
+              ..clear()
+              ..addAll(value);
+            productCategoryById
+              ..clear()
+              ..addEntries(value
+                  .where((c) => (c.id ?? '').isNotEmpty)
+                  .map((c) => MapEntry(c.id!, c)));
+          });
+        });
+      }
+    }
   }
 
   List<BannerModel> bannerTopHome = [];
@@ -686,21 +728,38 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     // banner, story-enabled flag) — run them concurrently instead of
     // sequentially. Measured at ~2.2s sequential (roughly the sum of all
     // three); concurrently it should take about as long as the slowest one.
+    //
+    // 2026-09-06: getCuisines() is skipped entirely in Dineaway/Takeaway mode
+    // - CategoryView (its only Home-screen consumer) is already Delivery-only
+    // gated (`if (selctedOrderTypeValue == "Delivery")` below), and
+    // SearchScreen's Product Category tier already has its own independent
+    // fallback fetch (_ensureProductCategoriesLoaded) if this global list is
+    // still empty when it opens - it doesn't actually need Home to
+    // pre-warm it. Same "don't fetch what nothing will show" fix as the
+    // whole-catalog product fetch above, smaller in scale since this one's
+    // already Bunny-mirrored + 10-minute cached.
+    //
+    // Also requires isDeliveryActiveNotifier.value, same reasoning as
+    // _startProductsFetchIfNeeded above - CategoryView is unreachable
+    // whenever Delivery mode is selected but currently switched off
+    // (collapses to ComingSoonView), which is the actual live production
+    // state today.
     await Future.wait([
-      _timedStep('getBanner -> getCuisines', () => fireStoreUtils.getCuisines())
-          .then((value) {
-        vendorCategoryModel = value;
-        // Shared globally so SearchScreen's Product Category search tier
-        // can reuse this same fetch instead of querying again itself.
-        allProductCategoriesList
-          ..clear()
-          ..addAll(value);
-        // O(1) companion lookup (2026-07-21) - rebuilt in lockstep, same
-        // source, so it's never stale relative to the list above.
-        productCategoryById
-          ..clear()
-          ..addEntries(value.where((c) => (c.id ?? '').isNotEmpty).map((c) => MapEntry(c.id!, c)));
-      }),
+      if (selctedOrderTypeValue == "Delivery" && isDeliveryActiveNotifier.value)
+        _timedStep('getBanner -> getCuisines', () => fireStoreUtils.getCuisines())
+            .then((value) {
+          vendorCategoryModel = value;
+          // Shared globally so SearchScreen's Product Category search tier
+          // can reuse this same fetch instead of querying again itself.
+          allProductCategoriesList
+            ..clear()
+            ..addAll(value);
+          // O(1) companion lookup (2026-07-21) - rebuilt in lockstep, same
+          // source, so it's never stale relative to the list above.
+          productCategoryById
+            ..clear()
+            ..addEntries(value.where((c) => (c.id ?? '').isNotEmpty).map((c) => MapEntry(c.id!, c)));
+        }),
       _timedStep(
               'getBanner -> getHomeTopBanner', () => fireStoreUtils.getHomeTopBanner())
           .then((value) {
@@ -1541,18 +1600,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     selectedValue: selctedOrderTypeValue!,
                     isDarkMode: isDarkMode(context),
                     onValueChanged: (String newValue) async {
-                      // Switching Delivery/Dineaway changes special-offer
-                      // matching, eligibility thresholds, and ranking â€” show
-                      // the skeleton immediately so stale results from the
-                      // old section aren't visible while the new section's
-                      // data loads, same pattern as _onLocationChanged().
+                      // getData()'s query (where section_id == X) doesn't filter by
+                      // order type at all - the same vendor set applies to both.
+                      // Switching order type only changes eligibility
+                      // thresholds/badges/ranking (_sortRestaurants) and which
+                      // already-built product map (_productsByVendor vs.
+                      // _deliveryProductsByVendor) gets read - no new fetch needed,
+                      // so this no longer reopens the 9 geo-listener vendor query.
                       final previousOrderType = currentOrderTypeGlobal;
                       setState(() {
                         selctedOrderTypeValue = newValue;
                         currentOrderTypeGlobal = newValue;
-                        isLoading = true;
-                        _firstVendorReceived = false;
-                        _precachingVendors = false;
                         saveFoodTypeValue();
                       });
                       // High-level navigation only — this is the single
@@ -1561,7 +1619,37 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       // a user action).
                       BehaviorTracker.track(kEvtNavOrderModeSwitched,
                           {'from': previousOrderType, 'to': newValue});
-                      getData();
+                      _sortRestaurants();
+                      // The whole-catalog product fetch only ever starts for
+                      // Delivery mode (see _startProductsFetchIfNeeded) - if the
+                      // user started in Dineaway/Takeaway and just switched to
+                      // Delivery, it hasn't run yet, so start it lazily now.
+                      _startProductsFetchIfNeeded();
+                      // Same lazy catch-up for categories - getBanner() skips
+                      // getCuisines() entirely outside Delivery mode, so a
+                      // user who started in Dineaway and just switched won't
+                      // have vendorCategoryModel populated yet. Also mirrors
+                      // getBanner()'s isDeliveryActiveNotifier check - no
+                      // point fetching if this now just shows ComingSoonView.
+                      if (newValue == "Delivery" &&
+                          isDeliveryActiveNotifier.value &&
+                          vendorCategoryModel.isEmpty) {
+                        fireStoreUtils.getCuisines().then((value) {
+                          if (!mounted) return;
+                          setState(() {
+                            vendorCategoryModel = value;
+                            allProductCategoriesList
+                              ..clear()
+                              ..addAll(value);
+                            productCategoryById
+                              ..clear()
+                              ..addEntries(value
+                                  .where((c) => (c.id ?? '').isNotEmpty)
+                                  .map((c) => MapEntry(c.id!, c)));
+                          });
+                        });
+                      }
+                      if (mounted) setState(() {});
                     },
                   ),
                 ],
@@ -1682,26 +1770,70 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
+  // Manual pull-to-refresh rate limiting - same pattern as
+  // newVendorProductsScreen's _onManualRefresh, 90 seconds here since Home's
+  // refresh is heavier (reopens the 9-geo-listener vendor query) than a
+  // single vendor's product list.
+  DateTime? _lastManualRefreshAt;
+  static const Duration _manualRefreshCooldown = Duration(seconds: 90);
+
+  // 2026-09-06 (revised): only the vendor list is forced genuinely fresh on
+  // pull-to-refresh - it's a live listener with no cache to begin with, and
+  // open/closed/active status is the one thing actually worth checking live.
+  // Story and the top banner are deliberately NOT force-cleared here anymore
+  // - they stay on their own 10-minute TTL cache and only re-fetch once that
+  // expires naturally, same as any other visit. Forcing them on every pull
+  // defeats the point of having that cache at all.
   Future<void> _onRefresh() async {
+    final now = DateTime.now();
+    final last = _lastManualRefreshAt;
+    if (last != null) {
+      final elapsed = now.difference(last);
+      if (elapsed < _manualRefreshCooldown) {
+        final remainingSeconds = (_manualRefreshCooldown - elapsed).inSeconds;
+        ShowToastDialog.showToast(
+          remainingSeconds <= 3
+              ? "You refreshed recently. Please wait a moment.".tr()
+              : "Refresh available in $remainingSeconds seconds.".tr(),
+        );
+        return;
+      }
+    }
+    _lastManualRefreshAt = now;
+
     // Pull-to-refresh: keep isLoading = false (no skeleton during refresh).
-    // Reset story state so they re-fetch from Firestore.
-    FireStoreUtils.clearStoryCache();
-    _storiesLoaded = false;
-    allStories.clear();
-    storyList.clear();
     // Reload viewed IDs from SharedPreferences immediately so grey rings
     // persist across refresh without waiting for the Firestore round-trip.
     final sp = await SharedPreferences.getInstance();
     _viewedTodayIds = (sp.getStringList(_viewedTodayKey) ?? []).toSet();
-    // Banners, coupons, categories, and stories: await so the indicator stays
-    // visible while the most prominent content reloads. _bannerReady /
-    // _firstVendorReceived don't need to be reset because isLoading stays
-    // false, so _tryHideSkeleton is already a no-op.
+    // Re-run banner/story loading - but WITHOUT clearing their underlying
+    // TTL caches first, unlike before. getHomeTopBanner() checks its own
+    // 10-minute cache internally on every call, so this is a free no-op
+    // return if it hasn't expired yet, or a real fetch if it has - exactly
+    // "only refresh when the cache expires," never forced. _storiesLoaded is
+    // reset so _loadStories() actually runs this call instead of no-op'ing
+    // (it's a once-per-screen-instance guard, not a freshness guard) - the
+    // real freshness check is FireStoreUtils.getStory()'s own 10-minute
+    // cache, which is left untouched here for the same reason.
+    _storiesLoaded = false;
     final bannerFuture = getBanner();
     final storiesFuture = _loadStories();
     await bannerFuture;
     await storiesFuture;
-    // Restaurants arrive via stream â€” fire-and-forget; UI updates live.
+    // Restaurants arrive via stream â€” fire-and-forget; UI updates live. This
+    // is the one thing pull-to-refresh actually forces fresh every time.
+    // getData() alone would now just re-subscribe to SharedVendorsWatcher's
+    // existing stream (a no-op if the (section, location) key hasn't
+    // changed) - explicitly restart the watcher first so a manual refresh
+    // still means what it says.
+    if (sectionConstantModel?.id != null &&
+        MyAppState.selectedPosotion.location != null) {
+      SharedVendorsWatcher.start(
+        sectionConstantModel!.id ?? '',
+        MyAppState.selectedPosotion.location!.latitude,
+        MyAppState.selectedPosotion.location!.longitude,
+      );
+    }
     getData();
   }
 
@@ -1710,32 +1842,19 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _vendorSub?.cancel();
     isDeliveryActiveNotifier.removeListener(_onDeliveryGateChanged);
     deliveryOffMessageNotifier.removeListener(_onDeliveryGateChanged);
-    WidgetsBinding.instance.removeObserver(this);
     fireStoreUtils.closeOfferStream();
     fireStoreUtils.closeVendorStream();
     super.dispose();
   }
 
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    switch (state) {
-      case AppLifecycleState.paused:
-      case AppLifecycleState.inactive:
-      case AppLifecycleState.hidden:
-        _pausedAt = DateTime.now();
-        break;
-      case AppLifecycleState.resumed:
-        if (_pausedAt != null &&
-            DateTime.now().difference(_pausedAt!) >=
-                const Duration(seconds: 30)) {
-          _pausedAt = null;
-          _onRefresh();
-        }
-        break;
-      default:
-        break;
-    }
-  }
+  // 2026-09-06: dropped the old resume-after-30s auto-refresh (didChangeAppLifecycleState
+  // + _pausedAt) - it unconditionally reopened the 9 geo-listener vendor query and
+  // refetched banners/stories on every simple app-switch-and-back, regardless of whether
+  // location or anything else had changed. The vendor listener is a live Firestore
+  // subscription: it re-delivers fresh state on its own once the SDK reconnects after
+  // resume, so manually tearing it down and reopening it bought nothing. Pull-to-refresh
+  // (_onRefresh above) remains the explicit, user-initiated way to force a fresh check
+  // (e.g. current open/closed status) on demand.
 
   Future<void> saveFoodTypeValue() async {
     SharedPreferences sp = await SharedPreferences.getInstance();
@@ -2090,8 +2209,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     getFoodType();
     lstNearByFood.clear();
     _loadNormalOffersForRanking();
-    lstAllRestaurant =
-        fireStoreUtils.getAllStores().asBroadcastStream();
+    // 2026-09-06: routed through SharedVendorsWatcher instead of calling
+    // fireStoreUtils.getAllStores() directly - getData() still runs on every
+    // Home visit (including a drawer remount via UniqueKey), but the
+    // underlying geo listener now only actually reopens the first time for
+    // a given (section, location); every later call just re-subscribes to
+    // whatever's already in memory, zero additional reads.
+    lstAllRestaurant = SharedVendorsWatcher.watch(
+      sectionConstantModel!.id ?? '',
+      MyAppState.selectedPosotion.location!.latitude,
+      MyAppState.selectedPosotion.location!.longitude,
+    );
 
     if (MyAppState.currentUser != null) {
       name = toBeginningOfSentenceCase(widget.user!.firstName);

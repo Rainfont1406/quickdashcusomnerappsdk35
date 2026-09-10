@@ -15,9 +15,12 @@ import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/behavior/purchase_completion_listener.dart';
 import 'package:emartconsumer/services/connectivity_gate.dart';
+import 'package:emartconsumer/services/force_update_gate.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/services/notification_service.dart';
+import 'package:emartconsumer/services/shared_orders_watcher.dart';
+import 'package:emartconsumer/services/shared_vendors_watcher.dart';
 import 'package:emartconsumer/ui/container/ContainerScreen.dart';
 import 'package:emartconsumer/ui/home/HomeScreen.dart';
 import 'package:emartconsumer/ui/service_list_screen.dart';
@@ -38,6 +41,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'model/SectionModel.dart';
 import 'model/User.dart';
+import 'services/app_cache_config.dart';
 import 'theme/app_them_data.dart';
 import 'utils/DarkThemeProvider.dart';
 
@@ -56,6 +60,12 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(options: _activeFirebaseOptions);
+
+  // On-device cache ceilings (in-memory image cache + Firestore persistence).
+  // Must run before the first Firestore call — Settings can only be assigned
+  // while the client is untouched, and the warm-up read below is deliberately
+  // the first one. See app_cache_config.dart for why each number was chosen.
+  AppCacheConfig.applyRuntimeLimits();
 
   // Replace the default red/yellow crash screen with a friendly error page.
   // This catches any widget that throws during build() — navigation errors,
@@ -263,8 +273,8 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
               theme: Styles.themeData(false, context),
               darkTheme: Styles.themeData(true, context),
               themeMode: themeChangeProvider.darkTheme ? ThemeMode.dark : ThemeMode.light,
-              builder: (context, child) =>
-                  ConnectivityGate(child: EasyLoading.init()(context, child)),
+              builder: (context, child) => ConnectivityGate(
+                  child: ForceUpdateGate(child: EasyLoading.init()(context, child))),
               home: const OnBoarding());
         },
       ),
@@ -311,6 +321,7 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
         PurchaseCompletionListener.start(user.uid);
       } else {
         PurchaseCompletionListener.stop();
+        SharedOrdersWatcher.stop();
       }
     });
     super.initState();
@@ -347,6 +358,7 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _authStateStream.cancel();
     PurchaseCompletionListener.stop();
+    SharedOrdersWatcher.stop();
     super.dispose();
   }
 
@@ -363,6 +375,16 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
       // is safe/idempotent to call on every resume, logged in or not.
       final uid = FireStoreUtils.getCurrentUid();
       if (uid.isNotEmpty) PurchaseCompletionListener.start(uid);
+      // Same rationale, for the shared Orders watcher (2026-09-06) - a
+      // listener idle across days of backgrounding can silently lose its
+      // live connection with no error and no local signal to reconnect,
+      // which is exactly what let the original per-screen-listener bug's
+      // stale snapshot go unnoticed for so long. restartIfActive() is a
+      // no-op for a customer who has never opened Orders this session, so
+      // this never costs a read nobody asked for.
+      SharedOrdersWatcher.restartIfActive();
+      // Same reasoning, for the shared Home vendor-list watcher (2026-09-06).
+      SharedVendorsWatcher.restartIfActive();
     } else if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive ||
         state == AppLifecycleState.detached) {
@@ -461,6 +483,16 @@ Future<void> _clearCachedUserProfile(String uid) async {
 // has no Timestamp/GeoPoint fields, so plain json.encode/decode is safe here
 // without the reviver machinery the user-profile cache needs.
 const String _cachedSectionsKey = 'cached_sections_list';
+const String _cachedSectionsAtKey = 'cached_sections_at';
+// 2026-09-08: sections holds admin-configured policy (nearByRadius, delivery
+// commission tiers, etc.) that in practice changes at most a handful of
+// times a year, not per-app-open - the background refresh below used to
+// fire unconditionally on every single app open regardless of how recently
+// it last ran, which is a real, avoidable Firestore read every time. Gated
+// to once per this window instead; a genuinely urgent admin change (e.g.
+// fixing the nearByRadius unit bug found today) still reaches users within
+// this window, same as any other admin-set config elsewhere in this app.
+const Duration _cachedSectionsTtl = Duration(hours: 24);
 
 Future<List<SectionModel>?> _loadCachedSections() async {
   try {
@@ -477,11 +509,27 @@ Future<List<SectionModel>?> _loadCachedSections() async {
   }
 }
 
+// Whether the cached sections list is still within the TTL window - if so,
+// the background refresh in _navigateWithUser is skipped entirely (zero
+// Firestore cost) rather than firing on every app open regardless of age.
+Future<bool> _cachedSectionsAreFresh() async {
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    final cachedAtMillis = prefs.getInt(_cachedSectionsAtKey);
+    if (cachedAtMillis == null) return false;
+    final cachedAt = DateTime.fromMillisecondsSinceEpoch(cachedAtMillis);
+    return DateTime.now().difference(cachedAt) < _cachedSectionsTtl;
+  } catch (_) {
+    return false;
+  }
+}
+
 Future<void> _cacheSections(List<SectionModel> sections) async {
   try {
     final prefs = await SharedPreferences.getInstance();
     final encoded = json.encode(sections.map((s) => s.toJson()).toList());
     await prefs.setString(_cachedSectionsKey, encoded);
+    await prefs.setInt(_cachedSectionsAtKey, DateTime.now().millisecondsSinceEpoch);
   } catch (e) {
     debugPrint('[STARTUP-PERF] _cacheSections failed, skipping: $e');
   }
@@ -540,15 +588,21 @@ class OnBoardingState extends State<OnBoarding> {
       // Cache-first, same pattern as the user profile above — sections
       // rarely change, so a stale-by-a-few-minutes copy navigating
       // instantly beats a fresh copy costing another ~2s network round
-      // trip on every single reopen. Refreshed in the background either way.
+      // trip on every single reopen. Background refresh is gated by
+      // _cachedSectionsTtl (2026-09-08) - it used to fire unconditionally on
+      // every app open regardless of how recently it last ran, a real,
+      // avoidable Firestore read for a value that changes at most a
+      // handful of times a year.
       final cachedSections = await _timedStep(
           'loadCachedSections', () => _loadCachedSections());
       List<SectionModel> sections;
       if (cachedSections != null && cachedSections.isNotEmpty) {
         sections = cachedSections;
-        unawaited(FireStoreUtils.getSections().then((fresh) {
-          if (fresh.isNotEmpty) unawaited(_cacheSections(fresh));
-        }));
+        if (!await _cachedSectionsAreFresh()) {
+          unawaited(FireStoreUtils.getSections().then((fresh) {
+            if (fresh.isNotEmpty) unawaited(_cacheSections(fresh));
+          }));
+        }
       } else {
         sections = await _timedStep('getSections', () => FireStoreUtils.getSections());
         if (sections.isNotEmpty) unawaited(_cacheSections(sections));

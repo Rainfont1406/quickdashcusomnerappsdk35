@@ -1,0 +1,28 @@
+{
+  "parameters": {
+    "min_supported_version": {
+      "defaultValue": {
+        "value": "1.0.13"
+      },
+      "description": "Minimum app versionName (Customer App) that is allowed to keep using the app without a forced update. Compared against PackageInfo.version on launch.",
+      "valueType": "STRING"
+    },
+    "force_update_message": {
+      "defaultValue": {
+        "value": "A new version of QuickDash is available with important fixes. Please update to continue."
+      },
+      "description": "Message shown on the blocking force-update screen.",
+      "valueType": "STRING"
+    },
+    "play_store_url": {
+      "defaultValue": {
+        "value": "https://play.google.com/store/apps/details?id=com.quickdash.hadeveloper"
+      },
+      "description": "Play Store listing URL opened by the force-update screen's Update button.",
+      "valueType": "STRING"
+    }
+  },
+  "version": {
+    "description": "Initial force-update config (min_supported_version, force_update_message, play_store_url)"
+  }
+}

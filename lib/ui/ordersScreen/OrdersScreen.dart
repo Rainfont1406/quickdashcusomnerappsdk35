@@ -11,6 +11,7 @@ import 'package:emartconsumer/services/app_dialog.dart';
 import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
+import 'package:emartconsumer/services/order_extras_parsing.dart';
 import 'package:emartconsumer/services/shared_orders_watcher.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/utils/network_image_widget.dart';
@@ -322,6 +323,13 @@ class _OrdersScreenState extends State<OrdersScreen> {
           letterSpacing: 0.1,
           color: textColor,
         ),
+        // Rendering-level safety net (2026-09-09), independent of whatever
+        // upstream parsing already filtered - a chip is never meant to hold
+        // more than a short label, so this caps the blast radius of any
+        // future data-quality surprise this specific screen hasn't been
+        // taught to recognize yet.
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
       ),
     );
   }
@@ -490,39 +498,11 @@ class _OrdersScreenState extends State<OrdersScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: orderModel.products.map((product) {
-                      // Parse add-ons
-                      List<String> addonList = [];
-                      String _cleanAddon(String s) {
-                        // Strip leading/trailing slashes left over from old data format
-                        s = s.replaceAll('"', '').trim();
-                        while (s.startsWith('/')) s = s.substring(1).trim();
-                        while (s.endsWith('/'))
-                          s = s.substring(0, s.length - 1).trim();
-                        return s;
-                      }
-
-                      final dynamic rawExtras = product.extras;
-                      if (rawExtras is List) {
-                        addonList = rawExtras
-                            .map((e) => _cleanAddon(e.toString()))
-                            .where(
-                                (s) => s.isNotEmpty && s != 'null' && s != '[]')
-                            .toList();
-                      } else if (rawExtras is String &&
-                          rawExtras.isNotEmpty &&
-                          rawExtras != '[]') {
-                        final cleaned = rawExtras
-                            .replaceAll('[', '')
-                            .replaceAll(']', '')
-                            .replaceAll('"', '');
-                        // Support both comma-separated and slash-separated old formats
-                        final sep = cleaned.contains(',') ? ',' : '/';
-                        addonList = cleaned
-                            .split(sep)
-                            .map((s) => _cleanAddon(s))
-                            .where((s) => s.isNotEmpty && s != 'null')
-                            .toList();
-                      }
+                      // Parse add-ons (shared, defensive parser - see
+                      // order_extras_parsing.dart for why this used to be
+                      // inline here without backslash-stripping, unlike its
+                      // two siblings in OrderDetailsScreen.dart)
+                      final List<String> addonList = parseOrderExtras(product.extras);
 
                       // Parse variant info
                       VariantInfo? variantInfo;

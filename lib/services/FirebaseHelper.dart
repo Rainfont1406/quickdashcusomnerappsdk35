@@ -80,6 +80,8 @@ import 'package:video_thumbnail/video_thumbnail.dart';
 import '../constants.dart';
 import '../model/FlutterWaveSettingDataModel.dart';
 import '../model/PayStackSettingsModel.dart';
+import 'bunny_product_mirror.dart';
+import 'bunny_reference_mirror.dart';
 import 'bunny_storage.dart';
 import 'firestore_instrumentation.dart';
 
@@ -398,7 +400,24 @@ class FireStoreUtils {
     }
   }
 
+  // Global, admin-managed, effectively-static reference data (2026-09-06) -
+  // was refetched from Firestore on every product-customization dialog open
+  // and every product detail page view with no caching at all. Same
+  // 10-minute TTL / static-field pattern as _localOfferCategoriesCache below.
+  static List<AttributesModel>? _attributesCache;
+  static DateTime? _attributesCachedAt;
+  static List<BrandsModel>? _brandsCache;
+  static DateTime? _brandsCachedAt;
+  static List<ReviewAttributeModel>? _reviewAttributesCache;
+  static DateTime? _reviewAttributesCachedAt;
+  static const Duration _referenceDataCacheTtl = Duration(minutes: 10);
+
   static Future<List<AttributesModel>> getAttributes() async {
+    final now = DateTime.now();
+    if (_attributesCache != null && _attributesCachedAt != null &&
+        now.difference(_attributesCachedAt!) < _referenceDataCacheTtl) {
+      return _attributesCache!;
+    }
     List<AttributesModel> attributesList = [];
     QuerySnapshot<Map<String, dynamic>> currencyQuery = await firestore.collection(VENDOR_ATTRIBUTES).getLogged('getAttributes:VENDOR_ATTRIBUTES');
     await Future.forEach(currencyQuery.docs, (QueryDocumentSnapshot<Map<String, dynamic>> document) {
@@ -408,10 +427,17 @@ class FireStoreUtils {
         print('FireStoreUtils.getCurrencys Parse error $e');
       }
     });
+    _attributesCache = attributesList;
+    _attributesCachedAt = now;
     return attributesList;
   }
 
   static Future<List<BrandsModel>> getBrands() async {
+    final now = DateTime.now();
+    if (_brandsCache != null && _brandsCachedAt != null &&
+        now.difference(_brandsCachedAt!) < _referenceDataCacheTtl) {
+      return _brandsCache!;
+    }
     List<BrandsModel> brandList = [];
     QuerySnapshot<Map<String, dynamic>> brandQuery = await firestore.collection(BRANDS).where('is_publish', isEqualTo: true).getLogged('getBrands:BRANDS');
     await Future.forEach(brandQuery.docs, (QueryDocumentSnapshot<Map<String, dynamic>> document) {
@@ -421,6 +447,8 @@ class FireStoreUtils {
         print('FireStoreUtils.getCurrencys Parse error $e');
       }
     });
+    _brandsCache = brandList;
+    _brandsCachedAt = now;
     return brandList;
   }
 
@@ -474,7 +502,21 @@ class FireStoreUtils {
     return productList;
   }
 
+  // "More from this store" on the product detail page (2026-09-06) - reused
+  // _productsCache (populated by getVendorProducts/TakeAWay/Delivery, same
+  // vendorID+publish==true filter, key "${vendorID}_vendor_all") instead of
+  // its own separate query. If the customer already opened this vendor's
+  // menu screen this session, that cache is almost always still warm here,
+  // so this becomes a free in-memory slice instead of a fresh Firestore read.
+  // Falls back to the original direct query on a genuine cache miss.
   static Future<List<ProductModel>> getStoreProduct(String storeId) async {
+    final key = '${storeId}_vendor_all';
+    final cached = _productsCache[key];
+    final cachedAt = _productsCachedAt[key];
+    if (cached != null && cachedAt != null &&
+        DateTime.now().difference(cachedAt) < _productsCacheTtl) {
+      return cached.take(6).toList();
+    }
     List<ProductModel> productList = [];
     QuerySnapshot<Map<String, dynamic>> currencyQuery = await firestore.collection(PRODUCTS).where('vendorID', isEqualTo: storeId).where('publish', isEqualTo: true).limit(6).getLogged('getStoreProduct:PRODUCTS');
     await Future.forEach(currencyQuery.docs, (QueryDocumentSnapshot<Map<String, dynamic>> document) {
@@ -501,6 +543,11 @@ class FireStoreUtils {
   }
 
   static Future<List<ReviewAttributeModel>> getAllReviewAttributes() async {
+    final now = DateTime.now();
+    if (_reviewAttributesCache != null && _reviewAttributesCachedAt != null &&
+        now.difference(_reviewAttributesCachedAt!) < _referenceDataCacheTtl) {
+      return _reviewAttributesCache!;
+    }
     List<ReviewAttributeModel> reviewAttributesList = [];
     QuerySnapshot<Map<String, dynamic>> currencyQuery = await firestore.collection(REVIEW_ATTRIBUTES).getLogged('getAllReviewAttributes:REVIEW_ATTRIBUTES');
     await Future.forEach(currencyQuery.docs, (QueryDocumentSnapshot<Map<String, dynamic>> document) {
@@ -510,6 +557,8 @@ class FireStoreUtils {
         print('FireStoreUtils.getCurrencys Parse error $e');
       }
     });
+    _reviewAttributesCache = reviewAttributesList;
+    _reviewAttributesCachedAt = now;
     return reviewAttributesList;
   }
 
@@ -547,25 +596,49 @@ class FireStoreUtils {
     });
   }
 
+  // 2026-09-06: this was a raw, always-live Firestore .get() with no caching
+  // at all, called from 12 different sites across the app (Home, Product
+  // Details, Order Details, reviews, reorder, chat inbox, story view) - the
+  // same vendor gets re-fetched fresh every single time any of these opens,
+  // even seconds apart. Same 10-minute TTL as the other Home-screen caches
+  // (products/categories/banners) - not mirrored to Bunny since a vendor
+  // lookup by arbitrary id has no natural "whole list" shape to mirror.
+  static final Map<String, (VendorModel?, DateTime)> _vendorByIdCache = {};
+  static const Duration _vendorByIdCacheTtl = Duration(minutes: 10);
+
   static Future<VendorModel?> getVendor(String vid) async {
+    final cached = _vendorByIdCache[vid];
+    if (cached != null &&
+        DateTime.now().difference(cached.$2) < _vendorByIdCacheTtl) {
+      return cached.$1;
+    }
     DocumentSnapshot<Map<String, dynamic>> userDocument = await firestore.collection(VENDORS).doc(vid).getLogged('getVendor:VENDORS');
+    VendorModel? result;
     if (userDocument.data() != null && userDocument.exists) {
-      return VendorModel.fromJson(userDocument.data()!);
+      result = VendorModel.fromJson(userDocument.data()!);
     } else {
       print("nulllll");
-      return null;
     }
+    _vendorByIdCache[vid] = (result, DateTime.now());
+    return result;
   }
 
 
   // vendorId -> (in-flight/resolved fetch, when it was started). Sales data
   // is a slow-changing rolling aggregate, so a short cache avoids
-  // re-querying the dailyProductSales subcollection for the same vendor on
-  // every live vendor-list update (cards rebuild often; sales data doesn't
-  // change minute to minute). Cleared naturally on app restart.
+  // re-querying the same vendor's precomputed sales summary on every live
+  // vendor-list update (cards rebuild often; sales data doesn't change
+  // minute to minute). Cleared naturally on app restart.
+  //
+  // 6 hours, not 10 minutes (2026-09-04, widened alongside the switch to a
+  // precomputed summary doc below) - the source of truth itself
+  // (updateTopProducts, Cloud Functions) now only recomputes every 12
+  // hours, so refreshing this client cache any faster than half that
+  // interval can never observe newer data, only spend an extra read
+  // getting the exact same answer back.
   static final Map<String, (Future<RollingSalesWindow>, DateTime)>
       _rollingSalesCache = {};
-  static const Duration _rollingSalesCacheTtl = Duration(minutes: 10);
+  static const Duration _rollingSalesCacheTtl = Duration(hours: 6);
 
   /// Used by manual pull-to-refresh (restaurant page) alongside
   /// clearVendorProductsCache/clearBehaviorSummaryCache, so a refresh can't
@@ -599,73 +672,47 @@ class FireStoreUtils {
     return (await _getRollingSalesWindow(vendorId)).last90Days;
   }
 
-  static DateTime? _parseBucketDate(String docId) {
-    // docId format 'yyyy-MM-dd', see vendorApp's _dateBucketKey.
-    final parts = docId.split('-');
-    if (parts.length != 3) return null;
-    final y = int.tryParse(parts[0]);
-    final m = int.tryParse(parts[1]);
-    final d = int.tryParse(parts[2]);
-    if (y == null || m == null || d == null) return null;
-    return DateTime(y, m, d);
-  }
-
-  /// Both the 90-day total (3 months, widened 2026-07-20 from 30 days) and
-  /// the 7-day total come from this ONE Firestore read - the subcollection
-  /// is small (~90 daily docs, pruned vendor-side), so bucketing by date
-  /// client-side is far cheaper than a second query.
+  /// Reads the precomputed summary the updateTopProducts Cloud Function
+  /// writes to vendors/{vendorId}/computed/salesSummary every 12 hours
+  /// (2026-09-04 - was a direct client read of the whole dailyProductSales
+  /// subcollection, up to ~90 documents; see functions/src/index.ts's
+  /// computeSalesSummary, which reproduces the exact same date-cutoff
+  /// bucketing this function used to do inline). One document read instead
+  /// of up to 90, regardless of how many days of sales history exist.
+  ///
+  /// A vendor with no summary doc yet (created after the last scheduled
+  /// run, or before this feature was deployed) returns an all-empty/zero
+  /// window rather than falling back to the old full-subcollection read -
+  /// it will have real data within one scheduled-run interval.
   static Future<RollingSalesWindow> _fetchRollingSalesWindow(
       String vendorId) async {
-    final Map<String, int> totals90 = {};
-    final Map<String, int> totals7 = {};
-    final Map<String, int> orderTotals90 = {};
-    final Map<String, int> orderTotals7 = {};
-    var totalOrders90 = 0;
-    var totalOrders7 = 0;
     try {
-      final snapshot = await firestore
+      final doc = await firestore
           .collection(VENDORS)
           .doc(vendorId)
-          .collection('dailyProductSales')
-          .getLogged('_fetchRollingSalesWindow:dailyProductSales');
-      final cutoff7 = DateTime.now().subtract(const Duration(days: 7));
-      final cutoff7Date = DateTime(cutoff7.year, cutoff7.month, cutoff7.day);
-      for (final doc in snapshot.docs) {
-        final data = doc.data();
-        final products = data['products'] as Map<String, dynamic>?;
-        if (products == null) continue;
-        final bucketDate = _parseBucketDate(doc.id);
-        final within7 = bucketDate != null && !bucketDate.isBefore(cutoff7Date);
-        products.forEach((productId, count) {
-          final n = (count as num?)?.toInt() ?? 0;
-          totals90[productId] = (totals90[productId] ?? 0) + n;
-          if (within7) totals7[productId] = (totals7[productId] ?? 0) + n;
-        });
-
-        // Distinct-order counters - absent on buckets written before
-        // 2026-07-23, treated as 0 (no products/no orders that day for
-        // this field), never an error.
-        final productOrders = data['productOrders'] as Map<String, dynamic>?;
-        if (productOrders != null) {
-          productOrders.forEach((productId, count) {
-            final n = (count as num?)?.toInt() ?? 0;
-            orderTotals90[productId] = (orderTotals90[productId] ?? 0) + n;
-            if (within7) orderTotals7[productId] = (orderTotals7[productId] ?? 0) + n;
-          });
-        }
-        final dayTotalOrders = (data['totalOrders'] as num?)?.toInt() ?? 0;
-        totalOrders90 += dayTotalOrders;
-        if (within7) totalOrders7 += dayTotalOrders;
+          .collection('computed')
+          .doc('salesSummary')
+          .getLogged('_fetchRollingSalesWindow:computed');
+      if (!doc.exists) {
+        return const RollingSalesWindow(last90Days: {}, last7Days: {});
       }
-    } catch (_) {}
-    return RollingSalesWindow(
-      last90Days: totals90,
-      last7Days: totals7,
-      productOrders90: orderTotals90,
-      productOrders7: orderTotals7,
-      totalOrders90: totalOrders90,
-      totalOrders7: totalOrders7,
-    );
+      final data = doc.data()!;
+      Map<String, int> toIntMap(String field) {
+        final raw = data[field] as Map<String, dynamic>?;
+        if (raw == null) return {};
+        return raw.map((k, v) => MapEntry(k, (v as num?)?.toInt() ?? 0));
+      }
+      return RollingSalesWindow(
+        last90Days: toIntMap('last90Days'),
+        last7Days: toIntMap('last7Days'),
+        productOrders90: toIntMap('productOrders90'),
+        productOrders7: toIntMap('productOrders7'),
+        totalOrders90: (data['totalOrders90'] as num?)?.toInt() ?? 0,
+        totalOrders7: (data['totalOrders7'] as num?)?.toInt() ?? 0,
+      );
+    } catch (_) {
+      return const RollingSalesWindow(last90Days: {}, last7Days: {});
+    }
   }
 
   // ── Phase 2 recommendation data orchestration (2026-07-17) ────────────
@@ -1179,7 +1226,49 @@ class FireStoreUtils {
     return null;
   }
 
-  Future<List<TaxModel>?> getTaxList(String? sectionId) async {
+  // 2026-09-06: bounded 10-minute TTL - tax rates are admin-configured and
+  // change rarely, but Cart/Checkout must never go longer than this without
+  // a real check (unlike price/vendor status, which stay fully live with no
+  // cache at all). Previously this had no cache of its own at all;
+  // ContainerScreen/CartScreen's "reuse the global taxList if non-empty"
+  // logic effectively cached it forever within a session with no expiry -
+  // this replaces that open-ended reuse with an actual bounded window.
+  static final Map<String, (List<TaxModel>, DateTime)> _taxListCache = {};
+  static const Duration _taxListCacheTtl = Duration(minutes: 10);
+
+  // 2026-09-10: single-flight guard on top of the TTL cache above. The TTL
+  // alone did not prevent duplicate queries, because the cache is only
+  // written *after* the await resolves — two callers starting within the
+  // same frame both saw an empty/expired cache and both issued the query.
+  // Measured on-device: two identical `getTaxList:tax` reads (5 docs each)
+  // logged in the SAME millisecond on a Cart open, and it reproduced even
+  // with an empty cart, i.e. it was never item-dependent. The two racers are
+  // ContainerScreen.getTaxList() (fired on app start) and CartScreen's own
+  // fetch. Concurrent callers now await the one in-flight Future instead of
+  // each starting their own — same pattern as ensurePaymentGatewaySettingsLoaded
+  // and loadRecommendationConfig above.
+  static final Map<String, Future<List<TaxModel>?>> _taxListInFlight = {};
+
+  Future<List<TaxModel>?> getTaxList(String? sectionId) {
+    final key = sectionId ?? '';
+    final cached = _taxListCache[key];
+    if (cached != null &&
+        DateTime.now().difference(cached.$2) < _taxListCacheTtl) {
+      return Future.value(cached.$1);
+    }
+
+    final inFlight = _taxListInFlight[key];
+    if (inFlight != null) return inFlight;
+
+    final future = _fetchTaxList(sectionId, key);
+    _taxListInFlight[key] = future;
+    // Cleared whether it succeeded or failed, so a failed fetch never
+    // pins a permanently-rejected Future for the rest of the session.
+    future.whenComplete(() => _taxListInFlight.remove(key));
+    return future;
+  }
+
+  Future<List<TaxModel>?> _fetchTaxList(String? sectionId, String key) async {
     List<TaxModel> taxList = [];
     await firestore.collection(tax).where('sectionId', isEqualTo: sectionId).where('enable', isEqualTo: true).getLogged('getTaxList:tax').then((value) {
       for (var element in value.docs) {
@@ -1189,6 +1278,7 @@ class FireStoreUtils {
     }).catchError((error) {
       log(error.toString());
     });
+    _taxListCache[key] = (taxList, DateTime.now());
     return taxList;
   }
 
@@ -1647,13 +1737,25 @@ class FireStoreUtils {
     }
   }
 
+  // 2026-09-06: bounded 10-minute TTL, same reasoning as getTaxList above -
+  // this is admin-set delivery-charge policy (per-km rate, minimum charge),
+  // not a live per-order fact like vendor open/closed status or price, which
+  // stay fully live with no cache. One single global settings doc, so no
+  // per-section/per-vendor keying needed.
+  static DeliveryChargeModel? _deliveryChargeCache;
+  static DateTime? _deliveryChargeCachedAt;
+  static const Duration _deliveryChargeCacheTtl = Duration(minutes: 10);
+
   Future<DeliveryChargeModel?> getDeliveryCharges() async {
-    DocumentSnapshot<Map<String, dynamic>> codQuery = await firestore.collection(Setting).doc('DeliveryCharge').getLogged('getDeliveryCharges:Setting');
-    if (codQuery.data() != null) {
-      return DeliveryChargeModel.fromJson(codQuery.data()!);
-    } else {
-      return null;
+    final cachedAt = _deliveryChargeCachedAt;
+    if (cachedAt != null &&
+        DateTime.now().difference(cachedAt) < _deliveryChargeCacheTtl) {
+      return _deliveryChargeCache;
     }
+    DocumentSnapshot<Map<String, dynamic>> codQuery = await firestore.collection(Setting).doc('DeliveryCharge').getLogged('getDeliveryCharges:Setting');
+    _deliveryChargeCache = codQuery.data() != null ? DeliveryChargeModel.fromJson(codQuery.data()!) : null;
+    _deliveryChargeCachedAt = DateTime.now();
+    return _deliveryChargeCache;
   }
 
   static Future<List<SectionModel>> getSections() async {
@@ -1700,7 +1802,14 @@ class FireStoreUtils {
     _productsCachedAt.remove(key);
   }
 
-  Future<List<ProductModel>> _fetchProducts(String cacheKey, Query<Map<String, dynamic>> query) async {
+
+  // [vendorIdForBunny] is only passed by the per-vendor menu queries
+  // (getVendorProducts/TakeAWay/Delivery) - the Home section-wide catalog
+  // query has no per-vendor mirror to try and always goes straight to
+  // Firestore. Bunny is tried first and silently falls back to the original
+  // Firestore query on any failure (see fetchVendorProductsFromBunny's own
+  // doc comment) - a vendor with no mirror yet behaves exactly as before.
+  Future<List<ProductModel>> _fetchProducts(String cacheKey, Query<Map<String, dynamic>> query, {String? vendorIdForBunny, String? sectionIdForBunny}) async {
     final now = DateTime.now();
     final cached = _productsCache[cacheKey];
     final cachedAt = _productsCachedAt[cacheKey];
@@ -1708,6 +1817,25 @@ class FireStoreUtils {
         now.difference(cachedAt) < _productsCacheTtl) {
       return cached;
     }
+
+    if (vendorIdForBunny != null) {
+      final mirrored = await fetchVendorProductsFromBunny(vendorIdForBunny);
+      if (mirrored != null) {
+        _productsCache[cacheKey] = mirrored;
+        _productsCachedAt[cacheKey] = now;
+        return mirrored;
+      }
+    }
+
+    if (sectionIdForBunny != null) {
+      final mirrored = await fetchSectionProductsFromBunny(sectionIdForBunny);
+      if (mirrored != null) {
+        _productsCache[cacheKey] = mirrored;
+        _productsCachedAt[cacheKey] = now;
+        return mirrored;
+      }
+    }
+
     final List<ProductModel> products = [];
     final snapshot = await query.getLogged('_fetchProducts:query');
     for (final doc in snapshot.docs) {
@@ -1743,6 +1871,12 @@ class FireStoreUtils {
         now.difference(_localOfferCategoriesCachedAt!) < _localOffersCacheTtl) {
       return _localOfferCategoriesCache!;
     }
+    final mirrored = await fetchLocalOfferCategoriesFromBunny();
+    if (mirrored != null) {
+      _localOfferCategoriesCache = mirrored;
+      _localOfferCategoriesCachedAt = now;
+      return mirrored;
+    }
     final List<LocalOfferCategoryModel> categories = [];
     try {
       final snapshot = await firestore
@@ -1773,6 +1907,14 @@ class FireStoreUtils {
     String? categoryId,
     int limit = 300,
   }) async {
+    // Bunny mirror only covers the whole-set fetch (see
+    // fetchLocalOffersFromBunny's own doc comment) - the only shape
+    // LocalOffersListScreen actually calls today. A categoryId-scoped call
+    // goes straight to Firestore as before.
+    if (categoryId == null || categoryId.isEmpty) {
+      final mirrored = await fetchLocalOffersFromBunny();
+      if (mirrored != null) return mirrored;
+    }
     List<LocalOfferModel> offers = [];
     try {
       Query<Map<String, dynamic>> query = firestore.collection(LOCAL_OFFERS).where('isActive', isEqualTo: true);
@@ -1832,13 +1974,13 @@ class FireStoreUtils {
       .limit(_productsQueryLimit);
 
   Future<List<ProductModel>> getAllProducts() =>
-      _fetchProducts('${sectionConstantModel!.id}_products', _sectionProductsQuery());
+      _fetchProducts('${sectionConstantModel!.id}_products', _sectionProductsQuery(), sectionIdForBunny: sectionConstantModel!.id);
 
   Future<List<ProductModel>> getAllDelevryProducts() =>
-      _fetchProducts('${sectionConstantModel!.id}_products', _sectionProductsQuery());
+      _fetchProducts('${sectionConstantModel!.id}_products', _sectionProductsQuery(), sectionIdForBunny: sectionConstantModel!.id);
 
   Future<List<ProductModel>> getAllTakeAWayProducts() =>
-      _fetchProducts('${sectionConstantModel!.id}_products', _sectionProductsQuery());
+      _fetchProducts('${sectionConstantModel!.id}_products', _sectionProductsQuery(), sectionIdForBunny: sectionConstantModel!.id);
 
   Future<bool> blockUser(User blockedUser, String type) async {
     bool isSuccessful = false;
@@ -1900,6 +2042,17 @@ class FireStoreUtils {
     if (cached != null && now.difference(cached.$2) < _cuisinesCacheTtl) {
       return cached.$1;
     }
+
+    // Read on every app cold start by every user - highest fan-out of any
+    // Bunny mirror in this app, per the billing audit. Falls back to the
+    // original Firestore query below on any failure (see
+    // fetchCategoriesFromBunny's own doc comment).
+    final mirrored = await fetchCategoriesFromBunny(sectionId);
+    if (mirrored != null) {
+      _cuisinesCache[sectionId] = (mirrored, now);
+      return mirrored;
+    }
+
     List<VendorCategoryModel> cuisines = [];
     QuerySnapshot<Map<String, dynamic>> cuisinesQuery =
         await firestore.collection(CATEGORIES).where("section_id", isEqualTo: sectionId).where('publish', isEqualTo: true).getLogged('getCuisines:CATEGORIES');
@@ -2072,91 +2225,14 @@ class FireStoreUtils {
     bookingOrdersStreamController?.close();
   }
 
-  late StreamSubscription ordersStreamSub;
-  late StreamController<List<OrderModel>> ordersStreamController;
-
-  Stream<List<OrderModel>> getOrders(String userID) async* {
-    // Keyed by the real Firestore document id (never the model's own `id`
-    // field, which isn't guaranteed populated) and merged - never wholesale
-    // replaced - across both sources below. Seen live in production: the
-    // live listener and a forced server-side read of the IDENTICAL query
-    // can each independently come back missing a different handful of the
-    // customer's own recent orders (parse failures on individual docs are
-    // already caught per-document further down, but whatever the exact
-    // cause, one source's snapshot silently overwriting the other's used to
-    // mean a document either source dropped was gone from the screen for
-    // good). Merging means a document only vanishes from view if BOTH
-    // sources fail to return it - the strictly safer failure mode.
-    final Map<String, OrderModel> ordersById = {};
-    ordersStreamController = StreamController();
-    final Query<Map<String, dynamic>> ordersQuery = firestore
-        .collection(ORDERS)
-        .where('authorID', isEqualTo: userID)
-        .where('section_id', isEqualTo: sectionConstantModel!.id)
-        .orderBy('createdAt', descending: true)
-        .limit(20);
-
-    void emit() {
-      final sorted = ordersById.values.toList()
-        ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
-      if (!ordersStreamController.isClosed) ordersStreamController.sink.add(sorted);
-    }
-
-    // Force one genuinely server-fresh read up front, independent of the
-    // live listener below - seen live in production: a customer's newest
-    // orders (placed minutes earlier, confirmed correct server-side via the
-    // exact same query) never reached this screen, even across a full app
-    // kill+relaunch, while every other explanation (index, security rules,
-    // account, section) checked out fine. A stuck/corrupted local Firestore
-    // disk cache can leave .snapshots() serving stale results indefinitely
-    // with no error - this guarantees at least one fresh read gets through
-    // regardless of that cache's state.
-    unawaited(ordersQuery.getLogged('getOrders:forcedServer', const GetOptions(source: Source.server)).then((snap) async {
-      await Future.forEach(snap.docs, (QueryDocumentSnapshot<Map<String, dynamic>> element) {
-        try {
-          ordersById[element.id] = OrderModel.fromJson(element.data());
-        } catch (e, s) {
-          print('getOrders server-fetch parse error ${element.id} $e $s');
-        }
-      });
-      emit();
-    }).catchError((e, s) {
-      print('getOrders server-fetch error: $e $s');
-    }));
-
-    ordersStreamSub = ordersQuery
-        .snapshotsLogged('getOrders:ORDERS')
-        .listen((onData) async {
-      await Future.forEach(onData.docs, (QueryDocumentSnapshot<Map<String, dynamic>> element) {
-        try {
-          ordersById[element.id] = OrderModel.fromJson(element.data());
-        } catch (e, s) {
-          print('watchOrdersStatus parse error ${element.id} $e $s');
-        }
-      });
-      emit();
-    }, onError: (e, s) {
-      // See getBookingOrders' identical fix (§11.19) - without this, any
-      // stream error (a rejected/expired auth token being the likeliest
-      // real-world cause, since the composite index and security rules are
-      // both already correct for this exact query) is silently swallowed:
-      // the StreamController never receives anything, the UI is stuck on
-      // whatever was last cached, and a real server-side push failure looks
-      // identical to "no orders" or "list not updating" - even surviving a
-      // full app restart, since Firestore's offline cache is disk-backed.
-      // Re-emits whatever the forced server fetch already had instead of
-      // clearing to empty - a listener error shouldn't blank out a result
-      // that read has already delivered successfully.
-      print('getOrders stream error: $e $s');
-      emit();
-    });
-    yield* ordersStreamController.stream;
-  }
-
-  closeOrdersStream() {
-    ordersStreamSub.cancel();
-    ordersStreamController.close();
-  }
+  // getOrders()/closeOrdersStream() removed (2026-09-06) - replaced by
+  // SharedOrdersWatcher (lib/services/shared_orders_watcher.dart), a
+  // session-scoped shared listener instead of a per-screen one. See that
+  // file's own doc comment for why: OrdersScreen's per-visit listener here
+  // only ever actually opened once per app session (ContainerScreen's
+  // drawer reuses its Element/State across visits with no key), so a
+  // customer's Orders list could stay frozen for days despite real new
+  // orders that correctly matched this exact query.
 
   static setFavouriteStore(FavouriteModel favouriteModel) {
     firestore.collection(FavouriteStore).addLogged(favouriteModel.toJson(), 'setFavouriteStore:FavouriteStore').then((value) {
@@ -2485,6 +2561,16 @@ class FireStoreUtils {
     if (cached != null && now.difference(cached.$2) < _homeTopBannerCacheTtl) {
       return cached.$1;
     }
+
+    // Read on every app cold start by every user - same fan-out class as
+    // getCuisines() above, per the 2026-09-06 billing audit. Falls back to
+    // the original Firestore query below on any failure.
+    final mirrored = await fetchTopBannerFromBunny(sectionId);
+    if (mirrored != null) {
+      _homeTopBannerCache[sectionId] = (mirrored, now);
+      return mirrored;
+    }
+
     List<BannerModel> bannerHome = [];
     QuerySnapshot<Map<String, dynamic>> bannerHomeQuery = await firestore
         .collection(MENU_ITEM)
@@ -2582,6 +2668,18 @@ class FireStoreUtils {
         now.difference(_allCouponsCachedAt!) < _couponsCacheTtl) {
       return _allCouponsCache!;
     }
+
+    // Read on every app cold start by every user, per the billing audit.
+    // Falls back to the original Firestore query below on any failure (see
+    // fetchCouponsFromBunny's own doc comment) - already applies the same
+    // expiry validity filter this function does today.
+    final mirrored = await fetchCouponsFromBunny();
+    if (mirrored != null) {
+      _allCouponsCache = mirrored;
+      _allCouponsCachedAt = now;
+      return mirrored;
+    }
+
     List<OfferModel> coupon = [];
     // Single-field filter only — avoids composite index on (isEnabled, expiresAt)
     // which may not exist. expiresAt validity is enforced client-side.
@@ -2723,6 +2821,7 @@ class FireStoreUtils {
           .collection(PRODUCTS)
           .where('vendorID', isEqualTo: vendorID)
           .where('publish', isEqualTo: true),
+      vendorIdForBunny: vendorID,
     );
   }
 
@@ -2764,6 +2863,7 @@ class FireStoreUtils {
           .where('vendorID', isEqualTo: vendorID)
           // .where('takeaway', isEqualTo: true)
           .where('publish', isEqualTo: true),
+      vendorIdForBunny: vendorID,
     );
   }
 
@@ -2778,6 +2878,7 @@ class FireStoreUtils {
           .where('vendorID', isEqualTo: vendorID)
           // .where('deliveryOption', isEqualTo: true)
           .where('publish', isEqualTo: true),
+      vendorIdForBunny: vendorID,
     );
   }
 
@@ -2852,7 +2953,34 @@ class FireStoreUtils {
         return <VendorCategoryModel>[];
       }
     }));
-    return results.expand((r) => r).toList();
+    final fetched = results.expand((r) => r).toList();
+
+    // Seed the same session cache newVendorProductsScreen checks *before*
+    // calling this (productCategoryById, constants.dart) so a second vendor
+    // open never re-queries a category this one already paid for.
+    //
+    // Why this was needed at all: that cache's only other writer is Home's
+    // getCuisines(), which HomeScreen gates behind
+    // `selctedOrderTypeValue == "Delivery" && isDeliveryActiveNotifier.value`
+    // (HomeScreen.dart:694). Production runs Dineaway with delivery off, so
+    // in practice that map was never populated, every vendor open was a
+    // guaranteed 100% miss, and this query ran on every single vendor screen
+    // — measured on-device 2026-09-10: 4 docs on both a cold open AND an
+    // immediate warm reopen of the same vendor.
+    //
+    // Additive only: entries are added, never cleared here, so Home's own
+    // ..clear()..addEntries rebuild stays the authoritative full-set writer
+    // whenever delivery is on. Same section_id + publish==true filters as
+    // getCuisines(), so the values are the identical shape from the identical
+    // source — this only changes *when* they're in the map, never what's in it.
+    for (final category in fetched) {
+      final id = category.id;
+      if (id != null && id.isNotEmpty) {
+        productCategoryById.putIfAbsent(id, () => category);
+      }
+    }
+
+    return fetched;
   }
 
   Future<VendorCategoryModel?> getVendorCategoryByCategoryId(String vendorCategoryID) async {
@@ -2875,6 +3003,16 @@ class FireStoreUtils {
     }
   }
 
+  // 2026-09-06: deliberately NOT cached, unlike getVendor() above - checked
+  // every call site first: 3 of 5 (CheckoutScreen._placeOrder's live
+  // service-type gate, PaymentScreen._loadSeatAvailability's dine-in seat
+  // setup, PaymentScreen's pre-payment order-build step) are checkout-
+  // critical, safety-sensitive reads where a stale vendor.vendorDeliveryOpen/
+  // seatingMode/totalSeats could let an order through against a vendor that
+  // just closed or changed its seating config. A cache here trades a small
+  // egress saving for real staleness risk on the one path where freshness
+  // actually matters - not worth it, unlike the passive browsing/display
+  // call sites getVendor() covers (Home, Product Details, reviews, etc.).
   Future<VendorModel> getVendorByVendorID(String vendorID) async {
     late VendorModel vendor;
     QuerySnapshot<Map<String, dynamic>> vendorsQuery = await firestore.collection(VENDORS).where('id', isEqualTo: vendorID).getLogged('getVendorByVendorID:VENDORS');
@@ -2901,6 +3039,12 @@ class FireStoreUtils {
     return productModel;
   }
 
+  // 2026-09-06: deliberately NOT cached - CartScreen calls this directly for
+  // live line-item pricing (price must always be fresh, per explicit
+  // instruction), so a shared cache here would risk serving a stale price at
+  // checkout. Order Details (this function's other caller) already has its
+  // own sufficient per-screen-visit memoization (_productByIdFutureCache),
+  // so it didn't actually need a shared cache either.
   Future<ProductModel> getProductByID(String productId) async {
     late ProductModel productModel;
     QuerySnapshot<Map<String, dynamic>> vendorsQuery = await firestore.collection(PRODUCTS).where('id', isEqualTo: productId).getLogged('getProductByID:PRODUCTS');

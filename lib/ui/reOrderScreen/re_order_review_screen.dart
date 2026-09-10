@@ -8,6 +8,7 @@ import 'package:emartconsumer/model/variant_info.dart';
 import 'package:emartconsumer/services/app_dialog.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/helper.dart';
+import 'package:emartconsumer/services/order_extras_parsing.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/main.dart';
@@ -108,7 +109,29 @@ class _ReOrderReviewScreenState extends State<ReOrderReviewScreen>
 
     final rows = <_ProductRow>[];
     for (var i = 0; i < widget.orderModel.products.length; i++) {
-      final cp = widget.orderModel.products[i];
+      // Order-embedded line items carry a blanked vendorID (see
+      // OrderModel._productSnapshot) since it's always identical to the
+      // order's own vendorID - restore it here, once, so every downstream
+      // use below (including the unchanged-price passthrough in
+      // _addToCart) gets the real id instead of ''. Built via the explicit
+      // constructor, not copyWith() - CartProduct.copyWith's generated
+      // fallback calls `this.variant_info.toJson()` whenever variant_info
+      // isn't passed, which throws on every plain (non-variant) product,
+      // where variant_info is null.
+      final orig = widget.orderModel.products[i];
+      final cp = CartProduct(
+        id: orig.id,
+        category_id: orig.category_id,
+        name: orig.name,
+        photo: orig.photo,
+        price: orig.price,
+        discountPrice: orig.discountPrice,
+        vendorID: widget.orderModel.vendorID,
+        quantity: orig.quantity,
+        extras_price: orig.extras_price,
+        extras: orig.extras,
+        variant_info: orig.variant_info,
+      );
       final fresh = results[i + 1] as ProductModel?;
       String? reason;
       bool priceChanged = false;
@@ -234,32 +257,11 @@ class _ReOrderReviewScreenState extends State<ReOrderReviewScreen>
   double get _subtotal =>
       _rows.where((r) => r.isAvailable).fold(0.0, (s, r) => s + r.lineTotal);
 
-  List<String> _parseAddons(dynamic raw) {
-    String clean(String s) {
-      s = s.replaceAll('"', '').trim();
-      while (s.startsWith('/')) s = s.substring(1).trim();
-      while (s.endsWith('/')) s = s.substring(0, s.length - 1).trim();
-      return s;
-    }
-
-    if (raw is List) {
-      return raw
-          .map((e) => clean(e.toString()))
-          .where((s) => s.isNotEmpty && s != 'null' && s != '[]')
-          .toList();
-    }
-    if (raw is String && raw.isNotEmpty && raw != '[]') {
-      final c =
-          raw.replaceAll('[', '').replaceAll(']', '').replaceAll('"', '');
-      final sep = c.contains(',') ? ',' : '/';
-      return c
-          .split(sep)
-          .map((s) => clean(s))
-          .where((s) => s.isNotEmpty && s != 'null')
-          .toList();
-    }
-    return [];
-  }
+  // Delegates to the shared, defensive parser (order_extras_parsing.dart) -
+  // this was previously its own inline copy missing backslash-stripping and
+  // any length cap, the same gap that let a real corrupted order render as
+  // a giant broken block on OrdersScreen (see that fix's own comment).
+  List<String> _parseAddons(dynamic raw) => parseOrderExtras(raw);
 
   VariantInfo? _getVariantInfo(dynamic raw) {
     if (raw is VariantInfo) return raw;
@@ -301,6 +303,8 @@ class _ReOrderReviewScreenState extends State<ReOrderReviewScreen>
               ? AppThemeData.primary500
               : (dark ? AppThemeData.neutral300 : AppThemeData.neutral600),
         ),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
       ),
     );
   }

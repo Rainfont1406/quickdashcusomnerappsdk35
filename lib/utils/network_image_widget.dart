@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
+import 'package:emartconsumer/services/app_cache_config.dart';
 import 'package:emartconsumer/services/perf_diagnostic_file_service.dart';
 import 'package:emartconsumer/theme/responsive.dart';
 import 'package:emartconsumer/widget/shimmer_box.dart';
@@ -39,13 +40,27 @@ bool _isConnectivityError(Object error) {
 // distortion risk from forcing an exact height that doesn't match the
 // source aspect ratio.
 String _preciseBunnyUrl(String url, BuildContext context, double? displayWidth) {
+  final targetWidth = _targetPixelWidth(context, displayWidth);
+  if (targetWidth == null) return bunnyOptimizedUrl(url);
+  return bunnyOptimizedUrl(url, width: targetWidth);
+}
+
+/// The real pixel width this image will occupy — logical display width ×
+/// device pixel ratio. Returns null when the display width isn't knowable
+/// (zero/NaN/infinite), in which case callers fall back to their defaults.
+///
+/// Extracted 2026-09-10 so the SAME number drives three things that must
+/// agree: the Bunny resize URL, the disk-cache decode ceiling, and the
+/// in-memory decode ceiling. Previously only the first existed, so the app
+/// asked Bunny for a display-sized image but still stored and decoded
+/// whatever it actually received at full size.
+int? _targetPixelWidth(BuildContext context, double? displayWidth) {
   final logicalWidth = displayWidth ?? Responsive.width(15, context);
   if (logicalWidth <= 0 || logicalWidth.isNaN || logicalWidth.isInfinite) {
-    return bunnyOptimizedUrl(url);
+    return null;
   }
   final dpr = MediaQuery.of(context).devicePixelRatio;
-  final targetWidth = (logicalWidth * dpr).round().clamp(1, 2000);
-  return bunnyOptimizedUrl(url, width: targetWidth);
+  return (logicalWidth * dpr).round().clamp(1, 2000);
 }
 
 /// Warms the cache for an upcoming carousel image using the exact same
@@ -72,7 +87,14 @@ void precacheCarouselImage(BuildContext context, String imageUrl,
     {double? width, double? resizeWidth, BaseCacheManager? cacheManager}) {
   final resolvedUrl = _preciseBunnyUrl(imageUrl, context, resizeWidth ?? width);
   precacheImage(
-          CachedNetworkImageProvider(resolvedUrl, cacheManager: cacheManager),
+          CachedNetworkImageProvider(
+            resolvedUrl,
+            // Must resolve to the same store NetworkImageWidget renders from,
+            // or this warms one cache and the render reads another — the
+            // silent-miss failure this function's doc comment warns about.
+            // Both now default to AppCacheConfig.images.
+            cacheManager: cacheManager ?? AppCacheConfig.images,
+          ),
           context)
       .catchError((_) {});
 }
@@ -158,9 +180,35 @@ class NetworkImageWidget extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Same pixel width the Bunny resize URL is built from (see
+    // _targetPixelWidth). Used here as the decode ceiling for BOTH the disk
+    // copy and the in-memory bitmap.
+    //
+    // This matters most while the Bunny Optimizer is switched off: the
+    // resize parameters in the URL are inert then, so the app receives the
+    // full-resolution original (measured 2026-09-10: ~1.25 MB average for
+    // store photos, largest 2.26 MB). Without a decode ceiling that original
+    // is what gets written to disk AND what gets decoded into memory at
+    // width × height × 4 bytes — a 4000×3000 photo is ~48 MB of RAM for one
+    // card. With it, the app stores and decodes a display-sized copy while
+    // still downloading the full bytes.
+    //
+    // To be explicit about what this does and does not fix: it bounds
+    // STORAGE and MEMORY, not bandwidth. The full file still crosses the
+    // network. Only resizing at upload, or enabling the Optimizer, reduces
+    // what is downloaded.
+    final decodeWidth = _targetPixelWidth(context, resizeWidth ?? width);
+
     return CachedNetworkImage(
       imageUrl: _preciseBunnyUrl(imageUrl, context, resizeWidth ?? width),
-      cacheManager: cacheManager,
+      // Defaults to the bounded shared store (120 files / 7 days, LRU) rather
+      // than cached_network_image's DefaultCacheManager (200 files / 30 days),
+      // so visiting store 121 evicts the least-recently-used entry instead of
+      // growing the cache. Call sites that pass their own manager (e.g. the
+      // perf-diagnostic store) are unaffected.
+      cacheManager: cacheManager ?? AppCacheConfig.images,
+      maxWidthDiskCache: decodeWidth,
+      memCacheWidth: decodeWidth,
       fit: fit ?? BoxFit.fitWidth,
       height: height ?? Responsive.height(8, context),
       width: width ?? Responsive.width(15, context),

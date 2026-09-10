@@ -314,7 +314,13 @@ class _ContainerScreen extends State<ContainerScreen> {
                   onTap: () => _navigate(
                     DrawerSelection.Home,
                     'Stores'.tr(),
+                    // 2026-09-06: same missing-key bug class as the Orders fix
+                    // above - without a key, repeat "Stores" taps update the
+                    // same Element in place rather than creating a new one, so
+                    // HomeScreen.initState()'s startup fetches wouldn't rerun
+                    // on a later tap.
                     HomeScreen(
+                      key: UniqueKey(),
                       user: MyAppState.currentUser,
                       onOpenDrawer: () => key.currentState?.openDrawer(),
                     ),
@@ -372,7 +378,24 @@ class _ContainerScreen extends State<ContainerScreen> {
                   onTap: () => _navigateAuth(
                     DrawerSelection.Orders,
                     'Orders'.tr(),
-                    OrdersScreen(),
+                    // 2026-09-06 fix: this widget has no key, and gets
+                    // placed at the exact same _currentWidget tree slot on
+                    // every drawer tap - Flutter's diffing treats repeat
+                    // taps as an update to the SAME element (same
+                    // runtimeType, no key), not a new one, so initState()
+                    // (which calls getOrders() and opens the live listener)
+                    // only ever ran on the very first Orders visit for this
+                    // ContainerScreen's whole lifetime. Every later tap kept
+                    // showing that same original, aging snapshot forever -
+                    // confirmed live: an account's Orders list stayed frozen
+                    // at its Aug 31 state for days despite new orders
+                    // (Sept 4, Sept 6) that independently verified as
+                    // correctly matching getOrders()'s own Firestore query.
+                    // A fresh UniqueKey() per tap forces a genuinely new
+                    // Element/State each time, so initState() - and a fresh
+                    // forced-server read + live listener - reliably reruns
+                    // on every Orders visit, not just the first.
+                    OrdersScreen(key: UniqueKey()),
                   ),
                 ),
                 _drawerCartItem(dark),
@@ -962,7 +985,9 @@ class _ContainerScreen extends State<ContainerScreen> {
                                 setState(() {
                                   _drawerSelection = DrawerSelection.Home;
                                   _appBarTitle = 'Stores'.tr();
+                                  // Same missing-key fix as the drawer's "Stores" tap above.
                                   _currentWidget = HomeScreen(
+                                    key: UniqueKey(),
                                     user: MyAppState.currentUser,
                                     onOpenDrawer: () => key.currentState?.openDrawer(),
                                   );

@@ -114,8 +114,6 @@ class HomeScreenState extends State<OrderTrackingScreen> {
   void dispose() {
     _mapController?.dispose();
     try { fireStoreUtils.driverStreamSub.cancel(); } catch (_) {}
-    try { fireStoreUtils.ordersStreamController.close(); } catch (_) {}
-    try { fireStoreUtils.ordersStreamSub.cancel(); } catch (_) {}
     super.dispose();
   }
 

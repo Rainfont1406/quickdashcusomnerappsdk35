@@ -193,7 +193,7 @@ class _PlaceOrderScreenState extends State<PlaceOrderScreen>
     try {
       // Always fetch the live token from Firestore — never use the
       // cached value which may be stale (e.g. vendor logged out).
-      final vendorId = _order!.vendor.id;
+      final vendorId = _order!.vendorID;
       String liveToken = '';
       if (vendorId.isNotEmpty) {
         final doc = await FireStoreUtils.firestore

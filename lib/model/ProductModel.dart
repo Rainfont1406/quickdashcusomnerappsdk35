@@ -21,10 +21,15 @@ class ProductModel {
   String section_id;
   int quantity;
   bool publish;
-  int calories;
+  // calories/proteins/fats removed (2026-09-06) - exact duplicates of
+  // nutrition_info.calories/.protein/.fat, always written as 0 (the add/
+  // edit product form never sets them; only nutrition_info's own richer
+  // form does) and read nowhere except fully commented-out code in the
+  // legacy ProductDetailsScreen. The live Nutrition Filter feature (see
+  // newVendorProductsScreen.dart's classifyMetric calls) uses
+  // nutritionInfo exclusively. grams kept - a real, distinct field (serving
+  // size), not part of this duplication.
   int grams;
-  int proteins;
-  int fats;
   bool veg;
   bool nonveg;
   String? disPrice = "0";
@@ -97,10 +102,7 @@ class ProductModel {
     this.quantity = 0,
     this.vendorID = '',
     this.section_id = '',
-    this.calories = 0,
     this.grams = 0,
-    this.proteins = 0,
-    this.fats = 0,
     this.publish = true,
     this.veg = false,
     this.nonveg = false,
@@ -147,10 +149,7 @@ class ProductModel {
       vendorID: parsedJson['vendorID'] ?? '',
       section_id: parsedJson['section_id'] ?? '',
       publish: parsedJson['publish'] ?? true,
-      calories: parsedJson['calories'] ?? 0,
       grams: parsedJson['grams'] ?? 0,
-      proteins: parsedJson['proteins'] ?? 0,
-      fats: parsedJson['fats'] ?? 0,
       nonveg: parsedJson['nonveg'] ?? false,
       disPrice: parsedJson['disPrice'] ?? '0',
       specification: (() {
@@ -291,10 +290,7 @@ class ProductModel {
       'vendorID': vendorID,
       'section_id': section_id,
       'publish': publish,
-      'calories': calories,
       'grams': grams,
-      'proteins': proteins,
-      'fats': fats,
       'veg': veg,
       'nonveg': nonveg,
       'DineAway': {
