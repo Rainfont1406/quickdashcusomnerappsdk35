@@ -1250,24 +1250,39 @@ class SearchScreenState extends State<SearchScreen> {
                   width: 100,
                   height: 100,
                   color: dark ? AppThemeData.grey800 : AppThemeData.grey100,
-                  child: CachedNetworkImage(
-                    imageUrl: _logoUrl(v),
+                  // LazyNetworkImage (2026-09-11) - this card is also used by
+                  // the "Recommended for You" list in _buildEmptyState, which
+                  // is shrinkWrap + NeverScrollableScrollPhysics nested inside
+                  // a SingleChildScrollView (so it can report an intrinsic
+                  // height), forcing all 10 recommended vendors to build up
+                  // front and fire a logo fetch on search-screen open
+                  // regardless of what's actually visible. Gating on real
+                  // scroll visibility here costs nothing for this card's
+                  // OTHER use in _buildResults' already-lazy ListView.builder
+                  // (it becomes visible immediately there either way).
+                  child: LazyNetworkImage(
+                    cacheKey: 'search_vendor_${v.id}',
                     width: 100,
                     height: 100,
-                    fit: BoxFit.contain,
-                    placeholder: (_, __) => Center(
-                      child: SizedBox(
-                        width: 22,
-                        height: 22,
-                        child: CircularProgressIndicator.adaptive(
-                          strokeWidth: 2,
-                          valueColor: AlwaysStoppedAnimation(AppThemeData.primary500),
+                    builder: (context) => CachedNetworkImage(
+                      imageUrl: _logoUrl(v),
+                      width: 100,
+                      height: 100,
+                      fit: BoxFit.contain,
+                      placeholder: (_, __) => Center(
+                        child: SizedBox(
+                          width: 22,
+                          height: 22,
+                          child: CircularProgressIndicator.adaptive(
+                            strokeWidth: 2,
+                            valueColor: AlwaysStoppedAnimation(AppThemeData.primary500),
+                          ),
                         ),
                       ),
-                    ),
-                    errorWidget: (_, __, ___) => Center(
-                      child: Icon(Icons.store_rounded,
-                          size: 40, color: AppThemeData.grey400),
+                      errorWidget: (_, __, ___) => Center(
+                        child: Icon(Icons.store_rounded,
+                            size: 40, color: AppThemeData.grey400),
+                      ),
                     ),
                   ),
                 ),

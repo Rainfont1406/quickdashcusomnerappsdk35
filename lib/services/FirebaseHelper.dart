@@ -1852,16 +1852,37 @@ class FireStoreUtils {
 
   // ── Offers & Discounts (2026-08-03) ────────────────────────────────────────
   // Categories are few and admin-curated, so a whole-list TTL cache is fine.
-  // Offers are fetched in full per category (see getAllActiveLocalOffers
-  // below, 2026-08-07) so no whole-list cache is kept for them - each
-  // category switch is its own fresh query.
+  //
+  // (2026-09-11 fix) Same plain-TTL cache shape as the product-list mirror
+  // cache right above (_productsCache) - deliberately not a conditional/ETag
+  // revalidation scheme. The Bunny blobs behind this are already kept
+  // instantly current server-side (functions/index.js's
+  // syncLocalOffersToBunny / syncLocalOfferCategoriesToBunny fire on every
+  // local_offers / local_offer_categories write and rebuild+purge the CDN
+  // edge within seconds - see BunnyLocalOfferMirrorController), so the only
+  // job left for this client-side cache is what the product cache already
+  // does: avoid re-downloading the same unchanged blob on every screen open.
+  //
+  // TTL is deliberately much longer than the product cache's 10 minutes,
+  // though - that value fits data that can plausibly change within a
+  // session (stock, banners); local offers are set once by an admin and
+  // just count down to their own validTill (commonly 2-3 days out), so
+  // there's nothing to gain from re-checking every 10 minutes - a session
+  // that reopens this screen repeatedly over a few idle hours/days would
+  // otherwise re-download the exact same unchanged blob dozens of times for
+  // no reason. 6 hours still means a genuine same-day admin edit shows up
+  // the same day, with a small fraction of the request volume.
   static List<LocalOfferCategoryModel>? _localOfferCategoriesCache;
   static DateTime? _localOfferCategoriesCachedAt;
-  static const Duration _localOffersCacheTtl = Duration(minutes: 10);
+  static List<LocalOfferModel>? _localOffersCache;
+  static DateTime? _localOffersCachedAt;
+  static const Duration _localOffersCacheTtl = Duration(hours: 6);
 
   static void clearLocalOffersCache() {
     _localOfferCategoriesCache = null;
     _localOfferCategoriesCachedAt = null;
+    _localOffersCache = null;
+    _localOffersCachedAt = null;
   }
 
   static Future<List<LocalOfferCategoryModel>> getLocalOfferCategories() async {
@@ -1907,13 +1928,27 @@ class FireStoreUtils {
     String? categoryId,
     int limit = 300,
   }) async {
-    // Bunny mirror only covers the whole-set fetch (see
-    // fetchLocalOffersFromBunny's own doc comment) - the only shape
-    // LocalOffersListScreen actually calls today. A categoryId-scoped call
-    // goes straight to Firestore as before.
-    if (categoryId == null || categoryId.isEmpty) {
+    // Only the unfiltered (whole-set) shape is cached - the only way
+    // LocalOffersListScreen actually calls this (see its own doc comment on
+    // _selectCategory). A categoryId-scoped call is a narrower result than
+    // the cached whole set, so it can't safely reuse this cache entry;
+    // falls through to a fresh Firestore query as before.
+    final unfiltered = categoryId == null || categoryId.isEmpty;
+    if (unfiltered) {
+      final now = DateTime.now();
+      if (_localOffersCache != null &&
+          _localOffersCachedAt != null &&
+          now.difference(_localOffersCachedAt!) < _localOffersCacheTtl) {
+        return _localOffersCache!;
+      }
+      // Bunny mirror only covers the whole-set fetch (see
+      // fetchLocalOffersFromBunny's own doc comment).
       final mirrored = await fetchLocalOffersFromBunny();
-      if (mirrored != null) return mirrored;
+      if (mirrored != null) {
+        _localOffersCache = mirrored;
+        _localOffersCachedAt = now;
+        return mirrored;
+      }
     }
     List<LocalOfferModel> offers = [];
     try {
@@ -1930,6 +1965,10 @@ class FireStoreUtils {
       offers = snapshot.docs.map((d) => LocalOfferModel.fromJson(d.data())).toList();
     } catch (e) {
       log('FireStoreUtils.getAllActiveLocalOffers $e');
+    }
+    if (unfiltered) {
+      _localOffersCache = offers;
+      _localOffersCachedAt = DateTime.now();
     }
     return offers;
   }
@@ -2085,58 +2124,15 @@ class FireStoreUtils {
     return cuisines;
   }
 
-  StreamController<List<VendorModel>>? dineInStreamController;
-  StreamSubscription? dineInStreamSub;
-
-  // Same geoflutterfire radius filter as getAllStores()/getVendorsByCuisineID()
-  // - this previously queried the whole section with no distance check at
-  // all, so the Dine In tab could show vendors far outside nearByRadius.
-  Stream<List<VendorModel>> getAllDineInRestaurants() async* {
-    dineInStreamController = StreamController<List<VendorModel>>.broadcast();
-
-    try {
-      var collectionReference = firestore
-          .collection(VENDORS)
-          .where("section_id", isEqualTo: sectionConstantModel!.id)
-          .where("enabledDiveInFuture", isEqualTo: true);
-
-      GeoFirePoint center = geo.point(
-          latitude: MyAppState.selectedPosotion.location!.latitude,
-          longitude: MyAppState.selectedPosotion.location!.longitude);
-
-      Stream<List<DocumentSnapshot>> stream = geo
-          .collection(collectionRef: collectionReference)
-          .within(center: center, radius: double.parse(sectionConstantModel!.nearByRadius.toString()), field: 'g', strictMode: true);
-
-      // Captured so a caller can actually cancel this - previously discarded
-      // entirely, so every visit to the Dine In tab (DineInScreen.initState
-      // calling this fresh with no matching dispose() cleanup) left this geo
-      // listener running for the rest of the app process, each one an
-      // independent live read subscription over every vendor in the radius.
-      dineInStreamSub = stream.listen((List<DocumentSnapshot> documentList) {
-        final List<VendorModel> vendors = [];
-        for (var doc in documentList) {
-          try {
-            vendors.add(VendorModel.fromJson(doc.data() as Map<String, dynamic>));
-          } catch (e) {
-            print('getAllDineInRestaurants parse error: $e');
-          }
-        }
-        if (dineInStreamController?.isClosed == false) {
-          dineInStreamController!.add(vendors);
-        }
-      });
-    } catch (e) {
-      print('getAllDineInRestaurants setup error: $e');
-    }
-
-    yield* dineInStreamController!.stream;
-  }
-
-  void closeDineInStream() {
-    dineInStreamSub?.cancel();
-    dineInStreamController?.close();
-  }
+  // getAllDineInRestaurants()/closeDineInStream() removed 2026-09-11 - the
+  // raw GeoFirestore .within() query here was invisible to .getLogged()'s
+  // read-cost instrumentation and, at the section's admin-configured
+  // 13,000km ("effectively unlimited") radius, read far more documents than
+  // it ever displayed (confirmed live: ~179 reads for one Dine-In visit,
+  // zero matching lines in the app's own read log). DineInScreen now reads
+  // off SharedVendorsWatcher.watch() (the same Bunny-mirrored, shared
+  // section vendor list HomeScreen already uses) and filters client-side
+  // for enabledDiveInFuture, same as HomeScreen's own migration.
 
   late StreamSubscription vendorStreamSub;
   StreamController<List<VendorModel>>? vendorStreamController;

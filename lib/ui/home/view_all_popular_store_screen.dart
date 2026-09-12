@@ -5,6 +5,7 @@ import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
+import 'package:emartconsumer/services/shared_vendors_watcher.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 // import 'package:emartconsumer/ui/vendorProductsScreen/NewVendorProductsScreen.dart';
@@ -26,7 +27,6 @@ class ViewAllPopularStoreScreen extends StatefulWidget {
 
 class _ViewAllPopularStoreScreenState extends State<ViewAllPopularStoreScreen> {
   Stream<List<VendorModel>>? vendorsFuture;
-  final fireStoreUtils = FireStoreUtils();
   List<VendorModel> storeAllLst = [];
 
   // List<VendorModel> popularStoreLst = [];
@@ -37,7 +37,14 @@ class _ViewAllPopularStoreScreenState extends State<ViewAllPopularStoreScreen> {
   void initState() {
     super.initState();
     _getUserLocation();
-    vendorsFuture = fireStoreUtils.getAllStores().asBroadcastStream();
+    // 2026-09-11: was fireStoreUtils.getAllStores(), a second independent
+    // raw GeoFirestore listener over the whole section duplicating
+    // HomeScreen's own (already migrated 2026-09-07) - reads off the same
+    // shared, Bunny-mirrored watcher instead of opening another one.
+    final sectionId = sectionConstantModel?.id ?? '';
+    final lat = MyAppState.selectedPosotion.location?.latitude ?? 0.0;
+    final lng = MyAppState.selectedPosotion.location?.longitude ?? 0.0;
+    vendorsFuture = SharedVendorsWatcher.watch(sectionId, lat, lng).asBroadcastStream();
     vendorsFuture!.listen((value) {
       storeAllLst.clear();
       storeAllLst.addAll(value);

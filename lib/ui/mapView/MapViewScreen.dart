@@ -9,6 +9,7 @@ import 'package:emartconsumer/model/User.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/helper.dart';
+import 'package:emartconsumer/services/shared_vendors_watcher.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/vendorProductsScreen/newVendorProductsScreen.dart';
 // import 'package:emartconsumer/ui/vendorProductsScreen/NewVendorProductsScreen.dart';
@@ -49,7 +50,6 @@ class _MapViewScreenState extends State<MapViewScreen> {
   }
 
   GoogleMapController? _mapController;
-  FireStoreUtils fireStoreUtils = FireStoreUtils();
   List<VendorModel> vendors = [];
 
   var id, inx, latpos, lotpos;
@@ -68,9 +68,17 @@ class _MapViewScreenState extends State<MapViewScreen> {
       mapOsmController = osmMap.MapController(initPosition: osmMap.GeoPoint(latitude: 20.9153, longitude: -100.7439), useExternalTracking: false); //OSM
     }
     setState(() {
+      // 2026-09-11: fallback was fireStoreUtils.getAllStores(), a second
+      // independent raw GeoFirestore listener - now reads off the same
+      // shared, Bunny-mirrored watcher HomeScreen already feeds allstoreList
+      // from, instead of opening another one when allstoreList is empty
+      // (e.g. MapView opened before Home ever populated it).
+      final sectionId = sectionConstantModel?.id ?? '';
+      final lat = MyAppState.selectedPosotion.location?.latitude ?? 0.0;
+      final lng = MyAppState.selectedPosotion.location?.longitude ?? 0.0;
       _mapFuture = (allstoreList.isNotEmpty
               ? Stream.value(List<VendorModel>.from(allstoreList))
-              : fireStoreUtils.getAllStores())
+              : SharedVendorsWatcher.watch(sectionId, lat, lng))
           .asBroadcastStream();
       vendorsFuture = _mapFuture;
     });

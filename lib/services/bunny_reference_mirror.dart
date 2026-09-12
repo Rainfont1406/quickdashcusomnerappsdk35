@@ -191,10 +191,17 @@ Timestamp? _timestampFromMirrorMillis(dynamic value) {
 
 /// Fetches the "Offers & Discounts" drawer screen's category chips from
 /// Bunny instead of querying Firestore directly - see
-/// BunnyLocalOfferMirrorController::rebuildCategories (Laravel). No
-/// Timestamp/GeoPoint fields on this model, so no reconstruction needed.
-/// Sorted by sortOrder client-side to match the original query's
-/// orderBy('sortOrder'), since the mirror blob itself is unordered.
+/// BunnyLocalOfferMirrorController::rebuildCategories (Laravel), triggered
+/// instantly on every local_offer_categories write by
+/// functions/index.js's syncLocalOfferCategoriesToBunny - so this blob is
+/// always current the moment an admin saves; caching it client-side (see
+/// FirebaseHelper.getLocalOfferCategories) is purely to avoid re-downloading
+/// it on every screen open, same plain-TTL shape as the product-list mirror
+/// cache. No Timestamp/GeoPoint fields on this model, so no reconstruction
+/// needed. Sorted by sortOrder client-side to match the original query's
+/// orderBy('sortOrder'), since the mirror blob itself is unordered. Returns
+/// null on any failure so the caller falls back to the original Firestore
+/// query; never throws.
 Future<List<LocalOfferCategoryModel>?> fetchLocalOfferCategoriesFromBunny() async {
   try {
     final resp = await http
@@ -218,15 +225,22 @@ Future<List<LocalOfferCategoryModel>?> fetchLocalOfferCategoriesFromBunny() asyn
 
 /// Fetches the "Offers & Discounts" drawer screen's active offers from
 /// Bunny instead of querying Firestore directly - see
-/// BunnyLocalOfferMirrorController::rebuildOffers (Laravel). Reconstructs
-/// every Timestamp (top-level startDate/validTill/createdAt AND each
-/// offers[] heading's own startDate/validTill) and every GeoPoint
-/// (top-level resolvedLocation AND each ctaButtons[] entry's
-/// resolvedLocation) before calling LocalOfferModel.fromJson, since that
-/// model assigns every one of those fields straight in with no type check.
-/// Only global, unfiltered-by-category fetches are mirrored - matches the
-/// only way LocalOffersListScreen actually calls getAllActiveLocalOffers
-/// today (no categoryId; filtering happens client-side after fetch).
+/// BunnyLocalOfferMirrorController::rebuildOffers (Laravel), triggered
+/// instantly on every local_offers write by functions/index.js's
+/// syncLocalOffersToBunny - so this blob is always current the moment an
+/// admin saves; caching it client-side (see
+/// FirebaseHelper.getAllActiveLocalOffers) is purely to avoid
+/// re-downloading it on every screen open, same plain-TTL shape as the
+/// product-list mirror cache. Reconstructs every Timestamp (top-level
+/// startDate/validTill/createdAt AND each offers[] heading's own
+/// startDate/validTill) and every GeoPoint (top-level resolvedLocation AND
+/// each ctaButtons[] entry's resolvedLocation) before calling
+/// LocalOfferModel.fromJson, since that model assigns every one of those
+/// fields straight in with no type check. Only global, unfiltered-by-category
+/// fetches are mirrored - matches the only way LocalOffersListScreen
+/// actually calls getAllActiveLocalOffers today (no categoryId; filtering
+/// happens client-side after fetch). Returns null on any failure so the
+/// caller falls back to the original Firestore query; never throws.
 Future<List<LocalOfferModel>?> fetchLocalOffersFromBunny() async {
   try {
     final resp = await http

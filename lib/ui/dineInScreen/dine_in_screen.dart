@@ -7,6 +7,7 @@ import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/model/User.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/helper.dart';
+import 'package:emartconsumer/services/shared_vendors_watcher.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/dineInScreen/dine_in_restaurant_details_screen.dart';
 import 'package:flutter/material.dart';
@@ -138,7 +139,6 @@ class DineInScreen extends StatefulWidget {
 }
 
 class _DineInScreenState extends State<DineInScreen> {
-  final FireStoreUtils _fireStoreUtils = FireStoreUtils();
   Stream<List<VendorModel>>? _restaurantStream;
   bool _isLoading = true;
   final TextEditingController _searchCtrl = TextEditingController();
@@ -155,13 +155,35 @@ class _DineInScreenState extends State<DineInScreen> {
 
   @override
   void dispose() {
-    _fireStoreUtils.closeDineInStream();
+    // Deliberately NOT stopping SharedVendorsWatcher here - it's a shared,
+    // app-session-scoped watcher (same one HomeScreen feeds off), not owned
+    // by this screen. Tearing it down on dispose would kill Home's live
+    // status listener too if Dine-In was opened after Home.
     _searchCtrl.dispose();
     super.dispose();
   }
 
+  // 2026-09-11: was FireStoreUtils.getAllDineInRestaurants(), a raw
+  // GeoFirestore .within() query against the `vendors` collection with an
+  // admin-configured radius of 13,000km (effectively unlimited, see
+  // SharedVendorsWatcher's own comment) - geohash-grid queries that wide
+  // read far more documents than the handful actually shown, and weren't
+  // wrapped in .getLogged() at all, making the cost invisible to every read
+  // audit done so far (confirmed live: a single Dine-In visit cost ~179
+  // reads with zero matching lines in the app's own Firestore-read log).
+  // Same fix HomeScreen got in the 2026-09-07 rebuild: read the shared,
+  // Bunny-mirrored section vendor list instead of opening a second
+  // independent geo-listener, then filter client-side for the one field
+  // that actually matters here (enabledDiveInFuture) - already present in
+  // the mirror since BunnyVendorListMirrorController mirrors full vendor
+  // documents, no field whitelist.
   void _loadRestaurants() {
-    _restaurantStream = _fireStoreUtils.getAllDineInRestaurants().asBroadcastStream();
+    final sectionId = sectionConstantModel?.id ?? '';
+    final lat = MyAppState.selectedPosotion.location?.latitude ?? 0.0;
+    final lng = MyAppState.selectedPosotion.location?.longitude ?? 0.0;
+    _restaurantStream = SharedVendorsWatcher.watch(sectionId, lat, lng)
+        .map((vendors) => vendors.where((v) => v.enabledDiveInFuture).toList())
+        .asBroadcastStream();
     setState(() => _isLoading = false);
   }
 

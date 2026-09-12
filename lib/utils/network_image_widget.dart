@@ -10,6 +10,7 @@ import 'package:emartconsumer/theme/responsive.dart';
 import 'package:emartconsumer/widget/shimmer_box.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
+import 'package:visibility_detector/visibility_detector.dart';
 
 // A failed DNS lookup / no route to host means the device has no working
 // internet connection right now — it says nothing about whether this image
@@ -242,14 +243,88 @@ class NetworkImageWidget extends StatelessWidget {
             borderRadius: borderRadius ?? 0,
           );
         }
-        return errorWidget ??
-            Image.network(
-              placeholderImage,
-              fit: fit ?? BoxFit.fitWidth,
-              height: height ?? Responsive.height(8, context),
-              width: width ?? Responsive.width(15, context),
-            );
+        if (errorWidget != null) return errorWidget!;
+        if (placeholderImage.isEmpty) {
+          return SizedBox(
+            height: height ?? Responsive.height(8, context),
+            width: width ?? Responsive.width(15, context),
+          );
+        }
+        // Same CachedNetworkImage + Bunny-resize + shared disk cache treatment
+        // as the real image above (2026-09-11 fix) - this used to be a bare
+        // Image.network() at full original resolution with no disk cache, so
+        // every photo-less vendor/product re-downloaded this same global
+        // branded placeholder from scratch, uncapped, on every render.
+        return CachedNetworkImage(
+          imageUrl: _preciseBunnyUrl(placeholderImage, context, resizeWidth ?? width),
+          cacheManager: cacheManager ?? AppCacheConfig.images,
+          maxWidthDiskCache: decodeWidth,
+          memCacheWidth: decodeWidth,
+          fit: fit ?? BoxFit.fitWidth,
+          height: height ?? Responsive.height(8, context),
+          width: width ?? Responsive.width(15, context),
+          color: color,
+          // Base case: if even the placeholder fails (bad config, offline
+          // with nothing cached), fall back to empty space rather than
+          // recursing into another NetworkImageWidget/errorWidget cycle.
+          errorWidget: (context, url, error) => SizedBox(
+            height: height ?? Responsive.height(8, context),
+            width: width ?? Responsive.width(15, context),
+          ),
+        );
       },
+    );
+  }
+}
+
+/// Defers building a real image widget until it is actually scrolled into
+/// view - for image lists that are forced to build every item up front
+/// (shrinkWrap: true + NeverScrollableScrollPhysics nested inside another
+/// scrollable, needed so the inner list can report an intrinsic height to
+/// its ancestor), which otherwise fires a network request per item the
+/// moment the screen opens regardless of what's actually on screen.
+///
+/// Shared, public version (2026-09-11) of the same pattern already proven
+/// on-device for the vendor menu's dish grid (_LazyDishImage in
+/// newVendorProductsScreen.dart) and Home screen's restaurant cards -
+/// pulled out here so any future shrinkWrap + NeverScrollableScrollPhysics
+/// image list can reuse it instead of re-implementing its own copy.
+class LazyNetworkImage extends StatefulWidget {
+  final String cacheKey;
+  final double width;
+  final double height;
+  final WidgetBuilder builder;
+
+  const LazyNetworkImage({
+    super.key,
+    required this.cacheKey,
+    required this.width,
+    required this.height,
+    required this.builder,
+  });
+
+  @override
+  State<LazyNetworkImage> createState() => _LazyNetworkImageState();
+}
+
+class _LazyNetworkImageState extends State<LazyNetworkImage> {
+  bool _visible = false;
+
+  @override
+  Widget build(BuildContext context) {
+    if (_visible) return widget.builder(context);
+    return VisibilityDetector(
+      key: ValueKey('lazyImg_${widget.cacheKey}'),
+      onVisibilityChanged: (info) {
+        if (!_visible && info.visibleFraction > 0 && mounted) {
+          setState(() => _visible = true);
+        }
+      },
+      child: ShimmerBox(
+        width: widget.width,
+        height: widget.height,
+        borderRadius: 0,
+      ),
     );
   }
 }

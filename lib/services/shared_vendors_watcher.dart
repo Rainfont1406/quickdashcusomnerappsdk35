@@ -52,8 +52,17 @@ import 'package:flutter/foundation.dart';
 /// distances against a new location is a free client-side operation instead
 /// of tearing down and reopening a live geo-query.
 ///
-/// Deliberately NOT used by view_all_popular_store_screen.dart or
-/// MapViewScreen.dart - both still call getAllStores() directly, unchanged.
+/// 2026-09-11: also migrated onto this watcher - DineInScreen (was its own
+/// raw GeoFirestore listener via FireStoreUtils.getAllDineInRestaurants(),
+/// filtered here client-side for enabledDiveInFuture), MapViewScreen (was
+/// its own getAllStores() fallback for when allstoreList is empty), and
+/// view_all_popular_store_screen.dart (was its own getAllStores() call).
+/// All three previously opened an independent live geo-listener duplicating
+/// whatever HomeScreen already had open - and DineInScreen's, being a raw
+/// query at the section's admin-configured 13,000km ("effectively
+/// unlimited") radius with no .getLogged() wrapper, was an invisible read
+/// cost (confirmed live: ~179 reads for one Dine-In visit, zero matching
+/// lines in the app's own Firestore-read log).
 class SharedVendorsWatcher {
   SharedVendorsWatcher._();
 

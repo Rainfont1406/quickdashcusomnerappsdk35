@@ -240,8 +240,22 @@ class _TimedHttpGetResponse implements FileServiceResponse {
   }
 }
 
+// MUST be ImageCacheManager, not the plain CacheManager (2026-09-11 fix) -
+// same gotcha already documented in app_cache_config.dart's AppImageCacheManager:
+// a plain CacheManager silently ignores maxWidthDiskCache/memCacheWidth in
+// release builds (ignored resize request) and trips a debug-only assert in
+// debug builds (NetworkImageWidget's errorWidget then renders, since every
+// caller now passes those params). Confirmed on-device: the Home top banner
+// and vendor hero image - the only two call sites that pass this manager -
+// were both silently falling to NetworkImageWidget's error fallback for
+// every load, not because the source images were missing, but because this
+// manager could never satisfy the resize request they came with.
+class _PerfDiagnosticCacheManager extends CacheManager with ImageCacheManager {
+  _PerfDiagnosticCacheManager(super.config);
+}
+
 // Separate cache key from the app's real DefaultCacheManager so this
 // diagnostic instance doesn't share/pollute the normal disk cache database.
-final CacheManager perfDiagnosticCacheManager = CacheManager(
+final CacheManager perfDiagnosticCacheManager = _PerfDiagnosticCacheManager(
   Config('homePerfDiagCache', fileService: PerfTimedFileService()),
 );
