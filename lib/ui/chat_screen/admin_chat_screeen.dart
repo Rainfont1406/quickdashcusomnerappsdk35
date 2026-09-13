@@ -66,7 +66,9 @@ class _AdminChatScreenState extends State<AdminChatScreen> {
   String get _shortOrderId {
     final id = widget.orderId;
     if (id == null || id.isEmpty) return '';
-    return '#${id.length >= 8 ? id.substring(id.length - 8).toUpperCase() : id.toUpperCase()}';
+    // Full id, not truncated - see OrderDetailsScreen.dart's identical fix
+    // (2026-09-13) for why order ids have no safe truncation point.
+    return '#${id.toUpperCase()}';
   }
 
   bool _sending = false;

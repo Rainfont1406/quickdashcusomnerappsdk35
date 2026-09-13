@@ -680,7 +680,17 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
                 Icon(Icons.receipt_long_outlined, size: 13, color: AppThemeData.grey400),
                 const SizedBox(width: 6),
                 Text(
-                  '#${order.id.length > 8 ? order.id.substring(order.id.length - 8).toUpperCase() : order.id.toUpperCase()}',
+                  // Full id, not truncated to the last 8 characters (fixed
+                  // 2026-09-13) - order ids from generateOrderId() are
+                  // 8-9 DIGITS, not a fixed-length string, so truncating
+                  // silently dropped the leading digit on every 9-digit id
+                  // (confirmed live: real id 874421190 displayed as
+                  // "#74421190", which does not exist as its own order and
+                  // caused a real lookup mix-up during device testing this
+                  // session). Unlike booking.id elsewhere (a fixed 20-char
+                  // Firestore auto-id, safe to shorten), order ids have no
+                  // safe truncation point.
+                  '#${order.id.toUpperCase()}',
                   style: TextStyle(
                     fontFamily: AppThemeData.medium,
                     fontSize: 12,
