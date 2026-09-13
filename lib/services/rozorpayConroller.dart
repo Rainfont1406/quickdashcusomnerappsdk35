@@ -68,6 +68,11 @@ class VerifiedPaymentOrderResult {
   // is the CURRENT, real total the caller must show before retrying.
   final bool billUpdated;
   final double? updatedTotal;
+  // Set when the server's pre-payment check refused this order (2026-09-13):
+  // either it can't be fulfilled as submitted (preflight.isBlocked), or the
+  // total the customer saw differs from the real one (preflight.priceChanged).
+  // The server moved no money and created no order in either case.
+  final PreflightRejection? preflight;
 
   VerifiedPaymentOrderResult({
     this.success = false,
@@ -81,7 +86,125 @@ class VerifiedPaymentOrderResult {
     this.insufficientBalance = false,
     this.billUpdated = false,
     this.updatedTotal,
+    this.preflight,
   });
+}
+
+// ── Pre-payment order blocking (2026-09-13) ─────────────────────────────────
+// Mirrors the server contract in functions/orderPreflight.js:
+//   409 { error: 'order_blocked', reasons: [{ code, items?, couponId? }] }
+//   409 { error: 'price_changed', previousTotal, updatedTotal, changes, correctedLines }
+// Parsed in ONE place for all four payment calls, so a customer can't be
+// shown a reason on one payment method and a raw error code on another.
+
+class BlockedItem {
+  final String name;
+  // missing | unpublished | not_approved | variant_deleted | out_of_stock | qty_cap
+  final String reason;
+  final int? available;
+  BlockedItem({required this.name, required this.reason, this.available});
+}
+
+class OrderBlockReason {
+  // item_unavailable | coupon_invalid | invalid_amount
+  final String code;
+  final List<BlockedItem> items;
+  final String? couponId;
+  OrderBlockReason({required this.code, this.items = const [], this.couponId});
+}
+
+class PriceChangeLine {
+  final String name;
+  final double oldUnit;
+  final double newUnit;
+  PriceChangeLine({required this.name, required this.oldUnit, required this.newUnit});
+}
+
+// A cart line's verified unit price, keyed by the cart line id (productId or
+// productId~variantId). Applied to the order before retrying, so the order
+// document carries the same prices the customer just agreed to pay.
+class CorrectedLine {
+  final String lineId;
+  final double price;
+  final double extrasPrice;
+  CorrectedLine({required this.lineId, required this.price, required this.extrasPrice});
+}
+
+class PreflightRejection {
+  final bool priceChanged;
+  final List<OrderBlockReason> reasons;
+  final double? previousTotal;
+  final double? updatedTotal;
+  // May be EMPTY even when priceChanged is true: the total can move for a
+  // reason that isn't a line price (tax, special discount, delivery). The UI
+  // must still show the two totals in that case.
+  final List<PriceChangeLine> changes;
+  final List<CorrectedLine> correctedLines;
+
+  PreflightRejection({
+    required this.priceChanged,
+    this.reasons = const [],
+    this.previousTotal,
+    this.updatedTotal,
+    this.changes = const [],
+    this.correctedLines = const [],
+  });
+
+  bool get isBlocked => reasons.isNotEmpty;
+
+  static double? _d(dynamic v) => v is num ? v.toDouble() : double.tryParse('${v ?? ''}');
+
+  // Returns null for any response that isn't a pre-payment rejection, so each
+  // caller falls through to its existing error handling unchanged.
+  static PreflightRejection? fromResponse(Map<String, dynamic> data) {
+    final error = data['error'];
+    if (error == 'order_blocked') {
+      final rawReasons = data['reasons'] is List ? data['reasons'] as List : const [];
+      final reasons = rawReasons.whereType<Map>().map((r) {
+        final rawItems = r['items'] is List ? r['items'] as List : const [];
+        return OrderBlockReason(
+          code: '${r['code'] ?? ''}',
+          couponId: r['couponId']?.toString(),
+          items: rawItems.whereType<Map>().map((i) => BlockedItem(
+                name: '${i['name'] ?? ''}',
+                reason: '${i['reason'] ?? ''}',
+                available: (i['available'] as num?)?.toInt(),
+              )).toList(),
+        );
+      }).toList();
+      return PreflightRejection(priceChanged: false, reasons: reasons);
+    }
+    if (error == 'price_changed') {
+      final rawChanges = data['changes'] is List ? data['changes'] as List : const [];
+      final rawLines = data['correctedLines'] is List ? data['correctedLines'] as List : const [];
+      return PreflightRejection(
+        priceChanged: true,
+        previousTotal: _d(data['previousTotal']),
+        updatedTotal: _d(data['updatedTotal']),
+        changes: rawChanges.whereType<Map>().map((c) => PriceChangeLine(
+              name: '${c['name'] ?? ''}',
+              oldUnit: _d(c['oldUnit']) ?? 0,
+              newUnit: _d(c['newUnit']) ?? 0,
+            )).toList(),
+        correctedLines: rawLines.whereType<Map>().map((l) => CorrectedLine(
+              lineId: '${l['lineId'] ?? ''}',
+              price: _d(l['price']) ?? 0,
+              extrasPrice: _d(l['extras_price']) ?? 0,
+            )).toList(),
+      );
+    }
+    return null;
+  }
+
+  // Plain-text summary for any code path that only ever shows errorMessage,
+  // so a rejection is never displayed as a raw server code like
+  // "order_blocked". PaymentScreen shows a richer, translated dialog instead.
+  String get fallbackMessage {
+    if (priceChanged) return 'Prices have changed. Please review the updated total before paying.';
+    if (reasons.any((r) => r.code == 'item_unavailable')) return 'Some items in your order are no longer available.';
+    if (reasons.any((r) => r.code == 'coupon_invalid')) return 'The applied coupon is no longer valid.';
+    return 'This order could not be placed. Please review your cart.';
+  }
 }
 
 class VerifyPaymentResult {
@@ -110,6 +233,8 @@ class S2SUpiIntentResult {
   final bool deviceSuperseded;
   final bool billUpdated;
   final double? updatedTotal;
+  // See VerifiedPaymentOrderResult.preflight.
+  final PreflightRejection? preflight;
 
   S2SUpiIntentResult({
     this.success = false,
@@ -123,6 +248,7 @@ class S2SUpiIntentResult {
     this.deviceSuperseded = false,
     this.billUpdated = false,
     this.updatedTotal,
+    this.preflight,
   });
 }
 
@@ -165,6 +291,11 @@ class RazorPayController {
     // value that triggers it (2026-08-30, §11.21). Sourced from
     // PaymentScreen's own widget.orderType.
     String? clientOrderType,
+    // The grand total the customer was shown and is agreeing to pay. The
+    // server refuses with price_changed if the real total differs, instead of
+    // silently charging a different amount (2026-09-13). Omitted by older
+    // builds, for which the server simply skips that comparison.
+    double? expectedTotal,
   }) async {
     final idToken = await _idToken();
     if (idToken == null) {
@@ -194,6 +325,7 @@ class RazorPayController {
               'expectedBillVersion': expectedBillVersion,
               'scheduleTimeMillis': scheduleTimeMillis,
               'clientOrderType': clientOrderType,
+              'expectedTotal': expectedTotal,
             }),
           )
           .timeout(const Duration(seconds: 30));
@@ -208,6 +340,10 @@ class RazorPayController {
           verifiedDiscount: (data['verifiedDiscount'] as num?)?.toDouble() ?? 0,
           verifiedSpecialDiscount: (data['verifiedSpecialDiscount'] as num?)?.toDouble() ?? 0,
         );
+      }
+      final preflight = PreflightRejection.fromResponse(data);
+      if (preflight != null) {
+        return VerifiedPaymentOrderResult(preflight: preflight, errorMessage: preflight.fallbackMessage);
       }
       if (data['error'] == 'bill_updated') {
         return VerifiedPaymentOrderResult(
@@ -269,6 +405,11 @@ class RazorPayController {
     int? scheduleTimeMillis,
     // See createVerifiedOrderPayment's doc comment - same §11.21 addition.
     String? clientOrderType,
+    // The grand total the customer was shown and is agreeing to pay. The
+    // server refuses with price_changed if the real total differs, instead of
+    // silently charging a different amount (2026-09-13). Omitted by older
+    // builds, for which the server simply skips that comparison.
+    double? expectedTotal,
   }) async {
     final idToken = await _idToken();
     if (idToken == null) {
@@ -298,6 +439,7 @@ class RazorPayController {
               'expectedBillVersion': expectedBillVersion,
               'scheduleTimeMillis': scheduleTimeMillis,
               'clientOrderType': clientOrderType,
+              'expectedTotal': expectedTotal,
             }),
           )
           .timeout(const Duration(seconds: 30));
@@ -310,6 +452,10 @@ class RazorPayController {
           verifiedDiscount: (data['verifiedDiscount'] as num?)?.toDouble() ?? 0,
           verifiedSpecialDiscount: (data['verifiedSpecialDiscount'] as num?)?.toDouble() ?? 0,
         );
+      }
+      final preflight = PreflightRejection.fromResponse(data);
+      if (preflight != null) {
+        return VerifiedPaymentOrderResult(preflight: preflight, errorMessage: preflight.fallbackMessage);
       }
       if (data['error'] == 'bill_updated') {
         return VerifiedPaymentOrderResult(
@@ -383,6 +529,14 @@ class RazorPayController {
     // Bill Pay Accept & Pay only — see createVerifiedOrderPayment above.
     String? billPayRequestId,
     int? expectedBillVersion,
+    // Added 2026-09-13 - COD was the only verified path that sent neither.
+    // Without scheduleTimeMillis the server judged a scheduled COD order's
+    // vendor-open status at the moment of ordering; without clientOrderType
+    // a Dining order was taxed as Delivery. See createVerifiedOrderPayment
+    // above for what each one means.
+    int? scheduleTimeMillis,
+    String? clientOrderType,
+    double? expectedTotal,
   }) async {
     final idToken = await _idToken();
     if (idToken == null) {
@@ -412,6 +566,9 @@ class RazorPayController {
               'fcmToken': fcmToken,
               'billPayRequestId': billPayRequestId,
               'expectedBillVersion': expectedBillVersion,
+              'scheduleTimeMillis': scheduleTimeMillis,
+              'clientOrderType': clientOrderType,
+              'expectedTotal': expectedTotal,
             }),
           )
           .timeout(const Duration(seconds: 30));
@@ -424,6 +581,10 @@ class RazorPayController {
           verifiedDiscount: (data['verifiedDiscount'] as num?)?.toDouble() ?? 0,
           verifiedSpecialDiscount: (data['verifiedSpecialDiscount'] as num?)?.toDouble() ?? 0,
         );
+      }
+      final preflight = PreflightRejection.fromResponse(data);
+      if (preflight != null) {
+        return VerifiedPaymentOrderResult(preflight: preflight, errorMessage: preflight.fallbackMessage);
       }
       if (data['error'] == 'bill_updated') {
         return VerifiedPaymentOrderResult(
@@ -675,6 +836,11 @@ class RazorPayController {
     int? expectedBillVersion,
     int? scheduleTimeMillis,
     String? clientOrderType,
+    // The grand total the customer was shown and is agreeing to pay. The
+    // server refuses with price_changed if the real total differs, instead of
+    // silently charging a different amount (2026-09-13). Omitted by older
+    // builds, for which the server simply skips that comparison.
+    double? expectedTotal,
   }) async {
     final idToken = await _idToken();
     if (idToken == null) {
@@ -703,6 +869,7 @@ class RazorPayController {
               'expectedBillVersion': expectedBillVersion,
               'scheduleTimeMillis': scheduleTimeMillis,
               'clientOrderType': clientOrderType,
+              'expectedTotal': expectedTotal,
             }),
           )
           .timeout(const Duration(seconds: 30));
@@ -718,6 +885,10 @@ class RazorPayController {
           verifiedDiscount: (data['verifiedDiscount'] as num?)?.toDouble() ?? 0,
           verifiedSpecialDiscount: (data['verifiedSpecialDiscount'] as num?)?.toDouble() ?? 0,
         );
+      }
+      final preflight = PreflightRejection.fromResponse(data);
+      if (preflight != null) {
+        return S2SUpiIntentResult(preflight: preflight, errorMessage: preflight.fallbackMessage);
       }
       if (data['error'] == 'bill_updated') {
         return S2SUpiIntentResult(

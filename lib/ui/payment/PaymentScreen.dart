@@ -985,7 +985,7 @@ class PaymentScreenState extends State<PaymentScreen> {
           );
         }
         final userData = User.fromJson(snapshot.data!.data()!);
-        final bool sufficient = userData.wallet_amount >= widget.total;
+        final bool sufficient = userData.wallet_amount >= _payableTotal;
         walletBalanceError = sufficient;
         return _paymentRow(
           dark: dark,
@@ -1144,7 +1144,7 @@ class PaymentScreenState extends State<PaymentScreen> {
               children: [
                 Text('Order Total'.tr(), style: const TextStyle(color: Colors.white70, fontSize: 13, fontFamily: AppThemeData.regular)),
                 const SizedBox(height: 6),
-                Text(amountShow(amount: widget.total.toString()),
+                Text(amountShow(amount: _payableTotal.toString()),
                     style: const TextStyle(color: Colors.white, fontSize: 28, fontFamily: AppThemeData.bold)),
                 if (widget.couponCode != null && widget.couponCode!.isNotEmpty) ...[
                   const SizedBox(height: 8),
@@ -1314,7 +1314,7 @@ class PaymentScreenState extends State<PaymentScreen> {
                 }
                 if (asyncSnapshot.data == null || !asyncSnapshot.data!.exists) return const SizedBox.shrink();
                 final User userData = User.fromJson(asyncSnapshot.data!.data()!);
-                final bool sufficient = userData.wallet_amount >= widget.total;
+                final bool sufficient = userData.wallet_amount >= _payableTotal;
                 walletBalanceError = sufficient;
                 return Container(
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -1683,7 +1683,7 @@ class PaymentScreenState extends State<PaymentScreen> {
                     const SizedBox(width: 8),
                     Text('Pay Now'.tr(), style: const TextStyle(fontSize: 16, fontFamily: AppThemeData.semiBold, color: Colors.white)),
                     const SizedBox(width: 8),
-                    Text('· ${amountShow(amount: widget.total.toString())}',
+                    Text('· ${amountShow(amount: _payableTotal.toString())}',
                         style: const TextStyle(fontSize: 16, fontFamily: AppThemeData.semiBold, color: Colors.white)),
                   ],
                 ),
@@ -1695,6 +1695,7 @@ class PaymentScreenState extends State<PaymentScreen> {
   }
 
   Future<void> _onProceed(BuildContext context) async {
+    _lastPaymentAttempt = () => _onProceed(context);
     // TEMPORARY [ORDER-PERF] - timing instrumentation for the loading-speed
     // investigation. Remove once done.
     final proceedSw = Stopwatch()..start();
@@ -1781,7 +1782,7 @@ class PaymentScreenState extends State<PaymentScreen> {
         final verifySw = Stopwatch()..start();
         final result = await RazorPayController().createVerifiedWalletOrder(
           vendorID: widget.products.first.vendorID,
-          products: widget.products,
+          products: _orderProducts,
           orderId: orderId,
           couponId: widget.couponId,
           sectionId: sectionConstantModel?.id,
@@ -1793,6 +1794,7 @@ class PaymentScreenState extends State<PaymentScreen> {
           expectedBillVersion: widget.expectedBillVersion,
           scheduleTimeMillis: widget.scheduleTime?.millisecondsSinceEpoch,
           clientOrderType: widget.orderType,
+          expectedTotal: _payableTotal,
         );
         debugPrint('[ORDER-PERF] createVerifiedWalletOrder — ${verifySw.elapsedMilliseconds}ms '
             '(TOTAL so far ${proceedSw.elapsedMilliseconds}ms)');
@@ -1848,7 +1850,7 @@ class PaymentScreenState extends State<PaymentScreen> {
       final verifySw = Stopwatch()..start();
       final result = await RazorPayController().createVerifiedCodOrder(
         vendorID: widget.products.first.vendorID,
-        products: widget.products,
+        products: _orderProducts,
         orderId: orderId,
         couponId: widget.couponId,
         sectionId: sectionConstantModel?.id,
@@ -1858,6 +1860,9 @@ class PaymentScreenState extends State<PaymentScreen> {
         taxSetting: widget.taxModel,
         billPayRequestId: widget.billPayRequestId,
         expectedBillVersion: widget.expectedBillVersion,
+        scheduleTimeMillis: widget.scheduleTime?.millisecondsSinceEpoch,
+        clientOrderType: widget.orderType,
+        expectedTotal: _payableTotal,
       );
       debugPrint('[ORDER-PERF] createVerifiedCodOrder — ${verifySw.elapsedMilliseconds}ms '
           '(TOTAL so far ${proceedSw.elapsedMilliseconds}ms)');
@@ -1991,6 +1996,141 @@ class PaymentScreenState extends State<PaymentScreen> {
   // the only thing that ever creates the order for a RazorPay payment.
   String? _pendingOrderId;
 
+  // ── Pre-payment order blocking (2026-09-13) ───────────────────────────────
+  // Set only after the customer confirms a price_changed rejection: the
+  // server-verified line prices and grand total they agreed to pay. Every
+  // verification call and the order document then use these instead of the
+  // cart's stale figures, so the order the vendor receives matches what was
+  // actually charged. Null means "no confirmed change" - use the widget values.
+  List<CartProduct>? _priceConfirmedProducts;
+  double? _priceConfirmedTotal;
+  // The payment method the customer last attempted, re-run verbatim after
+  // they confirm a price change - the shared failure handler below has no
+  // other way to know whether to retry wallet, COD, card or UPI.
+  VoidCallback? _lastPaymentAttempt;
+
+  List<CartProduct> get _orderProducts => _priceConfirmedProducts ?? widget.products;
+  double get _payableTotal => _priceConfirmedTotal ?? widget.total;
+
+  // Rebuilds each cart line with its server-verified unit price. Constructed
+  // explicitly rather than via the generated CartProduct.copyWith, which
+  // calls `this.variant_info.toJson()` unconditionally and would crash on any
+  // non-variant product (variant_info null), besides turning the VariantInfo
+  // object into a Map. Lines the server didn't return are kept untouched.
+  List<CartProduct> _applyCorrectedLines(List<CorrectedLine> lines) {
+    final byId = {for (final l in lines) l.lineId: l};
+    return widget.products.map((p) {
+      final c = byId[p.id];
+      if (c == null) return p;
+      return CartProduct(
+        id: p.id,
+        category_id: p.category_id,
+        name: p.name,
+        photo: p.photo,
+        price: c.price.toString(),
+        discountPrice: p.discountPrice,
+        vendorID: p.vendorID,
+        quantity: p.quantity,
+        extras_price: c.extrasPrice.toString(),
+        extras: p.extras,
+        variant_info: p.variant_info,
+      );
+    }).toList();
+  }
+
+  String _blockedItemReasonText(BlockedItem item) {
+    switch (item.reason) {
+      case 'out_of_stock':
+        return item.available != null && item.available! > 0
+            ? '${'only'.tr()} ${item.available} ${'left'.tr()}'
+            : 'out of stock'.tr();
+      case 'variant_deleted':
+        return 'selected option no longer available'.tr();
+      case 'qty_cap':
+        return 'quantity too large'.tr();
+      default: // missing, unpublished, not_approved
+        return 'no longer available'.tr();
+    }
+  }
+
+  // Order can't be fulfilled as submitted - nothing to accept, the customer
+  // has to change the cart. Server moved no money and created no order.
+  Future<void> _showOrderBlockedDialog(PreflightRejection preflight) async {
+    final ctx = _scaffoldKey.currentContext;
+    if (ctx == null) return;
+    final lines = <String>[];
+    for (final reason in preflight.reasons) {
+      switch (reason.code) {
+        case 'item_unavailable':
+          for (final item in reason.items) {
+            lines.add('• ${item.name} — ${_blockedItemReasonText(item)}');
+          }
+          break;
+        case 'coupon_invalid':
+          lines.add('• ${'The applied coupon is no longer valid'.tr()}');
+          break;
+        case 'invalid_amount':
+          lines.add('• ${'Some charges on this order are invalid'.tr()}');
+          break;
+      }
+    }
+    await AppDialog.showError(
+      ctx,
+      title: 'Order Could Not Be Placed'.tr(),
+      message: '${'Please update your cart and try again:'.tr()}\n\n${lines.join('\n')}\n\n'
+          '${'You have not been charged.'.tr()}',
+      buttonLabel: 'Back to Cart'.tr(),
+      onTap: () {
+        // PaymentScreen -> back to CartScreen, which re-validates the cart
+        // (prices, availability, coupon) as soon as it's visible again.
+        Navigator.of(ctx).pop();
+      },
+    );
+  }
+
+  // Order CAN be fulfilled, but the total the customer was shown is stale.
+  // Owner decision: show the new total and let them confirm, rather than
+  // either charging silently or forcing them back to the cart.
+  Future<void> _showPriceChangedDialog(PreflightRejection preflight) async {
+    final ctx = _scaffoldKey.currentContext;
+    final updated = preflight.updatedTotal;
+    if (ctx == null || updated == null) return;
+    final previous = preflight.previousTotal ?? _payableTotal;
+
+    final buffer = StringBuffer()
+      ..writeln('${'Prices have changed since you opened your cart.'.tr()}\n')
+      ..writeln('${'Previous Total'.tr()}: ${amountShow(amount: previous.toString())}')
+      ..writeln('${'Updated Total'.tr()}: ${amountShow(amount: updated.toString())}');
+    // `changes` can be empty when the total moved for a non-line reason (tax,
+    // special discount, delivery) - the two totals above still say it all.
+    if (preflight.changes.isNotEmpty) {
+      buffer.writeln();
+      for (final c in preflight.changes) {
+        buffer.writeln('• ${c.name}: ${amountShow(amount: c.oldUnit.toString())} → ${amountShow(amount: c.newUnit.toString())}');
+      }
+    }
+
+    final confirmed = await AppDialog.showConfirm(
+      ctx,
+      title: 'Prices Updated'.tr(),
+      message: buffer.toString().trimRight(),
+      confirmLabel: '${'Pay'.tr()} ${amountShow(amount: updated.toString())}',
+      cancelLabel: 'Back to Cart'.tr(),
+    );
+    if (!mounted) return;
+    if (!confirmed) {
+      Navigator.of(ctx).pop();
+      return;
+    }
+    setState(() {
+      if (preflight.correctedLines.isNotEmpty) {
+        _priceConfirmedProducts = _applyCorrectedLines(preflight.correctedLines);
+      }
+      _priceConfirmedTotal = updated;
+    });
+    _lastPaymentAttempt?.call();
+  }
+
   // ─────────────────────────────────────────────────────────────
   // QuickDash payment sheet (Zomato-style bottom sheet)
   // ─────────────────────────────────────────────────────────────
@@ -2011,6 +2151,7 @@ class PaymentScreenState extends State<PaymentScreen> {
   // directly instead of letting Android show its own chooser. appHint is
   // only a display/debug label at this point.
   void _handleUpiSelected(String appHint, {String? packageName}) async {
+    _lastPaymentAttempt = () => _handleUpiSelected(appHint, packageName: packageName);
     paymentType = 'razorpay';
     showLoadingAlert();
     final appOrderId = await generateOrderId();
@@ -2031,7 +2172,7 @@ class PaymentScreenState extends State<PaymentScreen> {
     if (phone.isNotEmpty) {
       final s2sResult = await RazorPayController().createS2SUpiIntent(
         vendorID: widget.products.first.vendorID,
-        products: widget.products,
+        products: _orderProducts,
         contact: phone,
         email: MyAppState.currentUser!.email,
         couponId: widget.couponId,
@@ -2043,6 +2184,7 @@ class PaymentScreenState extends State<PaymentScreen> {
         expectedBillVersion: widget.expectedBillVersion,
         scheduleTimeMillis: widget.scheduleTime?.millisecondsSinceEpoch,
         clientOrderType: widget.orderType,
+        expectedTotal: _payableTotal,
       );
       if (s2sResult.success && s2sResult.intentUrl != null) {
         dismissLoadingAndClearProcessing();
@@ -2062,7 +2204,11 @@ class PaymentScreenState extends State<PaymentScreen> {
       // those directly instead of silently falling back to a Checkout
       // payment for a bill/device state the customer already needs to
       // address first.
-      if (s2sResult.billUpdated || s2sResult.deviceSuperseded) {
+      // A pre-payment rejection is equally final: falling back to Checkout
+      // would only run the same server check again and get the same refusal
+      // (both paths share orderPreflight.js), costing the customer an extra
+      // round-trip before seeing why.
+      if (s2sResult.billUpdated || s2sResult.deviceSuperseded || s2sResult.preflight != null) {
         dismissLoadingAndClearProcessing();
         if (!mounted) return;
         draftRef.deleteLogged('_handleUpiSelected:order_drafts').catchError((_) {});
@@ -2071,6 +2217,7 @@ class PaymentScreenState extends State<PaymentScreen> {
           deviceSuperseded: s2sResult.deviceSuperseded,
           billUpdated: s2sResult.billUpdated,
           updatedTotal: s2sResult.updatedTotal,
+          preflight: s2sResult.preflight,
         ));
         return;
       }
@@ -2079,7 +2226,7 @@ class PaymentScreenState extends State<PaymentScreen> {
 
     final result = await RazorPayController().createVerifiedOrderPayment(
       vendorID: widget.products.first.vendorID,
-      products: widget.products,
+      products: _orderProducts,
       couponId: widget.couponId,
       sectionId: sectionConstantModel?.id,
       takeAway: widget.take_away ?? false,
@@ -2090,6 +2237,7 @@ class PaymentScreenState extends State<PaymentScreen> {
       expectedBillVersion: widget.expectedBillVersion,
       scheduleTimeMillis: widget.scheduleTime?.millisecondsSinceEpoch,
       clientOrderType: widget.orderType,
+      expectedTotal: _payableTotal,
     );
     dismissLoadingAndClearProcessing();
     if (!mounted) return;
@@ -2350,6 +2498,7 @@ class PaymentScreenState extends State<PaymentScreen> {
   }
 
   void _handleCardSelected() async {
+    _lastPaymentAttempt = _handleCardSelected;
     paymentType = 'razorpay';
     showLoadingAlert();
     final appOrderId = await generateOrderId();
@@ -2359,7 +2508,7 @@ class PaymentScreenState extends State<PaymentScreen> {
     await draftRef.setLogged(draftOrderModel.toJson(), '_handleCardSelected:order_drafts');
     final result = await RazorPayController().createVerifiedOrderPayment(
       vendorID: widget.products.first.vendorID,
-      products: widget.products,
+      products: _orderProducts,
       couponId: widget.couponId,
       sectionId: sectionConstantModel?.id,
       takeAway: widget.take_away ?? false,
@@ -2370,6 +2519,7 @@ class PaymentScreenState extends State<PaymentScreen> {
       expectedBillVersion: widget.expectedBillVersion,
       scheduleTimeMillis: widget.scheduleTime?.millisecondsSinceEpoch,
       clientOrderType: widget.orderType,
+      expectedTotal: _payableTotal,
     );
     dismissLoadingAndClearProcessing();
     if (!mounted) return;
@@ -2408,6 +2558,17 @@ class PaymentScreenState extends State<PaymentScreen> {
         _scaffoldKey.currentContext,
         message: result.errorMessage,
       );
+      return;
+    }
+    // Pre-payment rejection (2026-09-13) - a real, reasoned answer, so it gets
+    // a dialog explaining why rather than the transient snackbar below.
+    final preflight = result.preflight;
+    if (preflight != null) {
+      if (preflight.priceChanged) {
+        _showPriceChangedDialog(preflight);
+      } else {
+        _showOrderBlockedDialog(preflight);
+      }
       return;
     }
     if (result.billUpdated) {
@@ -2454,6 +2615,7 @@ class PaymentScreenState extends State<PaymentScreen> {
   }
 
   void _handleWalletSelected() async {
+    _lastPaymentAttempt = _handleWalletSelected;
     paymentType = 'wallet';
     final confirmOrder = await AppDialog.showConfirm(
       _scaffoldKey.currentContext!,
@@ -2477,7 +2639,7 @@ class PaymentScreenState extends State<PaymentScreen> {
 
     final result = await RazorPayController().createVerifiedWalletOrder(
       vendorID: widget.products.first.vendorID,
-      products: widget.products,
+      products: _orderProducts,
       orderId: orderId,
       couponId: widget.couponId,
       sectionId: sectionConstantModel?.id,
@@ -2487,7 +2649,14 @@ class PaymentScreenState extends State<PaymentScreen> {
       taxSetting: widget.taxModel,
       billPayRequestId: widget.billPayRequestId,
       expectedBillVersion: widget.expectedBillVersion,
+      // Was missing here (2026-09-13) though every other verified call sends
+      // it: without it the server judged a SCHEDULED wallet order's vendor-
+      // open status at the moment of ordering, refusing it as "restaurant
+      // closed" whenever the vendor happened to be shut right now even though
+      // the chosen slot was inside their hours.
+      scheduleTimeMillis: widget.scheduleTime?.millisecondsSinceEpoch,
       clientOrderType: widget.orderType,
+      expectedTotal: _payableTotal,
     );
     dismissLoadingAndClearProcessing();
     if (!mounted) return;
@@ -2516,6 +2685,7 @@ class PaymentScreenState extends State<PaymentScreen> {
   }
 
   void _handleCodSelected() async {
+    _lastPaymentAttempt = _handleCodSelected;
     paymentType = 'cod';
     paymentOption = 'Pay Via Cash On delivery'.tr();
     showLoadingAlert();
@@ -2526,7 +2696,7 @@ class PaymentScreenState extends State<PaymentScreen> {
     // device-ownership claim, required before any order is created.
     final result = await RazorPayController().createVerifiedCodOrder(
       vendorID: widget.products.first.vendorID,
-      products: widget.products,
+      products: _orderProducts,
       orderId: orderId,
       couponId: widget.couponId,
       sectionId: sectionConstantModel?.id,
@@ -2536,6 +2706,9 @@ class PaymentScreenState extends State<PaymentScreen> {
       taxSetting: widget.taxModel,
       billPayRequestId: widget.billPayRequestId,
       expectedBillVersion: widget.expectedBillVersion,
+      scheduleTimeMillis: widget.scheduleTime?.millisecondsSinceEpoch,
+      clientOrderType: widget.orderType,
+      expectedTotal: _payableTotal,
     );
     dismissLoadingAndClearProcessing();
     if (!mounted) return;
@@ -3829,7 +4002,10 @@ class PaymentScreenState extends State<PaymentScreen> {
     }
 
     final List<CartProduct> tempProduc = [];
-    for (CartProduct cartProduct in widget.products) {
+    // _orderProducts, not widget.products: after a confirmed price change the
+    // order document must carry the verified prices the customer just agreed
+    // to, or verifyOrderOnCreate would immediately flag it as a mismatch.
+    for (CartProduct cartProduct in _orderProducts) {
       CartProduct tempCart = cartProduct;
       if (tempCart.extras != null && tempCart.extras is List) {
         List<dynamic> cleanedExtras = [];
@@ -3887,7 +4063,7 @@ class PaymentScreenState extends State<PaymentScreen> {
       'restaurantId': widget.products.first.vendorID,
       'businessTypeId': vendorModel.businessTypeId,
       'productIds': tempProduc.map((item) => item.id.split('~').first).toSet().toList(),
-      'totalAmount': widget.total,
+      'totalAmount': _payableTotal,
       'orderMode': widget.orderType ?? (widget.take_away == true ? 'Takeaway' : 'Delivery'),
       'paymentMethod': paymentType,
       'couponCode': widget.couponCode ?? '',
@@ -4156,13 +4332,13 @@ class PaymentScreenState extends State<PaymentScreen> {
         id: oid,
         isPaymentDone: val,
         paymentType: paymentType,
-        total: widget.total,
+        total: _payableTotal,
         discount: widget.discount!,
         couponCode: widget.couponCode!,
         couponId: widget.couponId!,
         notes: widget.notes!,
         paymentOption: paymentOption,
-        products: widget.products,
+        products: _orderProducts,
         deliveryCharge: widget.deliveryCharge,
         tipValue: widget.tipValue,
         take_away: widget.take_away,

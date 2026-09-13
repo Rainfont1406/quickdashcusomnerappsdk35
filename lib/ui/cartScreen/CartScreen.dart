@@ -144,6 +144,28 @@ class _CartScreenState extends State<CartScreen> {
 
   List<TaxModel>? taxList = []; // Initialize as empty list
 
+  // The subset of taxList that actually applies to the order type currently
+  // selected - i.e. exactly the rows that were summed into the displayed
+  // total and charged. Captured during the totals pass below (see
+  // taxesToDisplay) and handed to PaymentScreen instead of the raw taxList.
+  //
+  // 2026-09-13: the order document used to be written with the FULL,
+  // unfiltered taxList. Nothing customer-facing was wrong - the charge and
+  // every displayed figure have always used the filtered subset - but the
+  // server re-derives tax from order.taxSetting during verification, so an
+  // unfiltered array recomputed to 14% + a flat fee against the correct 7%
+  // and raised a tax mismatch on ~98% of all orders. That made fraudFlag
+  // useless as a fraud signal (79% of verified orders flagged), which is
+  // the entire reason this exists.
+  //
+  // Deliberately nullable, NOT an empty list: null means "the totals pass
+  // hasn't run yet" (fall back to taxList), whereas an empty list is a
+  // legitimate computed result meaning "no tax row applies to this order
+  // type" - and in that case an empty array is exactly what must be stored.
+  // Collapsing those two states into `isEmpty` would silently re-introduce
+  // the unfiltered write for genuinely zero-tax orders.
+  List<TaxModel>? _appliedTaxes;
+
   // Stable stream reference — must not change between rebuilds to prevent scroll resets
   Stream<List<CartProduct>>? _cartStream;
 
@@ -1944,7 +1966,13 @@ class _CartScreenState extends State<CartScreen> {
                           tipValue: isDelivery ? tipValue.toString() : "0",
                           take_away: isTakeaway,
                           deliveryCharge: isDelivery ? deliveryCharges : "0",
-                          taxModel: taxList,
+                          // The APPLIED subset, not the raw taxList - see
+                          // _appliedTaxes. `?? taxList` only covers the
+                          // impossible case of tapping Place Order before
+                          // the totals pass has ever run; an empty
+                          // _appliedTaxes is a real result and passes
+                          // through as an empty array, which is correct.
+                          taxModel: _appliedTaxes ?? taxList,
                           specialDiscountMap: specialDiscountMap,
                           scheduleTime: scheduleTime,
                           addressModel: addressModel,
@@ -3391,6 +3419,13 @@ class _CartScreenState extends State<CartScreen> {
         }
       }
     }
+
+    // Capture the rows that were actually applied, so Place Order writes
+    // these onto the order instead of the unfiltered taxList - see
+    // _appliedTaxes' declaration. Plain field assignment, not setState:
+    // this runs inside the build/totals pass and is a derived value, so
+    // triggering another rebuild here would loop.
+    _appliedTaxes = List<TaxModel>.from(taxesToDisplay);
 
     // Add the total tax amount to grand total
     grandtotal += totalTaxAmount;
