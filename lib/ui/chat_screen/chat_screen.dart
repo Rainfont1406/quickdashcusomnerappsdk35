@@ -69,7 +69,7 @@ class _ChatScreensState extends State<ChatScreens> {
   void initState() {
     super.initState();
     token = widget.token;
-    _chatStream = FireStoreUtils.firestore
+    Query<Map<String, dynamic>> threadQuery = FireStoreUtils.firestore
         .collection(widget.chatType == "Driver"
             ? 'chat_driver'
             : widget.chatType == "Provider"
@@ -78,7 +78,20 @@ class _ChatScreensState extends State<ChatScreens> {
                     ? 'chat_worker'
                     : 'chat_store')
         .doc(widget.orderId)
-        .collection("thread")
+        .collection("thread");
+    // 7-day window (2026-09-14, explicit product decision to bound read
+    // cost) - scoped to chat_store (vendor/customer order chat) only, not
+    // chat_driver/chat_provider/chat_worker, which weren't part of that
+    // decision. Query-only: nothing is deleted. Single-field range on the
+    // same field as orderBy below - no composite index needed.
+    if (widget.chatType != "Driver" &&
+        widget.chatType != "Provider" &&
+        widget.chatType != "Worker") {
+      threadQuery = threadQuery.where('createdAt',
+          isGreaterThanOrEqualTo: Timestamp.fromDate(
+              DateTime.now().subtract(const Duration(days: 7))));
+    }
+    _chatStream = threadQuery
         .orderBy('createdAt', descending: false)
         .snapshotsLogged('ChatScreens.initState:thread');
   }

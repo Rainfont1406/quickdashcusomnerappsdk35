@@ -93,7 +93,13 @@ class _InboxScreenState extends State<InboxScreen> {
         shrinkWrap: true,
         onEmpty: const Center(child: Text("No Conversion found")),
         // orderBy is compulsory to enable pagination
-        query: FireStoreUtils.firestore.collection('chat_store').where("customerId", isEqualTo: MyAppState.currentUser!.userID).orderBy('createdAt', descending: true),
+        // 7-day window (2026-09-14, explicit product decision to bound read
+        // cost) - conversations whose last message is older than 7 days are
+        // no longer fetched or shown. Query-only: nothing is deleted. The
+        // cutoff is on createdAt, the same field already in the orderBy, so
+        // it needs no index beyond the existing (customerId, createdAt)
+        // composite.
+        query: FireStoreUtils.firestore.collection('chat_store').where("customerId", isEqualTo: MyAppState.currentUser!.userID).where('createdAt', isGreaterThanOrEqualTo: Timestamp.fromDate(DateTime.now().subtract(const Duration(days: 7)))).orderBy('createdAt', descending: true),
         //Change types customerId
         viewType: ViewType.list,
         initialLoader: const CircularProgressIndicator(),
