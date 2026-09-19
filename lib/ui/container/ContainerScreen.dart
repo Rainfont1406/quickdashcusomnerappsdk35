@@ -124,6 +124,10 @@ class _ContainerScreen extends State<ContainerScreen> {
     }
 
     mark('initState ENTER');
+    // 2026-09-15: see HomeScreen.dart's identical call for why. Not reset()
+    // here - HomeScreen (mounted moments later as this screen's child) does
+    // that, so this dump still reflects the whole cold-start session.
+    scheduleFirestoreReadDump('ContainerScreen', isStillActive: () => mounted);
 
     FireStoreUtils.getWalletSettingData();
     mark('getWalletSettingData() dispatched (see [FIRESTORE-PERF] for its own round-trip time)');

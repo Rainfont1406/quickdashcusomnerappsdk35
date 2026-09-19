@@ -91,6 +91,11 @@ class _InboxProviderScreenState extends State<InboxProviderScreen> {
         onEmpty: const Center(child: Text("No Conversion found")),
         // orderBy is compulsory to enable pagination
         query: FireStoreUtils.firestore.collection('chat_provider').where("customerId", isEqualTo: MyAppState.currentUser!.userID).orderBy('createdAt', descending: true),
+        // 2026-09-19: FirestorePagination only logs its reads when logLabel
+        // is passed - this screen never had one, so its reads were entirely
+        // invisible to FirestoreReadStats/the app's read-cost logging (see
+        // inbox_screen.dart, the one sibling that already passes this).
+        logLabel: 'InboxProviderScreen.conversations',
         //Change types customerId
         viewType: ViewType.list,
         initialLoader: const CircularProgressIndicator(),

@@ -5,6 +5,7 @@ import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/model/OrderModel.dart';
 import 'package:emartconsumer/model/User.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:flutter/material.dart';
@@ -65,6 +66,8 @@ class HomeScreenState extends State<OrderTrackingScreen> {
 
   @override
   void initState() {
+    // 2026-09-15: see HomeScreen.dart's identical call for why.
+    scheduleFirestoreReadDump('OrderTrackingScreen', isStillActive: () => mounted);
     if (selectedMapType == 'osm') {
       setState(() {
         mapOsmController = osmflutter.MapController(initPosition: osmflutter.GeoPoint(latitude: 20.9153, longitude: -100.7439), useExternalTracking: false); //OSM

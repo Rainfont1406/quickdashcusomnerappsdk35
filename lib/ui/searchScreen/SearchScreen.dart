@@ -10,6 +10,7 @@ import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/behavior/behavior_counters.dart';
 import 'package:emartconsumer/services/behavior/behavior_event_types.dart';
 import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
+import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/recommendation/recommendation_config.dart';
 import 'package:emartconsumer/services/recommendation/recommendation_engine.dart';
@@ -265,6 +266,8 @@ class SearchScreenState extends State<SearchScreen> {
   @override
   void initState() {
     super.initState();
+    // 2026-09-15: see HomeScreen.dart's identical call for why.
+    scheduleFirestoreReadDump('SearchScreen', isStillActive: () => mounted);
     _titleCache =
         allstoreList.map((v) => _normalizeSearchText(v.title)).toList();
     _cuisineCache = allstoreList

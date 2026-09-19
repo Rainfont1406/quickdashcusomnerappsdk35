@@ -7,6 +7,8 @@ import 'package:flutter/scheduler.dart';
 
 // Firebase Packages
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:emartconsumer/services/firestore_instrumentation.dart'
+    show FirestoreReadStats, estimateSnapshotBytes;
 
 // Data Models
 import 'models/page_options.dart';
@@ -64,7 +66,24 @@ class FirestorePagination extends StatefulWidget {
     this.padding,
     this.controller,
     this.pageController,
+    required this.logLabel,
   });
+
+  /// REQUIRED label for this codebase's Firestore read instrumentation
+  /// (firestore_instrumentation.dart's FirestoreReadStats + the
+  /// [FirestoreRead]/[FirestoreListener] debugPrint convention used
+  /// everywhere else). Without it, every real Firestore fetch this widget
+  /// performs is invisible to FirestoreReadStats - confirmed live 2026-09-15
+  /// on the Vendor App's identical widget, and true here too since this
+  /// file never had the same logging added.
+  ///
+  /// 2026-09-19: made REQUIRED (was optional). Optional was not a safe
+  /// default: inbox_driver_screen.dart and inbox_provider_screen.dart both
+  /// omitted it for as long as they existed, so their paginated chat reads
+  /// were billed with zero trace in any read log, and were only found by a
+  /// hand sweep of the whole codebase. Required means a future screen
+  /// physically cannot re-open that hole - the compiler rejects it.
+  final String logLabel;
 
   /// The query to use to fetch data from Firestore.
   ///
@@ -212,6 +231,14 @@ class _FirestorePaginationState extends State<FirestorePagination> {
     _streamSub = docsQuery.snapshots().listen((QuerySnapshot snapshot) async {
       await tempSub?.cancel();
 
+      final fromCache = snapshot.metadata.isFromCache;
+      final bytes = estimateSnapshotBytes(snapshot.docs);
+      FirestoreReadStats.record(
+          widget.logLabel, fromCache, snapshot.docs.length, null, bytes);
+      debugPrint('[FirestoreListener] ${widget.logLabel} source=${fromCache ? "CACHE" : "SERVER"} '
+          'docs=${snapshot.docs.length} bytes=${FirestoreReadStats.fmtBytes(bytes)} '
+          'at=${DateTime.now().toIso8601String()}');
+
       _docs
         ..clear()
         ..addAll(snapshot.docs);
@@ -269,6 +296,15 @@ class _FirestorePaginationState extends State<FirestorePagination> {
         latestDocQuery.snapshots(includeMetadataChanges: true).listen(
       (QuerySnapshot snapshot) async {
         await tempSub?.cancel();
+
+        final fromCache = snapshot.metadata.isFromCache;
+        final bytes = estimateSnapshotBytes(snapshot.docs);
+        FirestoreReadStats.record('${widget.logLabel} (live watcher)', fromCache,
+            snapshot.docs.length, null, bytes);
+        debugPrint('[FirestoreListener] ${widget.logLabel} (live watcher) source=${fromCache ? "CACHE" : "SERVER"} '
+            'docs=${snapshot.docs.length} bytes=${FirestoreReadStats.fmtBytes(bytes)} '
+            'at=${DateTime.now().toIso8601String()}');
+
         if (snapshot.docs.isEmpty ||
             snapshot.docs.first.metadata.hasPendingWrites) return;
 

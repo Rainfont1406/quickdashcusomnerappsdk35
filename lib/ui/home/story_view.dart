@@ -10,6 +10,7 @@ import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/model/story_model.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/services/behavior/behavior_event_types.dart';
 import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/helper.dart';
@@ -404,7 +405,11 @@ class _VendorStoryPageState extends State<_VendorStoryPage> {
     try {
       bool alreadyCounted = false;
       await firestore.runTransaction((tx) async {
-        final existing = await tx.get(viewRef);
+        // Logged (2026-09-19): fires once per story watched - the
+        // highest-frequency transaction read in the app, and previously
+        // invisible to every read-cost audit. See LoggedTransactionGet.
+        final existing =
+            await tx.getLogged(viewRef, 'StoryView.recordView:story_views (tx)');
         if (existing.exists) {
           alreadyCounted = true;
           return;

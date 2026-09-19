@@ -100,6 +100,7 @@ class _InboxScreenState extends State<InboxScreen> {
         // it needs no index beyond the existing (customerId, createdAt)
         // composite.
         query: FireStoreUtils.firestore.collection('chat_store').where("customerId", isEqualTo: MyAppState.currentUser!.userID).where('createdAt', isGreaterThanOrEqualTo: Timestamp.fromDate(DateTime.now().subtract(const Duration(days: 7)))).orderBy('createdAt', descending: true),
+        logLabel: 'InboxScreen.conversations',
         //Change types customerId
         viewType: ViewType.list,
         initialLoader: const CircularProgressIndicator(),

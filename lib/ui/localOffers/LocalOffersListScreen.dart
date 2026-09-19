@@ -4,6 +4,7 @@ import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/LocalOfferCategoryModel.dart';
 import 'package:emartconsumer/model/LocalOfferModel.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/localOffers/LocalOfferDetailsScreen.dart';
@@ -52,6 +53,8 @@ class _LocalOffersListScreenState extends State<LocalOffersListScreen> {
   @override
   void initState() {
     super.initState();
+    // 2026-09-15: see HomeScreen.dart's identical call for why.
+    scheduleFirestoreReadDump('LocalOffersListScreen', isStillActive: () => mounted);
     _load();
   }
 

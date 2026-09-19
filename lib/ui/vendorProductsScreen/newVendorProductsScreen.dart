@@ -18,6 +18,7 @@ import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/behavior/behavior_counters.dart';
 import 'package:emartconsumer/services/behavior/behavior_event_types.dart';
 import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
+import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/recommendation/recommendation_engine.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
@@ -149,6 +150,8 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
   @override
   void initState() {
     super.initState();
+    // 2026-09-15: see HomeScreen.dart's identical call for why.
+    scheduleFirestoreReadDump('NewVendorProductsScreen', isStillActive: () => mounted);
     WidgetsBinding.instance.addObserver(this);
     getFoodType();
     statusCheck();
