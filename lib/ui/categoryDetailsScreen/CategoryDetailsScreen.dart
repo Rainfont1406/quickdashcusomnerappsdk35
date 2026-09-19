@@ -3,9 +3,10 @@ import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/model/VendorCategoryModel.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
-import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/helper.dart';
+import 'package:emartconsumer/services/shared_vendors_watcher.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/dineInScreen/dine_in_restaurant_details_screen.dart';
 import 'package:emartconsumer/ui/vendorProductsScreen/newVendorProductsScreen.dart';
@@ -28,7 +29,6 @@ class CategoryDetailsScreen extends StatefulWidget {
 class _CategoryDetailsScreenState extends State<CategoryDetailsScreen>
     with SingleTickerProviderStateMixin {
   Stream<List<VendorModel>>? categoriesFuture;
-  final FireStoreUtils fireStoreUtils = FireStoreUtils();
   late AnimationController _shimmerController;
 
   @override
@@ -39,13 +39,30 @@ class _CategoryDetailsScreenState extends State<CategoryDetailsScreen>
       duration: const Duration(milliseconds: 900),
     )..repeat(reverse: true);
 
-    final nearbyIds = allstoreList.map((v) => v.id).toSet();
-    categoriesFuture = fireStoreUtils
-        .getVendorsByCuisineID(widget.category.id.toString(),
-            isDinein: widget.isDineIn)
-        .map((vendors) => nearbyIds.isEmpty
-            ? vendors
-            : vendors.where((v) => nearbyIds.contains(v.id)).toList());
+    // 2026-09-19: was FireStoreUtils.getVendorsByCuisineID(), a raw
+    // GeoFirestore .within() query - the same pattern already proven to fan
+    // out into 9 separate live Firestore listeners per call and read far
+    // more documents than displayed, completely invisible to .getLogged()'s
+    // read-cost instrumentation (confirmed live for the identical pattern
+    // on the old DineInScreen: ~179 reads for one visit, zero matching
+    // lines in the app's own read log - see SharedVendorsWatcher's doc
+    // comment). This screen was already filtering the raw query's result
+    // down to allstoreList's ids anyway, so the radius/live-status work is
+    // 100% redundant with what HomeScreen's own SharedVendorsWatcher
+    // subscription already holds - just read from that shared stream and
+    // filter client-side for categoryID (and enabledDiveInFuture for the
+    // Dine-In entry point), same migration DineInScreen/MapViewScreen/
+    // view_all_popular_store_screen.dart already got 2026-09-11.
+    final sectionId = sectionConstantModel?.id ?? '';
+    final lat = MyAppState.selectedPosotion.location?.latitude ?? 0.0;
+    final lng = MyAppState.selectedPosotion.location?.longitude ?? 0.0;
+    final cuisineId = widget.category.id.toString();
+    categoriesFuture = SharedVendorsWatcher.watch(sectionId, lat, lng)
+        .map((vendors) => vendors
+            .where((v) =>
+                v.categoryID == cuisineId &&
+                (!widget.isDineIn || v.enabledDiveInFuture))
+            .toList());
   }
 
   @override

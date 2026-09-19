@@ -112,7 +112,7 @@ class SharedVendorsWatcher {
     _statusSub = FireStoreUtils.firestore
         .collection('vendor_status')
         .doc(sectionId)
-        .snapshots()
+        .snapshotsLogged('SharedVendorsWatcher:vendor_status')
         .listen((snap) {
       final data = snap.data();
       final rawStatuses = data?['statuses'];
