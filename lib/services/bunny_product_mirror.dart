@@ -1,9 +1,11 @@
 import 'dart:convert';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:http/http.dart' as http;
 
 import '../model/ProductModel.dart';
+// cachedBunnyGet + the shared per-mirror TTL constants live here so both
+// mirror files route through one cached-GET implementation.
+import 'bunny_reference_mirror.dart';
 
 // Bunny Pull Zone hostname product-list mirrors are served from - the same
 // CDN host every other Bunny-hosted asset in this app already resolves to
@@ -33,12 +35,19 @@ const _kBunnyCdnHost = 'cdn.quickdash.co.in';
 /// failure so the caller falls back to the original Firestore query.
 Future<List<ProductModel>?> fetchSectionProductsFromBunny(String sectionId) async {
   try {
-    final resp = await http
-        .get(Uri.parse('https://$_kBunnyCdnHost/section-product-lists/$sectionId.json'))
-        .timeout(const Duration(seconds: 8));
-    if (resp.statusCode != 200) return null;
+    // Matches _productsCacheTtl (10 min) - this blob carries PRICES, so its
+    // freshness window is deliberately NOT extended here. The read saving on
+    // this mirror comes entirely from cachedBunnyGet's stale-while-error path,
+    // which matters most precisely here: this mirror's Firestore fallback is
+    // the whole-catalog query, up to 500 documents - the most expensive
+    // fallback in the app.
+    final body = await cachedBunnyGet(
+        'bunny_sectionProducts_$sectionId',
+        'https://$_kBunnyCdnHost/section-product-lists/$sectionId.json',
+        kBunnyShortTtl);
+    if (body == null) return null;
 
-    final decoded = jsonDecode(resp.body) as Map<String, dynamic>;
+    final decoded = jsonDecode(body) as Map<String, dynamic>;
     final rawItems = decoded['items'] as List<dynamic>?;
     if (rawItems == null) return null;
 
@@ -57,12 +66,13 @@ Future<List<ProductModel>?> fetchSectionProductsFromBunny(String sectionId) asyn
 
 Future<List<ProductModel>?> fetchVendorProductsFromBunny(String vendorId) async {
   try {
-    final resp = await http
-        .get(Uri.parse('https://$_kBunnyCdnHost/product-lists/$vendorId.json'))
-        .timeout(const Duration(seconds: 8));
-    if (resp.statusCode != 200) return null;
+    final body = await cachedBunnyGet(
+        'bunny_vendorProducts_$vendorId',
+        'https://$_kBunnyCdnHost/product-lists/$vendorId.json',
+        kBunnyShortTtl);
+    if (body == null) return null;
 
-    final decoded = jsonDecode(resp.body) as Map<String, dynamic>;
+    final decoded = jsonDecode(body) as Map<String, dynamic>;
     final rawProducts = decoded['products'] as List<dynamic>?;
     if (rawProducts == null) return null;
 

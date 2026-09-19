@@ -83,7 +83,11 @@ import '../model/PayStackSettingsModel.dart';
 import 'bunny_product_mirror.dart';
 import 'bunny_reference_mirror.dart';
 import 'bunny_storage.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'config_refresh_gate.dart';
 import 'firestore_instrumentation.dart';
+import 'story_cache.dart';
 
 // Base URL of the QuickDash admin/API server.
 const _kApiBase = 'https://admin.quickdash.co.in';
@@ -329,6 +333,38 @@ class FireStoreUtils {
         now.difference(_storyCachedAt!) < _storyCacheTtl) {
       return _storyCache!;
     }
+
+    // 2026-09-15: on-device persistent layer behind the in-memory TTL above,
+    // which dies with the app process and so never helped a cold start. See
+    // StoryCache's doc comment for why stories need more than a plain TTL
+    // (viewCount is shared server-side state that a cache cannot track).
+    final sectionId = sectionConstantModel?.id ?? '';
+    if (sectionId.isNotEmpty) {
+      final cached = await StoryCache.read(sectionId);
+      if (cached != null && cached.isNotEmpty) {
+        final fullRefreshDue = !await ConfigRefreshGate.isFresh(
+            StoryCache.gateKey(sectionId), StoryCache.fullRefreshInterval);
+        if (!fullRefreshDue && !StoryCache.needsServerVerify(cached)) {
+          // Cheap change-detection: ask only for stories NEWER than everything
+          // we already hold, capped at 1 document. Returns empty on the common
+          // path, which Firestore bills as its 1-read minimum - so a launch
+          // with no new stories costs 1 read instead of the full list.
+          // Expiry still resolves correctly offline: HomeScreen._filterStories
+          // applies StoryModel.isExpired to whatever this returns, and both
+          // time-based expiry factors are computable from the cached fields.
+          final hasNew = await _hasNewStoriesSince(sectionId, cached);
+          if (!hasNew) {
+            _storyCache = cached;
+            _storyCachedAt = now;
+            debugPrint('[StoryCache] ${cached.length} stories served from '
+                'on-device cache (no new stories) - full list not re-read');
+            return cached;
+          }
+          debugPrint('[StoryCache] new story detected - re-fetching full list');
+        }
+      }
+    }
+
     List<StoryModel> story = [];
     // Must filter approved==true server-side, not just client-side in
     // HomeScreen._filterStories() - the Firestore rule for story/{id} only
@@ -347,7 +383,43 @@ class FireStoreUtils {
     });
     _storyCache = story;
     _storyCachedAt = now;
+    // Persist for future cold starts. Only a non-empty result is stored: an
+    // empty list here can also mean a transient failure, and caching that
+    // would hide every story for the whole refresh window.
+    if (sectionId.isNotEmpty && story.isNotEmpty) {
+      await StoryCache.write(sectionId, story);
+    }
     return story;
+  }
+
+  /// True when at least one approved story exists in [sectionId] that is newer
+  /// than everything in [cached]. Capped at one document, so the common
+  /// "nothing new" answer costs Firestore's 1-read query minimum instead of
+  /// re-reading the whole list.
+  ///
+  /// Requires the composite index (sectionID ASC, approved ASC, createdAt ASC)
+  /// created 2026-09-15 - two equality filters plus a range on a third field.
+  /// Any failure returns true (fall back to the full fetch), so a missing
+  /// index or permission problem degrades to exactly the old behaviour rather
+  /// than silently showing a stale list.
+  Future<bool> _hasNewStoriesSince(
+      String sectionId, List<StoryModel> cached) async {
+    final newest = StoryCache.newestCreatedAt(cached);
+    if (newest == null) return true;
+    try {
+      final snap = await firestore
+          .collection(STORY)
+          .where('sectionID', isEqualTo: sectionId)
+          .where('approved', isEqualTo: true)
+          .where('createdAt', isGreaterThan: newest)
+          .limit(1)
+          .getLogged('getStory:STORY (new-story probe)');
+      return snap.docs.isNotEmpty;
+    } catch (e) {
+      debugPrint('[StoryCache] new-story probe failed, falling back to a full '
+          'fetch: $e');
+      return true;
+    }
   }
 
   /// Asks the server which of [vendorIds] fall within the active section's
@@ -589,7 +661,8 @@ class FireStoreUtils {
   Future<void> expireBillPayRequestIfPending(String orderId) async {
     final ref = firestore.collection(ORDERS).doc(orderId);
     await firestore.runTransaction((tx) async {
-      final snap = await tx.get(ref);
+      final snap =
+          await tx.getLogged(ref, 'expireBillPayRequestIfPending:ORDERS (tx)');
       if (snap.data()?['status'] == BILLPAY_STATUS_PENDING_APPROVAL) {
         tx.update(ref, {'status': BILLPAY_STATUS_EXPIRED});
       }
@@ -921,21 +994,42 @@ class FireStoreUtils {
     }
     final completer = Completer<void>();
     _recommendationConfigLoadStarted = completer;
-    firestore
-        .collection('recommendation_configuration')
-        .doc('default')
-        .getLogged('loadRecommendationConfig:recommendation_configuration')
-        .then((snap) {
-      if (snap.exists) {
-        RecommendationConfig.current =
-            RecommendationConfig.fromJson(snap.data() ?? const {});
-      }
-    }).catchError((_) {
-      // Degrades to defaults - already identical to pre-feature behavior.
-    }).whenComplete(() {
+    _loadRecommendationConfigInternal().whenComplete(() {
       if (!completer.isCompleted) completer.complete();
     });
     return completer.future;
+  }
+
+  // 2026-09-15: same persisted-TTL treatment as the tax/gateway configs -
+  // recommendation tuning is admin-managed and changes rarely, but this ran
+  // on every cold start. Persists the RAW document map (not the model, which
+  // has no toJson) and rehydrates through the same fromJson as the live path,
+  // so a cached load is byte-identical to a fresh one.
+  static const Duration _recommendationConfigTtl = Duration(days: 7);
+  static const String _recommendationConfigCacheKey = 'recommendationConfig';
+
+  static Future<void> _loadRecommendationConfigInternal() async {
+    final cachedDoc = await ConfigRefreshGate.readDoc(
+        _recommendationConfigCacheKey, _recommendationConfigTtl);
+    if (cachedDoc != null) {
+      RecommendationConfig.current = RecommendationConfig.fromJson(cachedDoc);
+      debugPrint('[ConfigCache] recommendation_configuration served from '
+          'on-device persisted copy - 0 Firestore reads');
+      return;
+    }
+    try {
+      final snap = await firestore
+          .collection('recommendation_configuration')
+          .doc('default')
+          .getLogged('loadRecommendationConfig:recommendation_configuration');
+      if (snap.exists) {
+        final data = snap.data() ?? const <String, dynamic>{};
+        RecommendationConfig.current = RecommendationConfig.fromJson(data);
+        await ConfigRefreshGate.writeDoc(_recommendationConfigCacheKey, data);
+      }
+    } catch (_) {
+      // Degrades to defaults - already identical to pre-feature behavior.
+    }
   }
 
   /// Assembles everything RecommendationEngine needs for one restaurant
@@ -1163,6 +1257,19 @@ class FireStoreUtils {
   static final Map<String, User> _userCache = {};
   static String? _lastAuthUid;
 
+  // 2026-09-18: two callers invoking getCurrentUser(uid) concurrently before
+  // either has populated _userCache both saw it empty and both fired their
+  // own .get() - confirmed live (a single cold start logged
+  // "getCurrentUser:USERS -> cache=2 docs=2 SLOW-CACHE=2", i.e. two separate
+  // calls, both slow enough that the SDK's cache-fallback raced a real
+  // in-flight server request that may still have been billed regardless of
+  // the CACHE label - see firestore_instrumentation.dart's SLOW-CACHE doc
+  // comment). Keyed per-uid, same reasoning as _userCache itself. A caller
+  // who arrives after the fetch already completed just gets _userCache's
+  // fast path above - this only matters for the narrow concurrent-callers
+  // window.
+  static final Map<String, Future<User?>> _userFetchInFlight = {};
+
   static void onAuthUidChanged(String? uid) {
     if (uid != _lastAuthUid) {
       _userCache.clear();
@@ -1173,6 +1280,20 @@ class FireStoreUtils {
   static Future<User?> getCurrentUser(String uid) async {
     final cached = _userCache[uid];
     if (cached != null) return cached;
+
+    final inFlight = _userFetchInFlight[uid];
+    if (inFlight != null) return inFlight;
+
+    final future = _fetchCurrentUser(uid);
+    _userFetchInFlight[uid] = future;
+    try {
+      return await future;
+    } finally {
+      _userFetchInFlight.remove(uid);
+    }
+  }
+
+  static Future<User?> _fetchCurrentUser(String uid) async {
     DocumentSnapshot<Map<String, dynamic>> userDocument = await firestore.collection(USERS).doc(uid).getLogged('getCurrentUser:USERS');
     if (userDocument.data() != null && userDocument.exists) {
       final user = User.fromJson(userDocument.data()!);
@@ -1249,6 +1370,27 @@ class FireStoreUtils {
   // and loadRecommendationConfig above.
   static final Map<String, Future<List<TaxModel>?>> _taxListInFlight = {};
 
+  // 2026-09-15: SECOND-level, on-device persistent cache behind the 10-minute
+  // in-memory one above. The in-memory cache dies with the app process, so
+  // every cold start re-read all 5 of this section's tax documents - measured
+  // as the single largest remaining chunk of a steady-state cold start once
+  // the PurchaseCompletionListener fix landed. Tax rates are admin-configured
+  // and change on the order of months (confirmed against the live collection:
+  // GST/Transaction fee/cart charge, stable), so a 7-day on-device TTL
+  // (explicit product decision, 2026-09-15) removes this read from
+  // essentially every launch.
+  //
+  // NOT a correctness risk for what customers are actually charged: the
+  // server recomputes tax independently on every order via
+  // getVerifiedTaxSetting (functions/orderVerification.js, mirrored in
+  // VerifiesOrderProducts.php) and charges its own figure, so a stale local
+  // copy can never cause an undercharge. The bounded, accepted tradeoff is
+  // display-only: for up to 7 days after an admin edits a rate, a customer
+  // could see the old total on Cart before the server corrects it.
+  static const Duration _taxListPersistentTtl = Duration(days: 7);
+  static String _taxListPrefsKey(String key) => 'cached_tax_list_$key';
+  static String _taxListGateKey(String key) => 'taxList_$key';
+
   Future<List<TaxModel>?> getTaxList(String? sectionId) {
     final key = sectionId ?? '';
     final cached = _taxListCache[key];
@@ -1260,7 +1402,7 @@ class FireStoreUtils {
     final inFlight = _taxListInFlight[key];
     if (inFlight != null) return inFlight;
 
-    final future = _fetchTaxList(sectionId, key);
+    final future = _loadTaxList(sectionId, key);
     _taxListInFlight[key] = future;
     // Cleared whether it succeeded or failed, so a failed fetch never
     // pins a permanently-rejected Future for the rest of the session.
@@ -1268,17 +1410,87 @@ class FireStoreUtils {
     return future;
   }
 
+  /// Persistent-cache-aware path: tries the on-device copy first, and only
+  /// falls through to a real Firestore query when there isn't a fresh one.
+  Future<List<TaxModel>?> _loadTaxList(String? sectionId, String key) async {
+    final persisted = await _readPersistedTaxList(key);
+    if (persisted != null && persisted.isNotEmpty) {
+      // Promote into the in-memory cache so the rest of this session's calls
+      // don't even re-read SharedPreferences.
+      _taxListCache[key] = (persisted, DateTime.now());
+      // 2026-09-19: bytes were never passed here, so the summary showed
+      // "docs=5 bytes=0B" - which reads as "5 documents of nothing" and
+      // understated the total payload figure. Estimated from the parsed
+      // models' own toJson() (the same data already in memory, so no extra
+      // read or disk I/O). This is the size of the DATA the app consumed,
+      // for consistency with every other cache-served label; the egress
+      // for this read is genuinely zero either way (no network), and
+      // that's carried by the fromCache=true flag, not by faking 0 bytes.
+      // Approximate: toJson() can only emit the fields TaxModel models, so
+      // a Firestore doc with extra unmodeled fields is slightly undercounted.
+      final persistedBytes = estimateFirestoreValueBytes(
+          persisted.map((t) => t.toJson()).toList());
+      FirestoreReadStats.record('getTaxList:tax (persisted, 0 network)', true,
+          persisted.length, null, persistedBytes);
+      debugPrint('[FirestoreRead] getTaxList:tax served from on-device persisted cache '
+          '- docs=${persisted.length} bytes=${FirestoreReadStats.fmtBytes(persistedBytes)}, '
+          '0 Firestore reads');
+      return persisted;
+    }
+    return _fetchTaxList(sectionId, key);
+  }
+
+  Future<List<TaxModel>?> _readPersistedTaxList(String key) async {
+    try {
+      if (!await ConfigRefreshGate.isFresh(
+          _taxListGateKey(key), _taxListPersistentTtl)) {
+        return null;
+      }
+      final sp = await SharedPreferences.getInstance();
+      final raw = sp.getString(_taxListPrefsKey(key));
+      if (raw == null || raw.isEmpty) return null;
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return null;
+      return decoded
+          .whereType<Map<String, dynamic>>()
+          .map((e) => TaxModel.fromJson(e))
+          .toList();
+    } catch (_) {
+      // Any corruption/decode failure falls back to a real fetch rather than
+      // serving something we couldn't parse.
+      return null;
+    }
+  }
+
+  Future<void> _writePersistedTaxList(String key, List<TaxModel> taxList) async {
+    try {
+      final sp = await SharedPreferences.getInstance();
+      await sp.setString(_taxListPrefsKey(key),
+          jsonEncode(taxList.map((e) => e.toJson()).toList()));
+      await ConfigRefreshGate.markRefreshed(_taxListGateKey(key));
+    } catch (_) {
+      // Best-effort - worst case the next cold start re-fetches as before.
+    }
+  }
+
   Future<List<TaxModel>?> _fetchTaxList(String? sectionId, String key) async {
     List<TaxModel> taxList = [];
+    bool fetchFailed = false;
     await firestore.collection(tax).where('sectionId', isEqualTo: sectionId).where('enable', isEqualTo: true).getLogged('getTaxList:tax').then((value) {
       for (var element in value.docs) {
         TaxModel taxModel = TaxModel.fromJson(element.data());
         taxList.add(taxModel);
       }
     }).catchError((error) {
+      fetchFailed = true;
       log(error.toString());
     });
     _taxListCache[key] = (taxList, DateTime.now());
+    // Only persist a genuinely successful fetch - caching an empty list from a
+    // failed/offline query would suppress tax display for the whole TTL.
+    if (!fetchFailed && taxList.isNotEmpty) {
+      await _writePersistedTaxList(key, taxList);
+    }
     return taxList;
   }
 
@@ -1361,19 +1573,78 @@ class FireStoreUtils {
     final docRef = firestore.collection(PRODUCTS).doc(productId);
     try {
       await firestore.runTransaction((tx) async {
-        final snap = await tx.get(docRef);
-        if (!snap.exists || snap.data() == null) return;
-        final productModel = ProductModel.fromJson(snap.data()!);
-        if (variantId != null && productModel.itemAttributes?.variants != null) {
-          for (final v in productModel.itemAttributes!.variants!) {
-            if (v.variant_id == variantId && v.variant_quantity != '-1') {
-              v.variant_quantity = (int.parse(v.variant_quantity.toString()) - quantity).toString();
-            }
+        // Logged (2026-09-19): one read per line item per order, plus one
+        // more for every transaction retry - see LoggedTransactionGet.
+        final snap =
+            await tx.getLogged(docRef, 'decrementProductStock:PRODUCTS (tx)');
+        final data = snap.data();
+        if (!snap.exists || data == null) return;
+
+        // 2026-09-16: was `ProductModel.fromJson(...)` -> mutate ->
+        // `tx.set(docRef, productModel.toJson())`, i.e. a decrement of ONE
+        // number rewrote all 39 fields from a re-serialized Dart model.
+        // Two real problems with that, both fixed here:
+        //
+        // 1. SILENT DATA LOSS. Any field Firestore holds that
+        //    ProductModel.toJson() doesn't write back was deleted on every
+        //    single order. Confirmed live 2026-09-16: all 8 of 8 most-recent
+        //    products carry `proteins`/`fats`/`calories`, none of which are
+        //    in toJson() - so every stock decrement was dropping them. The
+        //    blast radius is open-ended: anything the Admin Panel or a future
+        //    Cloud Function adds to a product doc would be wiped the next
+        //    time that product is ordered.
+        // 2. A ~1,230-byte write to change one number - and for the 33-of-40
+        //    products with `quantity: -1` (unlimited), a full-document
+        //    rewrite that changed NOTHING AT ALL, on every order.
+        //
+        // Now: read the raw snapshot map (no model round-trip that could drop
+        // unknown fields), mutate only what's needed, and write only the
+        // changed field path - or skip the write entirely when there's
+        // nothing to decrement. Still inside the same transaction, so the
+        // concurrency guarantee described above is unchanged.
+        // variantId != null takes the variant branch only when the doc
+        // actually has usable item_attribute.variants data; otherwise (missing
+        // or malformed, e.g. a corrupted doc) it falls back to decrementing
+        // the base `quantity` field below, same fallback the pre-2026-09-16
+        // get-then-.set() version had - a variant order must still decrement
+        // *something* rather than silently writing nothing.
+        var tookVariantBranch = false;
+        if (variantId != null) {
+          final rawAttr = data['item_attribute'];
+          final rawVariants = rawAttr is Map ? rawAttr['variants'] : null;
+          if (rawVariants is List) {
+            tookVariantBranch = true;
+            var changed = false;
+            final updatedVariants = rawVariants.map((v) {
+              if (v is! Map) return v;
+              if (v['variant_id']?.toString() != variantId) return v;
+              final current = v['variant_quantity']?.toString();
+              // '-1' is the unlimited-stock sentinel, same as the plain
+              // `quantity` field below. int.tryParse (not int.parse) so a
+              // malformed value skips this line instead of throwing and
+              // aborting the whole stock update.
+              if (current == null || current == '-1') return v;
+              final parsed = int.tryParse(current);
+              if (parsed == null) return v;
+              changed = true;
+              return {...v, 'variant_quantity': (parsed - quantity).toString()};
+            }).toList();
+
+            if (!changed) return;
+            // Dot path: replaces only the variants array, leaving
+            // item_attribute.attributes (and any other key in that map)
+            // untouched.
+            tx.update(docRef, {'item_attribute.variants': updatedVariants});
           }
-        } else if (productModel.quantity != -1) {
-          productModel.quantity -= quantity;
         }
-        tx.set(docRef, productModel.toJson());
+        if (!tookVariantBranch) {
+          final rawQty = data['quantity'];
+          final current = rawQty is num
+              ? rawQty.toInt()
+              : int.tryParse(rawQty?.toString() ?? '');
+          if (current == null || current == -1) return;
+          tx.update(docRef, {'quantity': current - quantity});
+        }
       });
     } catch (stockErr) {
       print('Stock update error for $productId: $stockErr');
@@ -1646,23 +1917,45 @@ class FireStoreUtils {
   // same result.
   static Future<void>? _walletSettingsLoad;
 
+  // Same reasoning as _paymentConfigTtl above - the wallet on/off flag is
+  // already persisted via UserPreference.setWalletData and read from there by
+  // the rest of the app; this fetch only refreshed it.
+  static const String _walletConfigCacheKey = 'walletSettings';
+
   static Future<void> getWalletSettingData() {
     final existing = _walletSettingsLoad;
     if (existing != null) return existing;
-    final sw = Stopwatch()..start();
-    debugPrint('[FIRESTORE-PERF] getWalletSettingData() dispatched (${DateTime.now().toIso8601String()})');
-    final future = firestore.collection(Setting).doc('walletSettings').getLogged('getWalletSettingData:Setting').then((walletSetting) {
-      debugPrint('[FIRESTORE-PERF] getWalletSettingData() Firestore round-trip — '
-          '${sw.elapsedMilliseconds}ms (${DateTime.now().toIso8601String()})');
-      try {
-        bool walletEnable = walletSetting.data()!['isEnabled'];
-        UserPreference.setWalletData(walletEnable);
-      } catch (e) {
-        print(e.toString());
-      }
-    });
+    final future = _loadWalletSettingData();
     _walletSettingsLoad = future;
     return future;
+  }
+
+  static Future<void> _loadWalletSettingData() async {
+    bool hasLocalCopy;
+    try {
+      hasLocalCopy = UserPreference.getWalletData() != null;
+    } catch (_) {
+      hasLocalCopy = false;
+    }
+    if (await ConfigRefreshGate.canSkipFetch(
+        key: _walletConfigCacheKey,
+        ttl: _paymentConfigTtl,
+        hasLocalValue: hasLocalCopy)) {
+      return;
+    }
+
+    final sw = Stopwatch()..start();
+    debugPrint('[FIRESTORE-PERF] getWalletSettingData() dispatched (${DateTime.now().toIso8601String()})');
+    final walletSetting = await firestore.collection(Setting).doc('walletSettings').getLogged('getWalletSettingData:Setting');
+    debugPrint('[FIRESTORE-PERF] getWalletSettingData() Firestore round-trip — '
+        '${sw.elapsedMilliseconds}ms (${DateTime.now().toIso8601String()})');
+    try {
+      bool walletEnable = walletSetting.data()!['isEnabled'];
+      UserPreference.setWalletData(walletEnable);
+      await ConfigRefreshGate.markRefreshed(_walletConfigCacheKey);
+    } catch (e) {
+      print(e.toString());
+    }
   }
 
   // Only Razorpay is enabled in production (confirmed 2026-08-02) - Stripe/
@@ -1713,13 +2006,51 @@ class FireStoreUtils {
     return completer.future;
   }
 
+  // 2026-09-15: gateway settings change on the order of months, but this ran
+  // on every cold start purely to overwrite an already-correct local copy
+  // (UserPreference.setRazorPayData below has persisted it across app kills
+  // for a long time, and PaymentScreen reads it from there, not from here).
+  // See ConfigRefreshGate for the measured cold-start read breakdown.
+  static const Duration _paymentConfigTtl = Duration(days: 7);
+
+  // 2026-09-16: the Razorpay key itself (unlike the tax/recommendation
+  // caches, or even the wallet on/off flag above) has no independent
+  // server-side safety net - PaymentScreen opens the gateway SDK directly
+  // with whatever key is cached locally, so a stale copy is a real, usable
+  // credential, not just a UI hint. Deliberately a much shorter TTL than
+  // _paymentConfigTtl so a rotated/disabled key propagates to devices within
+  // a day instead of up to a week, while still cutting the cold-start read
+  // for the common case where nothing changed.
+  static const Duration _razorPayConfigTtl = Duration(days: 1);
+  static const String _razorPayConfigCacheKey = 'razorpaySettings';
+
   static Future<void> getRazorPayDemo() async {
+    // Skip entirely when a persisted copy exists and is still inside the TTL.
+    // getRazorPayData() touches UserPreference.preferences, which is a `late`
+    // field - if init() hasn't run yet it throws, so treat any throw as "no
+    // usable local copy" and fall through to the real fetch.
+    bool hasLocalCopy;
+    try {
+      hasLocalCopy = UserPreference.getRazorPayData() != null;
+    } catch (_) {
+      hasLocalCopy = false;
+    }
+    if (await ConfigRefreshGate.canSkipFetch(
+        key: _razorPayConfigCacheKey,
+        ttl: _razorPayConfigTtl,
+        hasLocalValue: hasLocalCopy)) {
+      return;
+    }
+
     // Reads the safe-fields-only mirror, not the real (now admin-only)
     // settings doc - see getRazorPay()'s comment above.
     try {
       final user = await firestore.collection(SettingPublic).doc("razorpaySettings").getLogged('getRazorPayDemo:SettingPublic');
       final userModel = RazorPayModel.fromJson(user.data() ?? {});
       UserPreference.setRazorPayData(userModel);
+      // Only after a genuine success - a failed fetch must not start a fresh
+      // TTL window on top of a stale/absent local copy.
+      await ConfigRefreshGate.markRefreshed(_razorPayConfigCacheKey);
     } catch (e) {
       print('FireStoreUtils.getUserByID failed to parse user object');
     }
@@ -1727,12 +2058,42 @@ class FireStoreUtils {
     //yield* razorPayStreamController.stream;
   }
 
+  // 2026-09-15: 7-day persisted cache, same bucket as Razorpay/wallet -
+  // confirmed against the live production database that Setting/CODSettings
+  // does not exist at all (404 on direct lookup), meaning every single call
+  // here was a genuine, billed NOT_FOUND read for a feature that has never
+  // been configured (this NOT_FOUND category is real and separately visible
+  // in Cloud Monitoring's document/read_count breakdown, not just a doc-count
+  // guess). A confirmed-absent result is cached too (as an explicit
+  // "__absent__" marker, since ConfigRefreshGate.readDoc/writeDoc has nothing
+  // to cache for a null result otherwise) - if COD is ever configured later,
+  // the 7-day TTL still picks up the real document once it expires.
+  static const String _codCacheKey = 'codSettings';
+  static const Duration _codCacheTtl = Duration(days: 7);
+  static const String _codAbsentMarker = '__absent__';
+
   Future<CodModel?> getCod() async {
+    final cached = await ConfigRefreshGate.readDoc(_codCacheKey, _codCacheTtl);
+    if (cached != null) {
+      if (cached[_codAbsentMarker] == true) {
+        debugPrint('[ConfigCache] CODSettings served from on-device cache '
+            '(confirmed absent) - 0 Firestore reads');
+        return null;
+      }
+      debugPrint('[ConfigCache] CODSettings served from on-device persisted '
+          'copy - 0 Firestore reads');
+      return CodModel.fromJson(cached);
+    }
+
     DocumentSnapshot<Map<String, dynamic>> codQuery = await firestore.collection(Setting).doc('CODSettings').getLogged('getCod:Setting');
-    if (codQuery.data() != null) {
-      return CodModel.fromJson(codQuery.data()!);
+    final data = codQuery.data();
+    if (data != null) {
+      // ignore: unawaited_futures
+      ConfigRefreshGate.writeDoc(_codCacheKey, data);
+      return CodModel.fromJson(data);
     } else {
-      print("nulllll");
+      // ignore: unawaited_futures
+      ConfigRefreshGate.writeDoc(_codCacheKey, {_codAbsentMarker: true});
       return null;
     }
   }
@@ -2550,6 +2911,25 @@ class FireStoreUtils {
   static final Map<String, (List<BannerModel>, DateTime)> _homeTopBannerCache = {};
   static const Duration _homeTopBannerCacheTtl = Duration(minutes: 10);
 
+  // 2026-09-15: banner lists have no date/scheduling fields at all (see
+  // BannerModel - just is_publish/position/set_order/photo), so unlike stories
+  // there is no time-based expiry that a cached copy could get wrong. Admin
+  // changes them roughly weekly, so a 24-hour on-device TTL (explicit product
+  // decision) is comfortably conservative.
+  //
+  // This sits in FRONT of the Bunny mirror, not behind it, and that ordering
+  // is the actual fix. fetchTopBannerFromBunny has an 8-second timeout, and on
+  // a slow network (measured on-device 2026-09-15: 9-12s Firestore round
+  // trips, 4.7-5.5s OSRM calls) that timeout is genuinely reachable - when it
+  // trips, the code below falls through to a real Firestore query. That is
+  // exactly what was observed: a cold start logging
+  // `getHomeTopBanner:MENU_ITEM docs=3` even though the mirror itself is
+  // healthy (verified live: HTTP 200). Serving from disk first means a slow
+  // network can no longer convert a working CDN mirror into billed Firestore
+  // reads - and it skips the HTTP round trip entirely, so the banner paints
+  // sooner too.
+  static const Duration _bannerPersistentTtl = Duration(hours: 24);
+
   Future<List<BannerModel>> getHomeTopBanner() async {
     final sectionId = sectionConstantModel!.id ?? '';
     final cached = _homeTopBannerCache[sectionId];
@@ -2558,12 +2938,26 @@ class FireStoreUtils {
       return cached.$1;
     }
 
+    final persisted =
+        await ConfigRefreshGate.readList('topBanner_$sectionId', _bannerPersistentTtl);
+    if (persisted != null) {
+      final banners = persisted.map((e) => BannerModel.fromJson(e)).toList()
+        ..sort((a, b) => (a.setOrder ?? 0).compareTo(b.setOrder ?? 0));
+      _homeTopBannerCache[sectionId] = (banners, now);
+      debugPrint('[ConfigCache] top banners (${banners.length}) from on-device '
+          'cache - no Bunny call, 0 Firestore reads');
+      return banners;
+    }
+
     // Read on every app cold start by every user - same fan-out class as
     // getCuisines() above, per the 2026-09-06 billing audit. Falls back to
     // the original Firestore query below on any failure.
     final mirrored = await fetchTopBannerFromBunny(sectionId);
     if (mirrored != null) {
       _homeTopBannerCache[sectionId] = (mirrored, now);
+      // ignore: unawaited_futures
+      ConfigRefreshGate.writeList(
+          'topBanner_$sectionId', mirrored.map((b) => b.toJson()).toList());
       return mirrored;
     }
 
@@ -2584,6 +2978,9 @@ class FireStoreUtils {
       }
     });
     _homeTopBannerCache[sectionId] = (bannerHome, now);
+    // ignore: unawaited_futures
+    ConfigRefreshGate.writeList(
+        'topBanner_$sectionId', bannerHome.map((b) => b.toJson()).toList());
     return bannerHome;
   }
 
@@ -2598,6 +2995,25 @@ class FireStoreUtils {
     if (cached != null && now.difference(cached.$2) < _homeMiddleBannerCacheTtl) {
       return cached.$1;
     }
+
+    // Unlike the top banner there is NO Bunny mirror for this one - verified
+    // live 2026-09-15 that middle-banner-lists/{sectionId}.json returns 404,
+    // so this always fell through to Firestore. Even with zero middle banners
+    // configured that still costs Firestore's one-read query minimum on every
+    // cold start, which this cache removes. An empty result is cached
+    // deliberately here (unlike tax/stories): "this section has no middle
+    // banners" is a legitimate, stable answer, not a symptom of failure.
+    final persisted = await ConfigRefreshGate.readList(
+        'middleBanner_$sectionId', _bannerPersistentTtl);
+    if (persisted != null) {
+      final banners = persisted.map((e) => BannerModel.fromJson(e)).toList()
+        ..sort((a, b) => (a.setOrder ?? 0).compareTo(b.setOrder ?? 0));
+      _homeMiddleBannerCache[sectionId] = (banners, now);
+      debugPrint('[ConfigCache] middle banners (${banners.length}) from '
+          'on-device cache - 0 Firestore reads');
+      return banners;
+    }
+
     List<BannerModel> bannerHome = [];
     QuerySnapshot<Map<String, dynamic>> bannerHomeQuery = await firestore
         .collection(MENU_ITEM)
@@ -2615,6 +3031,9 @@ class FireStoreUtils {
       }
     });
     _homeMiddleBannerCache[sectionId] = (bannerHome, now);
+    // ignore: unawaited_futures
+    ConfigRefreshGate.writeList(
+        'middleBanner_$sectionId', bannerHome.map((b) => b.toJson()).toList());
     return bannerHome;
   }
 
@@ -3089,10 +3508,46 @@ class FireStoreUtils {
   // null-check a missing entry (both existing call sites did, for
   // getProductByID's not-found-throws-then-caught-as-null behavior) need no
   // other change.
+  // 2026-09-15: 10-minute per-product TTL (explicit product decision) - this
+  // used to re-fetch every cart line's product data from scratch on every
+  // single Cart open, with zero caching at all. Verified safe against
+  // verifyProducts (orderVerification.js): for any product that still exists,
+  // the server independently re-fetches its OWN copy from `vendor_products`
+  // and uses that price, never whatever the client cached - so a stale
+  // client-side price here can only affect the pre-checkout display, never
+  // what's actually charged. The one pre-existing, narrower edge case (a
+  // product deleted between fetch and checkout falls back to the client's
+  // submitted price server-side) is unrelated to this cache - it already
+  // existed with zero caching, just with a ~seconds instead of ~10-minute
+  // window - and is being closed separately by the pre-payment blocking work
+  // (orderPreflight.js).
+  //
+  // Cached per product id (not per call, since different Cart opens/reorders
+  // request different id sets that often overlap) - each call only queries
+  // Firestore for the ids that are missing or expired.
+  static final Map<String, (ProductModel, DateTime)> _productByIdCache = {};
+  static const Duration _productByIdCacheTtl = Duration(minutes: 10);
+
   Future<Map<String, ProductModel>> fetchProductsByIds(
       List<String> productIds) async {
     final result = <String, ProductModel>{};
-    final chunks = dedupeAndChunkIds(productIds);
+    final now = DateTime.now();
+    final uncachedIds = <String>[];
+    for (final id in productIds.toSet()) {
+      final cached = _productByIdCache[id];
+      if (cached != null && now.difference(cached.$2) < _productByIdCacheTtl) {
+        result[id] = cached.$1;
+      } else {
+        uncachedIds.add(id);
+      }
+    }
+    if (uncachedIds.isEmpty) {
+      debugPrint('[ConfigCache] fetchProductsByIds: all ${result.length} '
+          'products served from cache - 0 Firestore reads');
+      return result;
+    }
+
+    final chunks = dedupeAndChunkIds(uncachedIds);
     if (chunks.isEmpty) return result;
 
     await Future.wait(chunks.map((chunk) async {
@@ -3103,6 +3558,7 @@ class FireStoreUtils {
           try {
             final product = ProductModel.fromJson(doc.data());
             result[product.id] = product;
+            _productByIdCache[product.id] = (product, now);
           } catch (e) {
             print('FireStoreUtils.fetchProductsByIds parse error $e');
           }
@@ -3363,16 +3819,21 @@ class FireStoreUtils {
     final occupancyRef =
         bookingType == 'flexible' ? firestore.collection(DINE_IN_OCCUPANCY).doc(vendorId) : null;
     await firestore.runTransaction((tx) async {
-      final vendorSnap = await tx.get(vendorRef);
+      // Logged (2026-09-19): up to THREE billed reads in this one
+      // transaction, times every retry - see LoggedTransactionGet.
+      final vendorSnap =
+          await tx.getLogged(vendorRef, 'reserveBookingCapacity:VENDORS (tx)');
       final blockedDates = List<String>.from(vendorSnap.data()?['bookingBlockedDates'] ?? []);
       if (blockedDates.contains(dateKey)) {
         throw BookingDateBlockedException();
       }
-      final snap = await tx.get(ref);
+      final snap = await tx.getLogged(
+          ref, 'reserveBookingCapacity:DINE_IN_CAPACITY (tx)');
       final occupied = (snap.data()?['occupiedGuests'] as num?)?.toInt() ?? 0;
       int walkInOccupied = 0;
       if (occupancyRef != null) {
-        final occupancySnap = await tx.get(occupancyRef);
+        final occupancySnap = await tx.getLogged(
+            occupancyRef, 'reserveBookingCapacity:DINE_IN_OCCUPANCY (tx)');
         walkInOccupied = (occupancySnap.data()?['occupiedGuests'] as num?)?.toInt() ?? 0;
       }
       if (occupied + walkInOccupied + guestCount > maxCapacity) {
@@ -3397,7 +3858,8 @@ class FireStoreUtils {
     final ref = firestore.collection(DINE_IN_CAPACITY).doc(
         _capacityDocId(vendorId: vendorId, bookingType: bookingType, slotId: slotId, dateKey: dateKey));
     await firestore.runTransaction((tx) async {
-      final snap = await tx.get(ref);
+      final snap = await tx.getLogged(
+          ref, 'releaseBookingCapacity:DINE_IN_CAPACITY (tx)');
       final occupied = (snap.data()?['occupiedGuests'] as num?)?.toInt() ?? 0;
       final next = occupied - guestCount;
       tx.set(ref, {'occupiedGuests': next < 0 ? 0 : next}, SetOptions(merge: true));
@@ -3756,9 +4218,15 @@ class FireStoreUtils {
     newString = newString.replaceAll("{username}", MyAppState.currentUser!.firstName + " " + MyAppState.currentUser!.lastName);
     newString = newString.replaceAll("{orderid}", orderModel.id);
     newString = newString.replaceAll("{date}", DateFormat('dd-MM-yyyy').format(orderModel.createdAt.toDate()));
+    // 2026-09-16: address is now null for Dineaway orders (no delivery
+    // happening) - was orderModel.address!.getFullAddress(), a force-unwrap
+    // that would have silently broken this email (caught by the
+    // .catchError((_) {}) at its call site, PlaceOrderScreen.dart's
+    // _sendNotificationsBackground, with no visible error to anyone) for
+    // every Dineaway order the moment address could be null.
     newString = newString.replaceAll(
       "{address}",
-      '${orderModel.address!.getFullAddress()}',
+      orderModel.address?.getFullAddress() ?? '',
     );
     newString = newString.replaceAll(
       "{paymentmethod}",

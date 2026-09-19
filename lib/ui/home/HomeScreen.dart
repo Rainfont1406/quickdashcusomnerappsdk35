@@ -16,6 +16,7 @@ import 'package:emartconsumer/services/behavior/behavior_counters.dart';
 import 'package:firebase_auth/firebase_auth.dart' as auth;
 import 'package:emartconsumer/services/behavior/behavior_event_types.dart';
 import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
+import 'package:emartconsumer/services/config_refresh_gate.dart';
 import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
@@ -639,10 +640,14 @@ class _HomeScreenState extends State<HomeScreen> {
     _homeInitStopwatch.start();
     debugPrint(
         '[HOME-PERF] HomeScreen.initState START at ${DateTime.now().toIso8601String()}');
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      debugPrint(
-          '[HOME-PERF] MILESTONE: first frame rendered (skeleton) — ${_homeInitStopwatch.elapsedMilliseconds}ms since initState');
-    });
+    // 2026-09-15: reset() moved to main.dart's MyApp.initState - see its
+    // comment for why (PurchaseCompletionListener can record before Home
+    // even mounts, and a reset here was silently erasing that).
+    // Dumps twice (see scheduleFirestoreReadDump's doc comment - a burst of
+    // individual read-log lines can get silently dropped by logcat, and a
+    // single too-early dump can miss slow-network fetches entirely, both
+    // confirmed live 2026-09-15).
+    scheduleFirestoreReadDump('HomeScreen', isStillActive: () => mounted);
     print("AK DEBUG: HomeScreen initState");
     // The live listener itself lives in ContainerScreen (one listener for the
     // whole app); this screen just rebuilds when the shared notifiers change.
@@ -720,6 +725,39 @@ class _HomeScreenState extends State<HomeScreen> {
   bool isHomeBannerMiddleLoading = true;
   List<VendorCategoryModel> vendorCategoryModel = [];
 
+  // 2026-09-15: the Stories on/off flag is a single admin-managed boolean that
+  // changes about as often as never, but this doc was re-read on every cold
+  // start. Now persisted on-device behind a 7-day TTL (ConfigRefreshGate),
+  // same treatment as the tax/gateway/recommendation configs. Worst case if it
+  // does get flipped: the Stories row stays visible (or hidden) on this device
+  // for up to 7 days - a cosmetic delay on a section that is itself optional.
+  static const Duration _storyFlagTtl = Duration(days: 7);
+  static const String _storyFlagCacheKey = 'storySettingEnabled';
+
+  Future<void> _loadStoryEnabledFlag() async {
+    final cached =
+        await ConfigRefreshGate.readDoc(_storyFlagCacheKey, _storyFlagTtl);
+    if (cached != null) {
+      if (!mounted) return;
+      setState(() => storyEnable = cached['isEnabled'] ?? false);
+      debugPrint('[ConfigCache] Setting/story served from on-device persisted '
+          'copy - 0 Firestore reads');
+      return;
+    }
+    final value = await _timedStep(
+        'getBanner -> story setting doc get',
+        () => FireStoreUtils.firestore
+            .collection(Setting)
+            .doc('story')
+            .getLogged('getBanner:Setting'));
+    final data = value.data();
+    if (data != null) {
+      await ConfigRefreshGate.writeDoc(_storyFlagCacheKey, data);
+    }
+    if (!mounted) return;
+    setState(() => storyEnable = data?['isEnabled'] ?? false);
+  }
+
   getBanner() async {
     final bannerStopwatch = Stopwatch()..start();
     debugPrint(
@@ -768,14 +806,7 @@ class _HomeScreenState extends State<HomeScreen> {
           isHomeBannerLoading = false;
         });
       }),
-      _timedStep(
-              'getBanner -> story setting doc get',
-              () => FireStoreUtils.firestore.collection(Setting).doc('story').getLogged('getBanner:Setting'))
-          .then((value) {
-        setState(() {
-          storyEnable = value.data()?['isEnabled'] ?? false;
-        });
-      }),
+      _loadStoryEnabledFlag(),
     ]);
     debugPrint(
         '[HOME-PERF] getBanner TOTAL (3 parallel calls above): ${bannerStopwatch.elapsedMilliseconds}ms');

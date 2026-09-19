@@ -14,13 +14,16 @@ import 'package:emartconsumer/model/mail_setting.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/behavior/purchase_completion_listener.dart';
+import 'package:emartconsumer/services/config_refresh_gate.dart';
 import 'package:emartconsumer/services/connectivity_gate.dart';
+import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/services/force_update_gate.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/services/notification_service.dart';
 import 'package:emartconsumer/services/shared_orders_watcher.dart';
 import 'package:emartconsumer/services/shared_vendors_watcher.dart';
+import 'package:emartconsumer/services/wallet_history_cache.dart';
 import 'package:emartconsumer/ui/container/ContainerScreen.dart';
 import 'package:emartconsumer/ui/home/HomeScreen.dart';
 import 'package:emartconsumer/ui/service_list_screen.dart';
@@ -93,12 +96,16 @@ void main() async {
   // hasFinishedOnBoarding()'s real getCurrentUser() call — which used to be
   // the one eating this cost inline — hits an already-warm connection.
   // Result is discarded either way; only the connection side effect matters.
+  // 2026-09-19: was a raw .get(), invisible to FirestoreReadStats - every
+  // cold start paid this 1-document read with zero trace in the app's own
+  // read-cost log. Switched to getLogged so it's at least visible now; the
+  // warm-up behavior itself (result discarded) is unchanged.
   unawaited(_timedStep(
           'Firestore warm-up (globalSettings, throwaway)',
           () => FireStoreUtils.firestore
               .collection(Setting)
               .doc('globalSettings')
-              .get())
+              .getLogged('main:warmup-globalSettings'))
       .catchError((_) {}));
 
   await EasyLocalization.ensureInitialized();
@@ -175,6 +182,35 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
   //  late Stream<StripeKeyModel> futureStirpe;
   //  String? data,d;
 
+  // 2026-09-16: when the app was backgrounded only briefly, SharedOrdersWatcher/
+  // SharedVendorsWatcher's existing subscriptions are still genuinely alive -
+  // restarting them on didChangeAppLifecycleState.resumed re-pays for a live
+  // re-check (SharedOrdersWatcher: one read per unsettled order;
+  // SharedVendorsWatcher: a full Bunny vendor-list refetch + one Firestore
+  // read) for zero benefit, since a live listener already delivered anything
+  // that changed. Confirmed live 2026-09-16: ~3-7 reads on EVERY resume,
+  // including a screenshot-triggered notification-shade peek, with the
+  // underlying listener never having actually gone anywhere.
+  //
+  // The restart itself exists for a real, previously-confirmed bug though
+  // (see SharedOrdersWatcher's own class doc comment) - a listener idle
+  // across a long-enough background stretch can silently lose its live
+  // connection with no error and no local signal to reconnect, particularly
+  // on OEM Android skins (this was found on ColorOS) that aggressively
+  // freeze/network-restrict backgrounded apps. So this can't simply be
+  // removed - only skipped when there's no real reason to suspect the
+  // listener died.
+  //
+  // 5 minutes is a deliberately conservative starting threshold, not a
+  // derived constant - the bug this guards against manifested as staleness
+  // across DAYS of backgrounding, so 5 minutes catches that with wide margin
+  // while still skipping the common case (a quick app-switch, a notification
+  // peek) that was producing the unnecessary reads. Widen if real-world data
+  // shows shorter backgrounds are still safe; narrow if a live listener is
+  // ever confirmed to die faster than this on some device.
+  static const Duration _restartSuspicionThreshold = Duration(minutes: 5);
+  DateTime? _backgroundedAt;
+
   // Define an async function to initialize FlutterFire
   NotificationService notificationService = NotificationService();
 
@@ -185,64 +221,134 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
       if (currentUser != null) {
         await FireStoreUtils.getCurrentUser(currentUser!.userID).then((value) {
           if (value != null) {
+            // 2026-09-15: only write back if the FCM token actually changed.
+            // This used to call updateCurrentUser unconditionally on every
+            // cold start - confirmed live that produced TWO separate
+            // updateCurrentUser:USERS writes ~4.5s apart on a single launch,
+            // because hasFinishedOnBoarding's routing logic (the auth/msg91
+            // branches, or _refreshUserProfileInBackground) already performs
+            // its own independently-fetched-token write moments later/earlier
+            // in the same launch. Token rotation is rare, so this removes the
+            // duplicate write on the common case while still persisting a
+            // genuine token change whenever one occurs.
+            final tokenChanged = value.fcmToken != token;
             currentUser = value;
             currentUser!.fcmToken = token;
-            FireStoreUtils.updateCurrentUser(currentUser!);
+            if (tokenChanged) {
+              FireStoreUtils.updateCurrentUser(currentUser!);
+            }
           }
         });
       }
     });
   }
 
+  // 2026-09-15: these 7 docs are admin-configured app settings that change on
+  // the order of weeks (theme color, mail config, version display string, map
+  // key, map type, notification/FCM sender config, placeholder image) - none
+  // are transactional. They were previously unlogged raw `.get()` calls,
+  // invisible to FirestoreReadStats, fetched fresh on EVERY cold start AND
+  // every app resume (this function is called from both main.dart:308 and the
+  // AppLifecycleState.resumed handler) - confirmed live 2026-09-15 as part of
+  // several billed-but-unattributed reads. Persisted on-device behind a
+  // 7-day TTL, same bucket as Razorpay/wallet settings.
+  //
+  // maxCombinedDiscountPercent (bundled inside globalSettings) is the one
+  // price-adjacent field in this batch - researched and confirmed safe at
+  // this TTL: the server (orderVerification.js's getMaxCombinedDiscountPercent)
+  // does its own UNCACHED `settings/globalSettings.get()` on every single
+  // order verification/payment call, independent of whatever the client has
+  // cached. A stale client copy can only affect a pre-checkout UI hint, never
+  // the amount actually charged.
+  static const Duration _appSettingsTtl = Duration(days: 7);
+  static const String _appSettingsCacheKey = 'appSettingsBatch';
+
+  void _applyAppSettings(Map<String, Map<String, dynamic>?> byDocId) {
+    final globalSettings = byDocId['globalSettings'];
+    if (globalSettings != null) {
+      AppThemeData.primary300 = Color(int.parse(
+          globalSettings['app_customer_color'].replaceFirst("#", "0xff")));
+      final rawMaxCombined = globalSettings['maxCombinedDiscountPercent'];
+      final parsedMaxCombined = double.tryParse(rawMaxCombined?.toString() ?? '');
+      if (parsedMaxCombined != null && parsedMaxCombined > 0 && parsedMaxCombined <= 100) {
+        maxCombinedDiscountPercent = parsedMaxCombined;
+      }
+    }
+
+    final emailSetting = byDocId['emailSetting'];
+    if (emailSetting != null) {
+      mailSettings = MailSettings.fromJson(emailSetting);
+    }
+
+    final version = byDocId['Version'];
+    if (version != null) appVersion = version['app_version'].toString();
+
+    final googleMapKey = byDocId['googleMapKey'];
+    if (googleMapKey != null) GOOGLE_API_KEY = googleMapKey['key'].toString();
+
+    final driverNearBy = byDocId['DriverNearBy'];
+    if (driverNearBy != null) selectedMapType = driverNearBy['selectedMapType'].toString();
+
+    final notificationSetting = byDocId['notification_setting'];
+    if (notificationSetting != null) {
+      senderId = notificationSetting['senderId'].toString();
+      jsonNotificationFileURL = notificationSetting['serviceJson'].toString();
+    }
+
+    final placeHolderImage = byDocId['placeHolderImage'];
+    if (placeHolderImage != null) placeholderImage = placeHolderImage['image'].toString();
+  }
+
   // Define an async function to initialize FlutterFire
   void initializeFlutterFire() async {
     try {
-      // These 7 settings docs are independent of each other — fetch them
-      // concurrently instead of awaiting each network round-trip in series.
-      final settingsCollection = FireStoreUtils.firestore.collection(Setting);
-      final results = await Future.wait([
-        settingsCollection.doc("globalSettings").get(),
-        settingsCollection.doc("emailSetting").get(),
-        settingsCollection.doc("Version").get(),
-        settingsCollection.doc("googleMapKey").get(),
-        settingsCollection.doc("DriverNearBy").get(),
-        settingsCollection.doc("notification_setting").get(),
-        settingsCollection.doc("placeHolderImage").get(),
-      ]);
+      final cachedRaw =
+          await ConfigRefreshGate.readRaw(_appSettingsCacheKey, _appSettingsTtl);
+      if (cachedRaw != null) {
+        final decoded = jsonDecode(cachedRaw) as Map<String, dynamic>;
+        _applyAppSettings(decoded.map((k, v) =>
+            MapEntry(k, v == null ? null : Map<String, dynamic>.from(v as Map))));
+        debugPrint('[ConfigCache] app settings batch (7 docs) served from '
+            'on-device cache - 0 Firestore reads');
+      } else {
+        // These 7 settings docs are independent of each other — fetch them
+        // concurrently instead of awaiting each network round-trip in series.
+        final settingsCollection = FireStoreUtils.firestore.collection(Setting);
+        const docIds = [
+          "globalSettings",
+          "emailSetting",
+          "Version",
+          "googleMapKey",
+          "DriverNearBy",
+          "notification_setting",
+          "placeHolderImage",
+        ];
+        final results = await Future.wait(docIds.map((id) => settingsCollection
+            .doc(id)
+            .getLogged('initializeFlutterFire:Setting/$id')));
 
-      final globalSettings = results[0];
-      if (globalSettings.exists) {
-        AppThemeData.primary300 = Color(int.parse(
-            globalSettings.data()!['app_customer_color'].replaceFirst("#", "0xff")));
-        final rawMaxCombined = globalSettings.data()!['maxCombinedDiscountPercent'];
-        final parsedMaxCombined = double.tryParse(rawMaxCombined?.toString() ?? '');
-        if (parsedMaxCombined != null && parsedMaxCombined > 0 && parsedMaxCombined <= 100) {
-          maxCombinedDiscountPercent = parsedMaxCombined;
+        final byDocId = <String, Map<String, dynamic>?>{
+          for (var i = 0; i < docIds.length; i++)
+            docIds[i]: results[i].exists ? results[i].data() : null,
+        };
+        _applyAppSettings(byDocId);
+        // 2026-09-16: guarded on its own - jsonEncode throws synchronously
+        // on any non-primitive field (e.g. a Firestore Timestamp some admin
+        // doc happens to carry), and this used to be unguarded inside the
+        // same try block that restores the saved locale below. A throw here
+        // used to skip locale restoration for that launch entirely, and
+        // repeat on every subsequent cold start since the cache write never
+        // succeeded to begin with. Failing to cache is a missed optimization
+        // (falls back to fetching fresh next launch, same as before this
+        // cache existed), not a reason to break anything downstream.
+        try {
+          // ignore: unawaited_futures
+          ConfigRefreshGate.writeRaw(_appSettingsCacheKey, jsonEncode(byDocId));
+        } catch (e) {
+          debugPrint('[ConfigCache] app settings cache write failed '
+              '(non-fatal): $e');
         }
       }
-
-      final emailSetting = results[1];
-      if (emailSetting.exists) {
-        mailSettings = MailSettings.fromJson(emailSetting.data()!);
-      }
-
-      final version = results[2];
-      if (version.exists) appVersion = version.data()!['app_version'].toString();
-
-      final googleMapKey = results[3];
-      if (googleMapKey.exists) GOOGLE_API_KEY = googleMapKey.data()!['key'].toString();
-
-      final driverNearBy = results[4];
-      if (driverNearBy.exists) selectedMapType = driverNearBy.data()!['selectedMapType'].toString();
-
-      final notificationSetting = results[5];
-      if (notificationSetting.exists) {
-        senderId = notificationSetting.data()!['senderId'].toString();
-        jsonNotificationFileURL = notificationSetting.data()!['serviceJson'].toString();
-      }
-
-      final placeHolderImage = results[6];
-      if (placeHolderImage.exists) placeholderImage = placeHolderImage.data()!['image'].toString();
 
       SharedPreferences sp = await SharedPreferences.getInstance();
       final langCode = sp.getString("languageCode");
@@ -292,8 +398,23 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
   // exists and why it's global rather than screen-owned.
   late StreamSubscription<auth.User?> _authStateStream;
 
+  // Tracks the uid seen on the last non-null authStateChanges tick, purely
+  // so the null tick right after a logout (below) still knows whose
+  // per-account caches to clear - by that point auth.User is already null,
+  // there's nothing else here to read it from.
+  String? _lastSeenAuthUid;
+
   @override
   void initState() {
+    // 2026-09-15: moved here from HomeScreen.initState. Proven live that
+    // PurchaseCompletionListener.start() below (via authStateChanges, which
+    // can fire before Home even mounts) can record its read BEFORE a
+    // later reset() call runs - confirmed on-device: the listener logged at
+    // 13:02:18.167, HomeScreen's old reset() ran at 13:02:18.397, 230ms
+    // later, silently erasing that read from every later summary dump. This
+    // is the true earliest point in the app's lifecycle, before anything
+    // that reads Firestore has had a chance to run.
+    FirestoreReadStats.reset();
     notificationInit();
     initializeFlutterFire();
     WidgetsBinding.instance.addObserver(this);
@@ -318,10 +439,19 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
     _authStateStream = auth.FirebaseAuth.instance.authStateChanges().listen((user) {
       FireStoreUtils.onAuthUidChanged(user?.uid);
       if (user != null) {
+        _lastSeenAuthUid = user.uid;
         PurchaseCompletionListener.start(user.uid);
       } else {
         PurchaseCompletionListener.stop();
         SharedOrdersWatcher.stop();
+        // 2026-09-16: WalletHistoryCache.clear() existed for exactly this
+        // (per its own doc comment) but was never actually called from any
+        // logout path - same choke point as SharedOrdersWatcher.stop()
+        // above, for the same reason (every signOut() call, regardless of
+        // which UI button triggered it, ends up here as a null tick).
+        final uid = _lastSeenAuthUid;
+        _lastSeenAuthUid = null;
+        if (uid != null) unawaited(WalletHistoryCache.clear(uid));
       }
     });
     super.initState();
@@ -373,21 +503,45 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
       // doc comment claimed a resumed cycle would restart it, but nothing
       // here actually did until now. start() calls stop() first, so this
       // is safe/idempotent to call on every resume, logged in or not.
+      // Left unconditional (not gated below like the two watchers) - it's
+      // passive-mode and logs its own "0 reads", so gating it would add
+      // complexity for zero savings.
       final uid = FireStoreUtils.getCurrentUid();
       if (uid.isNotEmpty) PurchaseCompletionListener.start(uid);
-      // Same rationale, for the shared Orders watcher (2026-09-06) - a
-      // listener idle across days of backgrounding can silently lose its
-      // live connection with no error and no local signal to reconnect,
-      // which is exactly what let the original per-screen-listener bug's
-      // stale snapshot go unnoticed for so long. restartIfActive() is a
-      // no-op for a customer who has never opened Orders this session, so
-      // this never costs a read nobody asked for.
-      SharedOrdersWatcher.restartIfActive();
-      // Same reasoning, for the shared Home vendor-list watcher (2026-09-06).
-      SharedVendorsWatcher.restartIfActive();
+
+      // 2026-09-16: was unconditional on every resume - see
+      // _restartSuspicionThreshold's doc comment above for why that was
+      // costing real, confirmed reads for no liveness benefit on a short
+      // resume. wasBackgroundedLongEnoughToSuspectDeath is null-safe for the
+      // (rare) case this fires without ever having seen a paused/inactive
+      // transition first.
+      final backgroundedAt = _backgroundedAt;
+      _backgroundedAt = null;
+      final wasBackgroundedLongEnoughToSuspectDeath = backgroundedAt != null &&
+          DateTime.now().difference(backgroundedAt) > _restartSuspicionThreshold;
+
+      if (wasBackgroundedLongEnoughToSuspectDeath) {
+        // Same rationale, for the shared Orders watcher (2026-09-06) - a
+        // listener idle across days of backgrounding can silently lose its
+        // live connection with no error and no local signal to reconnect,
+        // which is exactly what let the original per-screen-listener bug's
+        // stale snapshot go unnoticed for so long. restartIfActive() is a
+        // no-op for a customer who has never opened Orders this session, so
+        // this never costs a read nobody asked for.
+        SharedOrdersWatcher.restartIfActive();
+        // Same reasoning, for the shared Home vendor-list watcher (2026-09-06).
+        SharedVendorsWatcher.restartIfActive();
+      }
     } else if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive ||
         state == AppLifecycleState.detached) {
+      // Recorded on every one of these, not just the first - a bare
+      // .inactive->.resumed blip (e.g. pulling the notification shade, a
+      // system permission dialog) never reaches paused at all, and this
+      // must still correctly compute as "backgrounded near-zero time" on
+      // the resume that follows, not fall through to the null/never-set
+      // branch above.
+      _backgroundedAt = DateTime.now();
       // Flush any pending behavior events before the app is backgrounded/
       // killed — this is one of BehaviorTracker's three flush triggers
       // (queue threshold, background, reconnect), never a periodic timer.
