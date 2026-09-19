@@ -85,7 +85,39 @@ class SharedOrdersWatcher {
     return _replay();
   }
 
+  /// PASSIVE subscription to whatever this watcher is ALREADY emitting.
+  ///
+  /// Unlike [watch], this deliberately never calls [start] - so subscribing
+  /// costs zero Firestore reads. A passive subscriber simply hears nothing
+  /// until something else (today: OrdersScreen) starts the watcher for real.
+  ///
+  /// Added 2026-09-15 for PurchaseCompletionListener, which used to run its
+  /// own independent vendor_orders query on every cold start purely to notice
+  /// orders reaching "Order Completed". Those exact documents are already read
+  /// here whenever the customer opens their Orders screen, so piggy-backing on
+  /// this stream gets the same signal for free instead of paying for it twice.
+  /// Callers MUST NOT treat silence as "no completed orders" - it usually just
+  /// means the watcher isn't running.
+  ///
+  /// 2026-09-16: now replays whatever [_latest] the watcher already knows
+  /// (same "seed from what's already known" as [_replay]/[watch], just
+  /// without ever calling [start]) - previously returned [_controller.stream]
+  /// directly, so an order that had already completed by the time a passive
+  /// subscriber attached (e.g. OrdersScreen was already open and delivered
+  /// it before PurchaseCompletionListener subscribed) was missed on this
+  /// path entirely, silently falling through to the weekly full-sweep
+  /// backstop instead of being noticed immediately. Each access to this
+  /// getter returns a fresh single-subscription stream (same as [_replay]),
+  /// so it's safe for a new subscriber to call this again later even while
+  /// an earlier one is still listening.
+  static Stream<List<OrderModel>> get passiveStream => _passiveReplay();
+
   static Stream<List<OrderModel>> _replay() async* {
+    if (_latest != null) yield _latest!;
+    yield* _controller.stream;
+  }
+
+  static Stream<List<OrderModel>> _passiveReplay() async* {
     if (_latest != null) yield _latest!;
     yield* _controller.stream;
   }

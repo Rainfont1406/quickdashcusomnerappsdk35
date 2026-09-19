@@ -9,6 +9,7 @@ import 'package:emartconsumer/services/behavior/behavior_queue_store.dart';
 import 'package:emartconsumer/services/behavior/global_analytics_api.dart';
 import 'package:emartconsumer/services/behavior/recent_restaurant_session_store.dart';
 import 'package:emartconsumer/services/behavior/combo_metadata_store.dart';
+import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
@@ -1795,7 +1796,12 @@ class BehaviorTracker {
         final d = DateTime(now.year, now.month - i, 1);
         keep.add('${d.year}-${d.month.toString().padLeft(2, '0')}');
       }
-      final existing = await userRef.collection('behavior_summary').get();
+      // 2026-09-19: was a raw .get(), invisible to FirestoreReadStats - this
+      // is rate-limited to once/user/month already, but still a real,
+      // unlogged read of up to kBehaviorSummaryRetentionMonths documents.
+      final existing = await userRef
+          .collection('behavior_summary')
+          .getLogged('BehaviorTracker:pruneOldSummaries');
       for (final doc in existing.docs) {
         if (!keep.contains(doc.id)) {
           await doc.reference.delete();

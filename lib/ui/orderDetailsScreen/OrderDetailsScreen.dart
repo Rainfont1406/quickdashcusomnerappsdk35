@@ -19,6 +19,7 @@ import 'package:emartconsumer/services/order_extras_parsing.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/device_session_service.dart';
 import 'package:emartconsumer/services/helper.dart';
+import 'package:emartconsumer/services/shared_order_detail_watcher.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/chat_screen/admin_chat_screeen.dart';
@@ -63,23 +64,111 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
 
   FireStoreUtils fireStoreUtils = FireStoreUtils();
 
-  // This screen's body rebuilds on every watchOrderStatus stream tick (the
+  // This screen's body rebuilds on every order-doc stream tick (the
   // StreamBuilder's own builder), and Firestore delivers 2 emissions per
   // listener attach (an immediate local-cache snapshot, then a server
   // snapshot) - so constructing the stream/futures inline in build() re-runs
-  // getProductByID for every line item, and re-subscribes a fresh
-  // watchOrderStatus listener, on every single one of those ticks. Cached
-  // here instead - orderModel.id and each product id are stable for this
-  // screen's lifetime, so "create once, reuse" is correct, not stale.
-  Stream<DocumentSnapshot<Map<String, dynamic>>>? _orderStatusStream;
-  final Map<String, Future<ProductModel>> _productByIdFutureCache = {};
-
-  Stream<DocumentSnapshot<Map<String, dynamic>>> _cachedOrderStatusStream(String orderId) {
-    return _orderStatusStream ??= fireStoreUtils.watchOrderStatus(orderId);
+  // getProductByID for every line item, and re-subscribes a fresh listener,
+  // on every single one of those ticks. Cached here instead - orderModel.id
+  // and each product id are stable for this screen's lifetime, so "create
+  // once, reuse" is correct, not stale.
+  //
+  // 2026-09-15: this is now the ONE place that ever calls
+  // SharedOrderDetailWatcher.watch() for this screen instance - both this
+  // method and getCurrentOrder() below funnel through _getSharedOrderStream,
+  // whichever runs first wins the `??=` and the other reuses the same
+  // Stream object. That keeps watch()/unwatch() balanced 1:1 regardless of
+  // whether build() (which needs this stream) or loadData()'s async chain
+  // (which calls getCurrentOrder()) happens to run first - build() always
+  // runs synchronously right after initState(), before loadData()'s awaited
+  // work resolves, so relying on call order here would be a real race.
+  // SharedOrderDetailWatcher.watch() returns a single-subscription stream
+  // (its replayStream() is an async* generator) - it can only ever be
+  // listened to once. This screen has two independent consumers (the
+  // StreamBuilder below and the manual .listen() in getCurrentOrder()), so
+  // the raw watch() stream is bridged here into a local broadcast
+  // controller that both can subscribe to; watch()/unwatch() are still only
+  // ever called once per screen instance, same 1:1 contract as before.
+  Stream<DocumentSnapshot<Map<String, dynamic>>>? _sharedOrderDocStream;
+  StreamController<DocumentSnapshot<Map<String, dynamic>>>? _sharedOrderDocController;
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _sharedOrderDocSub;
+  Stream<DocumentSnapshot<Map<String, dynamic>>> _getSharedOrderStream(String orderId) {
+    final existingController = _sharedOrderDocController;
+    if (existingController != null) return existingController.stream;
+    _sharedOrderDocStream = SharedOrderDetailWatcher.watch(orderId);
+    final controller = StreamController<DocumentSnapshot<Map<String, dynamic>>>.broadcast();
+    _sharedOrderDocController = controller;
+    _sharedOrderDocSub = _sharedOrderDocStream!.listen(
+      controller.add,
+      onError: controller.addError,
+    );
+    return controller.stream;
   }
 
+  Stream<DocumentSnapshot<Map<String, dynamic>>> _cachedOrderStatusStream(String orderId) {
+    return _getSharedOrderStream(orderId);
+  }
+
+  // 2026-09-15: batches whatever product ids this screen's line-item
+  // FutureBuilders request within the same frame into ONE fetchProductsByIds
+  // call, instead of one individual getProductByID per line item. Confirmed
+  // live: a 4-item order billed 4 separate document reads here even though
+  // this screen already had a per-id cache (the comment above explains that
+  // cache exists to stop RE-fetching on every stream tick - it never batched
+  // the initial fetch). scheduleMicrotask lets every FutureBuilder built in
+  // this frame register its id BEFORE the batch actually fires, since Flutter
+  // builds a ListView's visible children synchronously within one frame,
+  // well before any of their futures need to resolve.
+  final Map<String, ProductModel> _productByIdResolved = {};
+  final Map<String, Completer<ProductModel>> _productByIdPending = {};
+  Set<String> _pendingProductBatchIds = {};
+  bool _productBatchScheduled = false;
+
   Future<ProductModel> _cachedProductByID(String id) {
-    return _productByIdFutureCache.putIfAbsent(id, () => FireStoreUtils().getProductByID(id));
+    final resolved = _productByIdResolved[id];
+    if (resolved != null) return Future.value(resolved);
+    final pending = _productByIdPending[id];
+    if (pending != null) return pending.future;
+
+    final completer = Completer<ProductModel>();
+    _productByIdPending[id] = completer;
+    _pendingProductBatchIds.add(id);
+    if (!_productBatchScheduled) {
+      _productBatchScheduled = true;
+      scheduleMicrotask(_runPendingProductBatch);
+    }
+    return completer.future;
+  }
+
+  Future<void> _runPendingProductBatch() async {
+    _productBatchScheduled = false;
+    final ids = _pendingProductBatchIds.toList();
+    _pendingProductBatchIds = {};
+    if (ids.isEmpty) return;
+    try {
+      final products = await FireStoreUtils().fetchProductsByIds(ids);
+      for (final id in ids) {
+        final completer = _productByIdPending.remove(id);
+        if (completer == null) continue;
+        final product = products[id];
+        if (product != null) {
+          _productByIdResolved[id] = product;
+          completer.complete(product);
+        } else {
+          // Genuine miss (e.g. a deleted product) - same individual-lookup
+          // fallback and not-found handling this screen already had.
+          try {
+            completer.complete(await FireStoreUtils().getProductByID(id));
+          } catch (e) {
+            completer.completeError(e);
+          }
+        }
+      }
+    } catch (e) {
+      for (final id in ids) {
+        _productByIdPending.remove(id)?.completeError(e);
+      }
+    }
   }
   int estimatedSecondsFromDriverToStore = 900;
   late String orderStatus;
@@ -254,6 +343,16 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
     arrivalTimeStreamController.close();
     _orderSub?.cancel();
     _driverSub?.cancel();
+    // 2026-09-15: releases this screen's interest in the shared order
+    // listener - see SharedOrderDetailWatcher's doc comment. Gated on
+    // _sharedOrderDocStream (not just orderModel != null) so this exactly
+    // matches how many times watch() was actually called via
+    // _getSharedOrderStream - never zero, never double-unwatched.
+    _sharedOrderDocSub?.cancel();
+    _sharedOrderDocController?.close();
+    if (_sharedOrderDocStream != null && orderModel != null) {
+      SharedOrderDetailWatcher.unwatch(orderModel!.id);
+    }
     super.dispose();
   }
 
@@ -1260,7 +1359,23 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              orderModel.takeAway == false
+              // 2026-09-16: was `orderModel.takeAway == false` alone, which
+              // used to correctly mean "genuine Delivery" - but a
+              // 2026-08-26 fix made Dining ALSO get takeAway:false (to fix
+              // an unrelated Vendor App button-gating bug), so this block
+              // (customer name/phone + "Delivery Address") had been
+              // silently rendering for Dining orders too ever since,
+              // showing the customer their own name/phone and a
+              // mislabeled address on their own order. Found while making
+              // order.address null for Dineaway orders elsewhere this
+              // session - that change would have turned this pre-existing
+              // display bug into a real crash here
+              // (orderModel.address!.getFullAddress() force-unwrap below).
+              // Same isDineaway shape already established in
+              // OrderDetailsScreen.dart/OrdersScreen.dart/CheckoutScreen.dart
+              // for exactly this Dining-vs-Delivery ambiguity.
+              (orderModel.takeAway == false &&
+                      (orderModel.orderType ?? '').isEmpty)
                   ? Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
@@ -2142,14 +2257,24 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
     });
   }
 
-  late Stream<OrderModel?> ordersFuture;
   OrderModel? currentOrder;
 
+  // 2026-09-15: single shared listener for the whole screen - see
+  // SharedOrderDetailWatcher's doc comment. Both this method and
+  // _cachedOrderStatusStream() below consume THIS SAME stream (one watch()
+  // call per screen instance, one matching unwatch() in dispose()) instead of
+  // each opening its own raw listener on the same document.
   getCurrentOrder() async {
-    ordersFuture = FireStoreUtils().getOrderByID(orderModel!.id);
-    _orderSub = ordersFuture.listen((event) {
+    _orderSub = _getSharedOrderStream(orderModel!.id).listen((snap) {
       if (!mounted) return;
-      if (event == null) return;
+      if (!snap.exists || snap.data() == null) return;
+      OrderModel? event;
+      try {
+        event = OrderModel.fromJson(snap.data()!);
+      } catch (e) {
+        debugPrint('[OrderDetailsScreen] order parse error: $e');
+        return;
+      }
       currentOrder = event;
       setState(() {});
       if (event.driverID != null) {

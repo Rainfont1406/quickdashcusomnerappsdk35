@@ -20,6 +20,7 @@ import 'package:emartconsumer/model/paytmSettingData.dart';
 import 'package:emartconsumer/model/razorpayKeyModel.dart';
 import 'package:emartconsumer/model/stripeSettingData.dart';
 import 'package:emartconsumer/model/topupTranHistory.dart';
+import 'package:emartconsumer/services/wallet_history_cache.dart';
 import 'package:emartconsumer/payment/midtrans_screen.dart';
 import 'package:emartconsumer/payment/orangePayScreen.dart';
 import 'package:emartconsumer/payment/xenditModel.dart';
@@ -74,7 +75,7 @@ class WalletScreen extends StatefulWidget {
 }
 
 class WalletScreenState extends State<WalletScreen> {
-  Stream<QuerySnapshot>? topupHistoryQuery;
+  Stream<List<TopupTranHistoryModel>>? topupHistoryQuery;
   Stream<DocumentSnapshot<Map<String, dynamic>>>? userQuery;
 
   String? selectedRadioTile;
@@ -119,16 +120,63 @@ class WalletScreenState extends State<WalletScreen> {
   // Wallet balance + top-up history need to be live the moment this screen
   // opens — unrelated to payment gateways, so this stays in initState.
   void _attachWalletListeners() {
-    topupHistoryQuery = FireStoreUtils.firestore
-        .collection(Wallet)
-        .where('user_id', isEqualTo: userId)
-        .orderBy('date', descending: true)
-        .limit(20)
-        .snapshotsLogged('_attachWalletListeners:Wallet');
+    topupHistoryQuery = _walletHistoryStream();
+    // The BALANCE stays a plain live listener, deliberately uncached - this is
+    // what makes a Razorpay top-up or an admin credit appear instantly.
     userQuery = FireStoreUtils.firestore
         .collection(USERS)
         .doc(MyAppState.currentUser!.userID)
         .snapshotsLogged('_attachWalletListeners:USERS');
+  }
+
+  /// Cache-first transaction history (2026-09-15).
+  ///
+  /// Previously this attached a live listener over the last 20 transactions on
+  /// every wallet open, and attaching a listener bills its entire matching set
+  /// - ~20 documents each time, re-reading rows that are immutable once
+  /// settled. Now the cached rows render immediately for 0 reads, and the live
+  /// query is bounded to whatever is newer than the cursor (plus any
+  /// still-unsettled row, see WalletHistoryCache.cursorFor), so the usual
+  /// "nothing new since last time" case costs Firestore's 1-read query
+  /// minimum instead of 20.
+  ///
+  /// Uses the existing (user_id ASC, date DESC) composite index - adding a
+  /// range filter on the same field the query already orders by needs no new
+  /// index.
+  Stream<List<TopupTranHistoryModel>> _walletHistoryStream() async* {
+    final cached = await WalletHistoryCache.read(userId);
+    if (cached.isNotEmpty) {
+      debugPrint('[WalletHistoryCache] ${cached.length} transactions from '
+          'on-device cache - 0 Firestore reads');
+      yield cached;
+    }
+
+    var known = cached;
+    final cursor = WalletHistoryCache.cursorFor(known);
+    Query<Map<String, dynamic>> query =
+        FireStoreUtils.firestore.collection(Wallet).where('user_id', isEqualTo: userId);
+    if (cursor != null) {
+      query = query.where('date', isGreaterThan: cursor);
+    }
+
+    yield* query
+        .orderBy('date', descending: true)
+        .limit(WalletHistoryCache.maxEntries)
+        .snapshotsLogged('_attachWalletListeners:Wallet')
+        .asyncMap((snap) async {
+      final fresh = <TopupTranHistoryModel>[];
+      for (final doc in snap.docs) {
+        try {
+          fresh.add(TopupTranHistoryModel.fromJson(doc.data()));
+        } catch (e) {
+          debugPrint('[WalletHistoryCache] skipping malformed ${doc.id}: $e');
+        }
+      }
+      known = WalletHistoryCache.merge(known, fresh);
+      // ignore: unawaited_futures
+      WalletHistoryCache.write(userId, known);
+      return known;
+    });
   }
 
   bool _gatewaySettingsLoadedForTopup = false;
@@ -573,41 +621,32 @@ class WalletScreenState extends State<WalletScreen> {
 
   Widget showTopupHistory(BuildContext context) {
     final dark = isDarkMode(context);
-    return StreamBuilder<QuerySnapshot>(
+    return StreamBuilder<List<TopupTranHistoryModel>>(
       stream: topupHistoryQuery,
-      builder: (BuildContext context, AsyncSnapshot<QuerySnapshot> snapshot) {
+      builder: (BuildContext context,
+          AsyncSnapshot<List<TopupTranHistoryModel>> snapshot) {
         if (snapshot.hasError) {
           return _buildHistoryErrorState(dark);
         }
         if (snapshot.connectionState == ConnectionState.waiting) {
           return _buildTransactionSkeleton(dark);
         }
-        final docs = snapshot.data?.docs ?? [];
-        if (docs.isEmpty) {
+        // Already merged, de-duplicated and sorted newest-first by
+        // WalletHistoryCache.merge - no client-side sort needed here now.
+        final transactions = snapshot.data ?? const <TopupTranHistoryModel>[];
+        if (transactions.isEmpty) {
           return _buildHistoryEmptyState(dark);
         } else {
-          // Sort newest-first client-side (avoids requiring a Firestore composite index)
-          final sortedDocs = List<DocumentSnapshot>.from(docs)
-            ..sort((a, b) {
-              final aTs = (a.data() as Map<String, dynamic>)['date'];
-              final bTs = (b.data() as Map<String, dynamic>)['date'];
-              if (aTs is Timestamp && bTs is Timestamp) {
-                return bTs.compareTo(aTs);
-              }
-              return 0;
-            });
           final cards = <Widget>[];
-          for (final document in sortedDocs) {
+          for (final topUpData in transactions) {
             try {
-              final topUpData = TopupTranHistoryModel.fromJson(
-                  document.data() as Map<String, dynamic>);
               cards.add(buildTransactionCard(
                 topupTranHistory: topUpData,
                 date: topUpData.date.toDate(),
               ));
             } catch (e) {
               // One malformed row must never take down the whole list.
-              debugPrint('Skipping malformed wallet transaction ${document.id}: $e');
+              debugPrint('Skipping malformed wallet transaction ${topUpData.id}: $e');
             }
           }
           if (cards.isEmpty) return _buildHistoryEmptyState(dark);

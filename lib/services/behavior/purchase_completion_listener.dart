@@ -6,6 +6,8 @@ import 'package:emartconsumer/model/OrderModel.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/behavior/behavior_event_types.dart';
 import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
+import 'package:emartconsumer/services/firestore_instrumentation.dart';
+import 'package:emartconsumer/services/shared_orders_watcher.dart';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -84,6 +86,12 @@ class PurchaseCompletionListener {
 
   static StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _sub;
 
+  /// Passive subscription to SharedOrdersWatcher - the zero-read primary path
+  /// (see _fullSweepInterval's comment). Separate from [_sub] because the two
+  /// have different lifetimes: this one lives for the whole session, while
+  /// [_sub] only exists on the rare launch that runs the backstop sweep.
+  static StreamSubscription<List<OrderModel>>? _passiveSub;
+
   // In-memory-only guard against two near-simultaneous snapshot events for
   // the same order both racing to attempt the marker-doc create within one
   // running session - NOT the source of truth (that's the marker doc's
@@ -137,6 +145,93 @@ class PurchaseCompletionListener {
     }
   }
 
+  // 2026-09-15: catch-up window for the query below. Bounding by createdAt
+  // (not a "completedAt" - confirmed live against production that
+  // statusUpdatedAt is missing/null on 8 of 10 real completed orders, so an
+  // inequality filter on it would silently exclude most orders entirely,
+  // the same "missing field never matches" trap documented elsewhere in
+  // this codebase). 60 days is generous enough that a genuinely delayed
+  // completion (dispute resolution, a slow vendor) is still caught, while
+  // bounding the every-cold-start cost that used to be this customer's
+  // ENTIRE lifetime completed-order history - confirmed live: 218 documents
+  // on a single test account, on every single login, invisible to
+  // FirestoreReadStats because this call was never wrapped in
+  // snapshotsLogged. A rolling window (recomputed fresh each start(), not a
+  // persisted high-water-mark cursor) is deliberate: it can never
+  // permanently miss a late completion the way an advancing cursor could if
+  // an order's createdAt falls before the cursor but its status only
+  // changes to Completed afterward - the tradeoff is re-fetching whatever's
+  // still within the window on every cold start, rather than a strictly
+  // shrinking set, which is an acceptable cost for a collection-only,
+  // non-critical analytics signal (see this file's own header comment).
+  static const Duration _catchUpWindow = Duration(days: 60);
+
+  // 2026-09-15 (second pass): the 60-day bound above fixed the "entire
+  // lifetime history" leak (218 -> 93 docs) but NOT the per-launch cost -
+  // 93 documents were still re-read on EVERY cold start and every
+  // app-resume restart. Proven live, twice, against the project's own
+  // document/read_count metric: two controlled cold starts billed 199 and
+  // 128 document reads, of which this one listener's 93 was the single
+  // largest item (~74% of the second run's 126 billed QUERY reads). It was
+  // invisible in the app's own logs because a listener's first emission is
+  // served from the local cache (source=CACHE), while Firestore still bills
+  // the full matching set for the server-side watch that backs it -
+  // attaching a listener costs its whole result set, cached first emission
+  // or not.
+  //
+  // So the window is now ADAPTIVE rather than always 60 days:
+  //   - at most once per _fullSweepInterval, attach with the full 60-day
+  //     window (the real catch-up sweep);
+  //   - every other start() - which is most of them, since main.dart
+  //     restarts this listener on every app resume - attaches with
+  //     _recentWindow instead, which matches only the handful of genuinely
+  //     recent orders.
+  //
+  // Why this keeps the rolling window's correctness (see the long comment
+  // above): the 60-day sweep is THROTTLED, never replaced by an advancing
+  // cursor. A late completion (order created weeks ago, status flipped to
+  // Completed today) is still found by the next full sweep, because that
+  // sweep re-queries the whole 60 days from scratch exactly as before. The
+  // only behaviour change is LATENCY: such a late completion can now be
+  // learned up to _fullSweepInterval later than it would have been, instead
+  // of at the very next app launch. That is an explicitly acceptable
+  // tradeoff for a collection-only, non-critical analytics signal (this
+  // file's header) - and it is a delay, never a loss.
+  // 2026-09-15 (third pass): the 2-day "recent" window is GONE entirely, and
+  // with it the last per-cold-start cost of this class.
+  //
+  // The realisation that made it removable: every document that window was
+  // reading is ALREADY read elsewhere, for free. SharedOrdersWatcher watches
+  // this same customer's own orders whenever they open the Orders screen, and
+  // ORDER_STATUS_COMPLETED is the first entry in kTerminalOrderStatuses - so
+  // a completed order is guaranteed to pass through that watcher's stream.
+  // Paying for a second, independent query on every launch to learn the same
+  // fact was pure duplication.
+  //
+  // So this class now subscribes PASSIVELY to SharedOrdersWatcher
+  // (see passiveStream's doc: it never starts the watcher, so a subscription
+  // costs zero reads) and processes completions out of data the app was
+  // already reading. Cold-start cost for this listener: 0 documents.
+  //
+  // Accepted tradeoff (explicit product decision, 2026-09-15): preference
+  // analytics for a completed order now fires the next time the customer
+  // opens their Orders screen, rather than on the next app launch. Nothing is
+  // ever lost - the marker-document dedup is permanent and server-side, so a
+  // deferred order is still processed exactly once whenever it is finally
+  // seen - and the periodic sweep below remains as insurance for a customer
+  // who rarely opens Orders at all.
+  //
+  // The sweep interval is correspondingly relaxed from 24h to 7 days: it is
+  // now a backstop rather than the primary mechanism.
+  static const Duration _fullSweepInterval = Duration(days: 7);
+  static const String _lastFullSweepPrefsKey =
+      'purchase_completion_last_full_sweep_ms';
+
+  // Guards against an async start() finishing after a stop()/newer start()
+  // already happened - without this, the awaited prefs read below opens a
+  // window where a cancelled start could still attach a stray listener.
+  static int _startGeneration = 0;
+
   /// Start watching this customer's own orders for completions. Safe to
   /// call multiple times (e.g. token refresh firing authStateChanges
   /// again) - always stops any previous subscription first, so exactly
@@ -144,12 +239,69 @@ class PurchaseCompletionListener {
   static void start(String uid) {
     stop();
     if (uid.isEmpty) return;
+    final generation = ++_startGeneration;
+    // ignore: unawaited_futures
+    _startInternal(uid, generation);
+  }
+
+  /// Decides whether this attach is a full 60-day catch-up sweep or a cheap
+  /// recent-only attach, then opens the listener. Returns without attaching
+  /// if a stop()/newer start() landed while the prefs read was in flight.
+  static Future<bool> _shouldRunFullSweep() async {
     try {
+      final sp = await SharedPreferences.getInstance();
+      final lastMs = sp.getInt(_lastFullSweepPrefsKey);
+      final now = DateTime.now().millisecondsSinceEpoch;
+      if (lastMs != null &&
+          now - lastMs < _fullSweepInterval.inMilliseconds &&
+          // Guard against a device clock moved backwards leaving a
+          // far-future timestamp that would suppress sweeps indefinitely.
+          now >= lastMs) {
+        return false;
+      }
+      await sp.setInt(_lastFullSweepPrefsKey, now);
+      return true;
+    } catch (_) {
+      // Prefs unavailable - fall back to the old always-full-sweep
+      // behaviour rather than silently narrowing the safety net.
+      return true;
+    }
+  }
+
+  static Future<void> _startInternal(String uid, int generation) async {
+    try {
+      // ZERO-COST primary path: listen to orders the app is already reading
+      // for the Orders screen. Never starts that watcher itself.
+      _passiveSub = SharedOrdersWatcher.passiveStream.listen((orders) {
+        for (final order in orders) {
+          if (order.status != ORDER_STATUS_COMPLETED) continue;
+          // ignore: unawaited_futures
+          _processOrderIfNeeded(order);
+        }
+      }, onError: (Object error) {
+        debugPrint('[PurchaseCompletionListener] passive stream error: $error');
+      });
+
+      final fullSweep = await _shouldRunFullSweep();
+      // A stop() or a newer start() happened while we were awaiting prefs.
+      if (generation != _startGeneration) return;
+      if (!fullSweep) {
+        debugPrint('[PurchaseCompletionListener] passive mode only - no '
+            'Firestore query this start (0 reads). Completions are picked up '
+            'from SharedOrdersWatcher when the customer opens Orders.');
+        return;
+      }
+
+      final cutoff = Timestamp.fromDate(DateTime.now().subtract(_catchUpWindow));
+      debugPrint('[PurchaseCompletionListener] running FULL '
+          '${_catchUpWindow.inDays}-day backstop sweep '
+          '(cutoff=${cutoff.toDate().toIso8601String()})');
       _sub = FireStoreUtils.firestore
           .collection(ORDERS)
           .where('authorID', isEqualTo: uid)
           .where('status', isEqualTo: ORDER_STATUS_COMPLETED)
-          .snapshots()
+          .where('createdAt', isGreaterThanOrEqualTo: cutoff)
+          .snapshotsLogged('PurchaseCompletionListener:vendor_orders (7-day backstop sweep)')
           .listen((snapshot) {
         // DocumentChangeType.added fires exactly when a document ENTERS
         // this query's result set - i.e. the moment an order's status
@@ -182,23 +334,50 @@ class PurchaseCompletionListener {
   /// Stop watching - call on logout. Also clears the in-memory guard set,
   /// since it's meaningless once no uid is being watched.
   static void stop() {
+    // Invalidates any _startInternal still awaiting its prefs read, so it
+    // cannot attach a stray listener after this stop().
+    _startGeneration++;
     _sub?.cancel();
     _sub = null;
+    _passiveSub?.cancel();
+    _passiveSub = null;
     _processingOrderIds.clear();
   }
 
+  /// Sweep path: adapts a raw Firestore document to the shared implementation.
   static Future<void> _processIfNeeded(
       DocumentSnapshot<Map<String, dynamic>> doc) async {
+    final data = doc.data();
+    if (data == null) return;
     try {
-      final data = doc.data();
-      if (data == null) return;
-      final snapshot = data['analyticsSnapshot'] as Map<String, dynamic>?;
+      return await _processOrderIfNeeded(OrderModel.fromJson(data));
+    } catch (_) {
+      // Malformed document - same posture as before, never disrupt the app.
+    }
+  }
+
+  /// Shared implementation for BOTH paths (passive SharedOrdersWatcher stream
+  /// and the periodic backstop sweep).
+  ///
+  /// Keying on [OrderModel.id] rather than a DocumentSnapshot id is safe and
+  /// deliberate: verified against live production data 2026-09-15 that
+  /// vendor_orders documents always carry an `id` field identical to their own
+  /// document id. That equality is what lets the passive path - which only
+  /// ever sees OrderModels, never DocumentSnapshots - produce exactly the same
+  /// marker-document id as before, so the existing exactly-once dedup keeps
+  /// working unchanged and no already-processed order can re-fire.
+  static Future<void> _processOrderIfNeeded(OrderModel order) async {
+    try {
+      final orderId = order.id;
+      if (orderId.isEmpty) return;
+      if (order.status != ORDER_STATUS_COMPLETED) return;
+      final snapshot = order.analyticsSnapshot;
       // Orders created before this migration have no snapshot at all -
       // nothing to safely learn from (no guarantee the fields this class
       // depends on ever existed), so they're skipped, not guessed at.
       if (snapshot == null) return;
-      if ((await _loadKnownProcessedOrderIds()).contains(doc.id)) return;
-      if (!_processingOrderIds.add(doc.id)) return;
+      if ((await _loadKnownProcessedOrderIds()).contains(orderId)) return;
+      if (!_processingOrderIds.add(orderId)) return;
 
       try {
         final uid = FireStoreUtils.getCurrentUid();
@@ -219,12 +398,11 @@ class PurchaseCompletionListener {
         // window, caught in the wild).
         List<_AnalyticsCall> calls;
         try {
-          final orderModel = OrderModel.fromJson(data);
-          calls = _buildAnalyticsCalls(orderModel, snapshot);
+          calls = _buildAnalyticsCalls(order, snapshot);
         } catch (e) {
           debugPrint('[PurchaseCompletionListener] failed to build '
-              'analytics for order ${doc.id}, marker NOT claimed, will '
-              'retry on next listener attach: $e');
+              'analytics for order $orderId, marker NOT claimed, will '
+              'retry next time this order is seen: $e');
           return;
         }
 
@@ -232,13 +410,13 @@ class PurchaseCompletionListener {
             .collection('users')
             .doc(uid)
             .collection('behavior_batches')
-            .doc('orderCompletionMarker_${doc.id}');
+            .doc('orderCompletionMarker_$orderId');
 
         try {
           await markerRef.set({
             'userId': uid,
             'type': 'orderCompletionMarker',
-            'orderId': doc.id,
+            'orderId': orderId,
             'processedAt': FieldValue.serverTimestamp(),
           });
         } on FirebaseException catch (e) {
@@ -247,14 +425,14 @@ class PurchaseCompletionListener {
             // e.g. an earlier session, a prior listener restart, or a
             // near-simultaneous snapshot event) - expected, not an error.
             // ignore: unawaited_futures
-            _markOrderProcessedLocally(doc.id);
+            _markOrderProcessedLocally(orderId);
             return;
           }
           rethrow;
         }
 
         // ignore: unawaited_futures
-        _markOrderProcessedLocally(doc.id);
+        _markOrderProcessedLocally(orderId);
 
         // STEP 2 - marker create just won; this call is the exclusive,
         // exactly-once owner of firing this order's analytics. track()
@@ -265,7 +443,7 @@ class PurchaseCompletionListener {
           BehaviorTracker.track(call.eventType, call.payload);
         }
       } finally {
-        _processingOrderIds.remove(doc.id);
+        _processingOrderIds.remove(orderId);
       }
     } catch (_) {
       // Collection only - must never disrupt the app.
