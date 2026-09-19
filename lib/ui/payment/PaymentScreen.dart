@@ -114,6 +114,22 @@ class PaymentScreen extends StatefulWidget {
   // total instead of charging a stale one.
   final int? expectedBillVersion;
 
+  // 2026-09-16: CartScreen already fetches the full vendor doc for its own
+  // live price/discount calc (getDeliveyData -> getVendorByVendorID) right
+  // before navigating here. _buildOrderModel used to re-fetch the SAME
+  // vendor doc a second time just to read cuisineIds/businessTypeId and
+  // populate OrderModel.vendor (itself trimmed to ~17 fields at write time
+  // by OrderModel._vendorSnapshot - specialDiscount was fetched both times
+  // and never read either time). Passing the already-fetched object here
+  // removes that second read entirely instead of trying to shrink it -
+  // Firestore's Query.select() field mask isn't available in this app's
+  // cloud_firestore SDK version, so trimming the read itself isn't
+  // possible; not re-reading at all is strictly better anyway. Nullable
+  // and only used opportunistically - _buildOrderModel falls back to its
+  // original fetch whenever this is null or doesn't match the vendor being
+  // checked out, so nothing changes for any caller that doesn't pass it.
+  final VendorModel? cartVendorModel;
+
   const PaymentScreen(
       {Key? key,
       required this.total,
@@ -133,7 +149,8 @@ class PaymentScreen extends StatefulWidget {
       this.orderType,
       this.diningGuestCount,
       this.billPayRequestId,
-      this.expectedBillVersion})
+      this.expectedBillVersion,
+      this.cartVendorModel})
       : super(key: key);
 
   @override
@@ -355,6 +372,8 @@ class PaymentScreenState extends State<PaymentScreen> {
 
   @override
   void initState() {
+    // 2026-09-15: see HomeScreen.dart's identical call for why.
+    scheduleFirestoreReadDump('PaymentScreen', isStillActive: () => mounted);
     getPaymentSettingData();
     futurecod = fireStoreUtils.getCod();
     _razorPay.on(Razorpay.EVENT_PAYMENT_SUCCESS, _handlePaymentSuccess);
@@ -4022,11 +4041,28 @@ class PaymentScreenState extends State<PaymentScreen> {
       tempProduc.add(tempCart);
     }
 
-    debugPrint('[ORDER-BUILD] getVendorByVendorID START — +${buildSw.elapsedMilliseconds}ms');
-    VendorModel vendorModel = await FireStoreUtils()
-        .getVendorByVendorID(widget.products.first.vendorID)
-        .whenComplete(() => setPrefData());
-    debugPrint('[ORDER-BUILD] getVendorByVendorID END — +${buildSw.elapsedMilliseconds}ms');
+    debugPrint('[ORDER-BUILD] vendor resolve START — +${buildSw.elapsedMilliseconds}ms');
+    final reusableVendor = widget.cartVendorModel;
+    VendorModel vendorModel;
+    if (reusableVendor != null &&
+        reusableVendor.id == widget.products.first.vendorID) {
+      // Reuse CartScreen's already-fetched vendor - see cartVendorModel's
+      // doc comment. Zero extra reads instead of a second full fetch.
+      // Awaited (not fire-and-forget) to match the fallback branch's
+      // .whenComplete() semantics, which itself awaits setPrefData().
+      vendorModel = reusableVendor;
+      await setPrefData();
+      debugPrint('[ORDER-BUILD] vendor resolve END (reused, no fetch) — +${buildSw.elapsedMilliseconds}ms');
+    } else {
+      // Fallback - cartVendorModel wasn't passed, or (defensively) didn't
+      // match the vendor actually being checked out. Identical to the
+      // original always-fetch behavior, so this path can never be worse
+      // than before the reuse optimization.
+      vendorModel = await FireStoreUtils()
+          .getVendorByVendorID(widget.products.first.vendorID)
+          .whenComplete(() => setPrefData());
+      debugPrint('[ORDER-BUILD] vendor resolve END (fetched) — +${buildSw.elapsedMilliseconds}ms');
+    }
 
     // Combo Purchase Learning (2026-07-24) - see CheckoutScreen.dart's
     // identical block for the full rationale (zero-extra-read cache
@@ -4089,9 +4125,24 @@ class PaymentScreenState extends State<PaymentScreen> {
       'comboLineItems': comboLineItems,
     };
 
+    // 2026-09-16: address is delivery-only - confirmed via a full cross-repo
+    // trace that no Dineaway (Dining/Takeaway/Bill Pay) code path ever reads
+    // order.address (OrderDetailsScreen.dart:1342 already gates its whole
+    // "Delivery Address" section behind orderType-empty/takeAway==false, and
+    // the one force-unwrap consumer - order_tracking_screen.dart's
+    // address!.location! - is only reachable via ORDER_STATUS_SHIPPED/
+    // IN_TRANSIT, which a dedicated trace confirmed no Dineaway order can
+    // ever reach). widget.orderType is non-null/non-empty for every
+    // Dineaway sub-type and null for genuine Delivery - takeAway alone
+    // can't be used for this check since a 2026-08-26 fix made Dining get
+    // takeAway:false like Delivery does, while Takeaway/Bill Pay still get
+    // takeAway:true (same reasoning as isDineaway checks elsewhere in this
+    // file/OrderDetailsScreen.dart). OrderModel.fromJson already defaults a
+    // missing/null address to AddressModel(), so this round-trips safely.
+    final bool isDineawayOrder = (widget.orderType ?? '').isNotEmpty;
     final OrderModel orderModel = OrderModel(
       id: oid.toString(),
-      address: widget.addressModel,
+      address: isDineawayOrder ? null : widget.addressModel,
       author: MyAppState.currentUser,
       authorID: MyAppState.currentUser?.userID ?? '',
       createdAt: Timestamp.now(),

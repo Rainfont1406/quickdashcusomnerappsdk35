@@ -24,6 +24,7 @@ import 'package:emartconsumer/services/order_extras_parsing.dart';
 import 'package:emartconsumer/services/behavior/behavior_event_types.dart';
 import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/app_dialog.dart';
+import 'package:emartconsumer/services/config_refresh_gate.dart';
 import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
@@ -277,6 +278,10 @@ class _CartScreenState extends State<CartScreen> {
     super.initState();
     final initSw = Stopwatch()..start();
     debugPrint('[CART-PERF] CartScreen.initState START at ${DateTime.now().toIso8601String()}');
+    // 2026-09-15: see HomeScreen.dart's identical call for why - a burst of
+    // individual read-log lines can get silently dropped by logcat, so this
+    // survives as one summary line with exact per-fetch doc counts.
+    scheduleFirestoreReadDump('CartScreen', isStillActive: () => mounted);
     addressModel = MyAppState.selectedPosotion;
     _houseCtrl.text = addressModel.address ?? '';
     _landmarkCtrl.text = addressModel.landmark ?? '';
@@ -509,15 +514,35 @@ class _CartScreenState extends State<CartScreen> {
                 : sp.getString("foodType");
       });
     }
-    await FireStoreUtils.firestore
-        .collection(Setting)
-        .doc('specialDiscountOffer')
-        .getLogged('getFoodType:Setting')
-        .then((value) {
-      debugPrint('[CART-PERF][getFoodType] Firestore Future resolved — ${sw.elapsedMilliseconds}ms');
-      specialDiscountEnable = value.data()?['isEnable'] ?? false;
-      debugPrint('[CART-PERF][getFoodType] model mapping done — ${sw.elapsedMilliseconds}ms');
-    });
+    // 2026-09-15: 10-minute persisted cache - this is a platform-wide on/off
+    // flag with zero bearing on what gets charged (verified against
+    // orderVerification.js: special-discount verification reads only the
+    // vendor's OWN document, never this global Setting doc), so this used to
+    // re-read unconditionally on every single Cart open for a value that's
+    // effectively "always on" in production. Same ConfigRefreshGate pattern
+    // as the other admin-config caches.
+    final cachedDoc = await ConfigRefreshGate.readDoc(
+        'specialDiscountOfferSetting', const Duration(minutes: 10));
+    if (cachedDoc != null) {
+      specialDiscountEnable = cachedDoc['isEnable'] ?? false;
+      debugPrint('[ConfigCache] specialDiscountOffer served from on-device '
+          'persisted copy - 0 Firestore reads');
+    } else {
+      await FireStoreUtils.firestore
+          .collection(Setting)
+          .doc('specialDiscountOffer')
+          .getLogged('getFoodType:Setting')
+          .then((value) {
+        debugPrint('[CART-PERF][getFoodType] Firestore Future resolved — ${sw.elapsedMilliseconds}ms');
+        final data = value.data();
+        specialDiscountEnable = data?['isEnable'] ?? false;
+        if (data != null) {
+          // ignore: unawaited_futures
+          ConfigRefreshGate.writeDoc('specialDiscountOfferSetting', data);
+        }
+        debugPrint('[CART-PERF][getFoodType] model mapping done — ${sw.elapsedMilliseconds}ms');
+      });
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) => debugPrint(
         '[CART-PERF][getFoodType] next frame rendered — ${sw.elapsedMilliseconds}ms'));
   }
@@ -1984,6 +2009,11 @@ class _CartScreenState extends State<CartScreen> {
                           billPayRequestId: widget.billPayRequestModel?.id,
                           expectedBillVersion:
                               widget.billPayRequestModel?.billPayExpiresAt?.millisecondsSinceEpoch,
+                          // 2026-09-16: lets PaymentScreen reuse this
+                          // already-fetched vendor instead of re-fetching
+                          // the same doc a second time to build the order -
+                          // see PaymentScreen.cartVendorModel's doc comment.
+                          cartVendorModel: vendorModel,
                         ),
                       );
                     }

@@ -128,6 +128,9 @@ class BookTableModel {
   // read off booking.vendor across the Customer App, Vendor App, and
   // Vendor Web. VendorModel.fromJson() defaults every omitted field, so
   // this isn't a partial-parse risk on read.
+  // 2026-09-15: added guestCapacity/seatingMode/bookingCloseTime/
+  // bookingAutoReleaseHours - AutoReleaseStaleBookingCapacity.php falls
+  // back to booking.vendor for these when the live vendor doc is gone.
   static Map<String, dynamic> _vendorSnapshot(VendorModel v) => {
     'title': v.title,
     'photo': v.photo,
@@ -142,6 +145,10 @@ class BookTableModel {
     'enableBillPaymentTimer': v.enableBillPaymentTimer,
     'section_id': v.section_id,
     'fcmToken': v.fcmToken,
+    'guestCapacity': v.guestCapacity,
+    'seatingMode': v.seatingMode,
+    'bookingCloseTime': v.bookingCloseTime,
+    'bookingAutoReleaseHours': v.bookingAutoReleaseHours,
   };
 
   // Same trim as OrderModel._authorSnapshot - the booking's own

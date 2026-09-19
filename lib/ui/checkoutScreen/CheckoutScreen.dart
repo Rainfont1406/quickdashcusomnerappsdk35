@@ -1091,9 +1091,25 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         'comboLineItems': comboLineItems,
       };
 
+      // 2026-09-16: address is delivery-only - same reasoning and full
+      // cross-repo consumer trace as PaymentScreen.dart's identical fix
+      // (OrderDetailsScreen.dart:1342 already gates its "Delivery Address"
+      // display behind this same isDineaway shape; order_tracking_screen.dart's
+      // address!.location! force-unwrap is only reachable via
+      // ORDER_STATUS_SHIPPED/IN_TRANSIT, confirmed unreachable for any
+      // Dineaway order). widget.take_away alone can't be used here - it's
+      // false for Dining (same as Delivery, since a 2026-08-26 fix made
+      // Dining get takeAway:false), so it would under-count. orderType is
+      // non-null/non-empty for every Dineaway sub-type (Dining/Takeaway/Bill
+      // Pay) and null only for genuine Delivery, so it alone is the correct
+      // signal - deliberately NOT OR'd with take_away, to stay identical to
+      // PaymentScreen._buildAndPlaceOrder's isDineawayOrder (this file only
+      // ever receives widget.take_away/widget.orderType as a matched pair
+      // forwarded from there via toCheckOutScreen - see that method).
+      final bool isDineawayOrder = (widget.orderType ?? '').isNotEmpty;
       final OrderModel orderModel = OrderModel(
         id: widget.id,
-        address: widget.address,
+        address: isDineawayOrder ? null : widget.address,
         author: MyAppState.currentUser,
         authorID: MyAppState.currentUser?.userID ?? '',
         createdAt: Timestamp.now(),
