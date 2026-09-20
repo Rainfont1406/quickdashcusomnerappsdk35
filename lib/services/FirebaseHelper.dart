@@ -58,6 +58,7 @@ import 'package:emartconsumer/model/stripeSettingData.dart';
 import 'package:emartconsumer/model/topupTranHistory.dart';
 import 'package:emartconsumer/services/behavior/behavior_event_types.dart';
 import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
+import 'package:emartconsumer/services/behavior_summary_cache.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/recommendation/behavior_summary_snapshot.dart';
 import 'package:emartconsumer/services/recommendation/recommendation_config.dart';
@@ -548,9 +549,24 @@ class FireStoreUtils {
     });
   }
 
-  Future<List<RatingModel>> getReviewList(String productId) async {
+  // Bounded 2026-09-20 - was an unbounded fetch of every review a product
+  // ever received, on every visit to its review list. Currently reached
+  // only from two hidden UI surfaces (ContainerScreen's commented-out
+  // Favourites drawer entries, HomeScreen's "Popular Near Food" card) so
+  // today's live cost is zero, but a popular product's review count is
+  // organically unbounded - the same class of landmine flagged and fixed
+  // for getVendorReviews/getVendorReviewsPaginated (see that function's own
+  // comment), just never applied here. 20 matches that same existing limit.
+  // orderBy(createdAt) so "the 20 reviews you see" means the 20 most
+  // recent, not an arbitrary Firestore-decided subset.
+  Future<List<RatingModel>> getReviewList(String productId, {int limit = 20}) async {
     List<RatingModel> reviewList = [];
-    QuerySnapshot<Map<String, dynamic>> currencyQuery = await firestore.collection(Order_Rating).where('productId', isEqualTo: productId).getLogged('getReviewList:Order_Rating');
+    QuerySnapshot<Map<String, dynamic>> currencyQuery = await firestore
+        .collection(Order_Rating)
+        .where('productId', isEqualTo: productId)
+        .orderBy('createdAt', descending: true)
+        .limit(limit)
+        .getLogged('getReviewList:Order_Rating');
     await Future.forEach(currencyQuery.docs, (QueryDocumentSnapshot<Map<String, dynamic>> document) {
       try {
         reviewList.add(RatingModel.fromJson(document.data()));
@@ -820,34 +836,98 @@ class FireStoreUtils {
     return future;
   }
 
+  static List<String> _trailingYearMonths(int months) {
+    final now = DateTime.now();
+    return List.generate(months, (i) {
+      final d = DateTime(now.year, now.month - i, 1);
+      return '${d.year}-${d.month.toString().padLeft(2, '0')}';
+    });
+  }
+
+  // Retention split (2026-09-20, see kBehaviorSummaryCoreRetentionMonths'
+  // own comment in behavior_event_types.dart for the full why) - two
+  // parallel queries instead of one:
+  //   - behavior_summary, kBehaviorSummaryCoreRetentionMonths (3) back -
+  //     everything RecommendationEngine's CURRENT-preference scoring uses.
+  //   - behavior_summary_search, kBehaviorSummaryRetentionMonths (12) back -
+  //     ONLY the ~5 search fields Cross-Session Search Interest needs the
+  //     long window for.
+  // The two collections' docs have disjoint field sets by construction (see
+  // BehaviorTracker._flush's split write), so simply concatenating both doc
+  // lists into one BehaviorSummarySnapshot.merge() call is correct as-is -
+  // no change needed to the merge logic itself, same as before this split
+  // it summed fields across N docs without caring which doc each came from.
+  //
+  // Persistent cache (2026-09-20, see BehaviorSummaryCache's own class doc
+  // comment) - _behaviorSummaryCache above is memory-only and dies with the
+  // app process, so before this every cold start's first restaurant visit
+  // re-paid the FULL retention-window fetch (3 + 12 documents) even though
+  // every month except the current one is immutable once written. Now:
+  // read the on-device cache first, fetch ONLY months that are either the
+  // current (always-mutable) month or genuinely missing from the cache
+  // (first-ever open, or a month that just entered the retention window),
+  // then merge and persist. A fresh install/first open still pays the full
+  // seed fetch exactly as before - there is nothing to trim there, the
+  // data genuinely does not exist locally yet.
   static Future<BehaviorSummarySnapshot> _loadBehaviorSummary(String uid) async {
     try {
-      final now = DateTime.now();
-      // Retention extended 3 -> 12 months (2026-07-18, kBehaviorSummaryRetentionMonths)
-      // for Cross-Session Search Interest - a deliberate, confirmed 4x
-      // increase in document reads for this fetch (12 months instead of 3),
-      // cached 10 minutes per user session via _behaviorSummaryCache below.
-      // Must stay in sync with BehaviorTracker._pruneOldSummariesIfNeeded's
-      // own retention window.
-      final yearMonths = List.generate(kBehaviorSummaryRetentionMonths, (i) {
-        final d = DateTime(now.year, now.month - i, 1);
-        return '${d.year}-${d.month.toString().padLeft(2, '0')}';
-      });
-      // Single whereIn query instead of 12 individual .doc(id).get() calls -
-      // same document-read cost (Firestore bills per document either way),
-      // but one round trip instead of twelve competing for connection
-      // bandwidth. whereIn supports up to 30 values; comfortably covers
-      // kBehaviorSummaryRetentionMonths (12). A query only ever returns
-      // existing docs, so no separate exists-check is needed here (unlike
-      // the old per-doc-get version, where a missing month still produced a
-      // non-existent snapshot that had to be filtered out).
-      final snapshot = await firestore
-          .collection(USERS)
-          .doc(uid)
-          .collection('behavior_summary')
-          .where(FieldPath.documentId, whereIn: yearMonths)
-          .getLogged('_loadBehaviorSummary:behavior_summary');
-      final data = snapshot.docs.map((d) => d.data()).toList();
+      final currentYearMonth = _trailingYearMonths(1).first;
+      final coreMonths = _trailingYearMonths(kBehaviorSummaryCoreRetentionMonths);
+      final searchMonths = _trailingYearMonths(kBehaviorSummaryRetentionMonths);
+
+      final (cachedCore, cachedSearch) = await BehaviorSummaryCache.read(uid);
+
+      bool needsFetch(String month, Map<String, Map<String, dynamic>> cached) =>
+          !BehaviorSummaryCache.isSealed(month, currentYearMonth) ||
+          !cached.containsKey(month);
+      final needCoreFetch =
+          coreMonths.where((m) => needsFetch(m, cachedCore)).toList();
+      final needSearchFetch =
+          searchMonths.where((m) => needsFetch(m, cachedSearch)).toList();
+
+      final userRef = firestore.collection(USERS).doc(uid);
+      final freshCore = <String, Map<String, dynamic>>{};
+      final freshSearch = <String, Map<String, dynamic>>{};
+      final fetches = <Future<void>>[];
+      if (needCoreFetch.isNotEmpty) {
+        fetches.add(userRef
+            .collection('behavior_summary')
+            .where(FieldPath.documentId, whereIn: needCoreFetch)
+            .getLogged('_loadBehaviorSummary:behavior_summary')
+            .then((snap) {
+          for (final d in snap.docs) freshCore[d.id] = d.data();
+        }));
+      }
+      if (needSearchFetch.isNotEmpty) {
+        fetches.add(userRef
+            .collection('behavior_summary_search')
+            .where(FieldPath.documentId, whereIn: needSearchFetch)
+            .getLogged('_loadBehaviorSummary:behavior_summary_search')
+            .then((snap) {
+          for (final d in snap.docs) freshSearch[d.id] = d.data();
+        }));
+      }
+      await Future.wait(fetches);
+
+      // ignore: unawaited_futures
+      BehaviorSummaryCache.write(uid,
+          existingCore: cachedCore,
+          existingSearch: cachedSearch,
+          freshCore: freshCore,
+          freshSearch: freshSearch);
+
+      final mergedCore = {...cachedCore, ...freshCore};
+      final mergedSearch = {...cachedSearch, ...freshSearch};
+      // Only months still inside the current retention window feed the
+      // snapshot - a previously-cached month that has since aged out (e.g.
+      // month 13 for search) must not leak back in just because it's still
+      // sitting in the on-device cache.
+      final data = [
+        for (final m in coreMonths)
+          if (mergedCore.containsKey(m)) mergedCore[m]!,
+        for (final m in searchMonths)
+          if (mergedSearch.containsKey(m)) mergedSearch[m]!,
+      ];
       return BehaviorSummarySnapshot.merge(data);
     } catch (_) {
       return BehaviorSummarySnapshot.empty();

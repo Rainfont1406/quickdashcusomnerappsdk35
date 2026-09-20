@@ -32,6 +32,24 @@ import 'package:uuid/uuid.dart';
 class BehaviorTracker {
   BehaviorTracker._();
 
+  // Retention split (2026-09-20) - which behavior_summary field names route
+  // to the long-retention behavior_summary_search doc instead of the
+  // regular 3-month behavior_summary doc. MUST stay exactly in sync with
+  // FirebaseHelper._loadBehaviorSummary's own copy of this same set (kept
+  // as two copies, not one shared constant, since this file has no
+  // Firestore-free shared-constants home the read-side FirebaseHelper.dart
+  // could import without a new dependency either side didn't already have -
+  // see kBehaviorSummaryCoreRetentionMonths's own comment for the full why
+  // behind the split itself).
+  static const Set<String> _kSearchFieldPrefixes = {
+    'searchDayHits',
+    'topSearchKeywords',
+    'searchConfidenceOpened',
+    'searchConfidenceViewed',
+    'searchConfidenceCarted',
+    'searchConfidenceOrdered',
+  };
+
   // 30-50 events per the design - 40 splits the difference.
   static const int _flushThreshold = 40;
 
@@ -863,8 +881,31 @@ class BehaviorTracker {
       final batchRef = userRef.collection('behavior_batches').doc();
       final yearMonth = _currentYearMonth();
       final summaryRef = userRef.collection('behavior_summary').doc(yearMonth);
+      final searchSummaryRef =
+          userRef.collection('behavior_summary_search').doc(yearMonth);
 
       final summaryUpdates = await _computeSummaryUpdates(batch, yearMonth);
+      // Retention split (2026-09-20, see kBehaviorSummaryCoreRetentionMonths'
+      // own comment for the full why) - route each computed field into
+      // whichever sibling doc matches its retention need, by key PREFIX
+      // (map-field updates are sent as dotted keys, e.g.
+      // 'searchDayHits.pizza|2026-09-20' - see inc() above). yearMonth/
+      // updatedAt are metadata every doc needs regardless, so both copies
+      // get them unconditionally rather than routing them by prefix.
+      final coreUpdates = <String, dynamic>{
+        'yearMonth': yearMonth,
+        'updatedAt': FieldValue.serverTimestamp(),
+      };
+      final searchUpdates = <String, dynamic>{
+        'yearMonth': yearMonth,
+        'updatedAt': FieldValue.serverTimestamp(),
+      };
+      summaryUpdates.forEach((key, value) {
+        if (key == 'yearMonth' || key == 'updatedAt') return;
+        final target =
+            _kSearchFieldPrefixes.contains(key.split('.').first) ? searchUpdates : coreUpdates;
+        target[key] = value;
+      });
 
       final writeBatch = FireStoreUtils.firestore.batch();
       writeBatch.set(batchRef, {
@@ -873,8 +914,16 @@ class BehaviorTracker {
         'eventCount': batch.length,
         'events': batch,
       });
-      if (summaryUpdates.isNotEmpty) {
-        writeBatch.set(summaryRef, summaryUpdates, SetOptions(merge: true));
+      // > 2 means real content beyond the always-present yearMonth/updatedAt
+      // metadata pair - same "isNotEmpty" gate the single combined write
+      // used before this split, just applied to each half separately so a
+      // flush with only search activity (or only core activity) doesn't
+      // write an empty, metadata-only doc to the other collection.
+      if (coreUpdates.length > 2) {
+        writeBatch.set(summaryRef, coreUpdates, SetOptions(merge: true));
+      }
+      if (searchUpdates.length > 2) {
+        writeBatch.set(searchSummaryRef, searchUpdates, SetOptions(merge: true));
       }
 
       // Seasonal ordering preference / sequential ordering pattern
@@ -1776,9 +1825,38 @@ class BehaviorTracker {
     return updates;
   }
 
-  // Deletes behavior_summary docs older than the trailing 3 months - gated
-  // by a locally-persisted flag so this only ever runs (and only ever
-  // issues a query) once per real calendar-month change, never on every
+  // Builds the set of 'yyyy-MM' keys to keep, counting back `months`
+  // calendar months (inclusive of the current one) from now.
+  static Set<String> _trailingYearMonths(int months) {
+    final now = DateTime.now();
+    final keep = <String>{};
+    for (int i = 0; i < months; i++) {
+      final d = DateTime(now.year, now.month - i, 1);
+      keep.add('${d.year}-${d.month.toString().padLeft(2, '0')}');
+    }
+    return keep;
+  }
+
+  static Future<void> _pruneCollection(DocumentReference userRef,
+      String collection, Set<String> keep, String logLabel) async {
+    // 2026-09-19: was a raw .get(), invisible to FirestoreReadStats - this
+    // is rate-limited to once/user/month already, but still a real,
+    // unlogged read of up to `keep`'s document count.
+    final existing =
+        await userRef.collection(collection).getLogged(logLabel);
+    for (final doc in existing.docs) {
+      if (!keep.contains(doc.id)) {
+        await doc.reference.delete();
+      }
+    }
+  }
+
+  // Deletes behavior_summary docs older than kBehaviorSummaryCoreRetentionMonths
+  // and behavior_summary_search docs older than kBehaviorSummaryRetentionMonths
+  // (retention split, 2026-09-20 - see kBehaviorSummaryCoreRetentionMonths'
+  // own comment for why these two collections keep different windows) -
+  // gated by a locally-persisted flag so this only ever runs (and only ever
+  // issues its queries) once per real calendar-month change, never on every
   // flush.
   static Future<void> _pruneOldSummariesIfNeeded(
       DocumentReference userRef, String currentYearMonth) async {
@@ -1787,26 +1865,12 @@ class BehaviorTracker {
     if (lastPruned == currentYearMonth) return;
 
     try {
-      final now = DateTime.now();
-      final keep = <String>{};
-      // Retention extended 3 -> 12 months (2026-07-18) for Cross-Session
-      // Search Interest / long-term preference signals - must stay in sync
-      // with FirebaseHelper._loadBehaviorSummary's own fetch window.
-      for (int i = 0; i < kBehaviorSummaryRetentionMonths; i++) {
-        final d = DateTime(now.year, now.month - i, 1);
-        keep.add('${d.year}-${d.month.toString().padLeft(2, '0')}');
-      }
-      // 2026-09-19: was a raw .get(), invisible to FirestoreReadStats - this
-      // is rate-limited to once/user/month already, but still a real,
-      // unlogged read of up to kBehaviorSummaryRetentionMonths documents.
-      final existing = await userRef
-          .collection('behavior_summary')
-          .getLogged('BehaviorTracker:pruneOldSummaries');
-      for (final doc in existing.docs) {
-        if (!keep.contains(doc.id)) {
-          await doc.reference.delete();
-        }
-      }
+      await _pruneCollection(userRef, 'behavior_summary',
+          _trailingYearMonths(kBehaviorSummaryCoreRetentionMonths),
+          'BehaviorTracker:pruneOldSummaries');
+      await _pruneCollection(userRef, 'behavior_summary_search',
+          _trailingYearMonths(kBehaviorSummaryRetentionMonths),
+          'BehaviorTracker:pruneOldSearchSummaries');
       await prefs.setString(_lastPrunedMonthPrefsKey, currentYearMonth);
     } catch (_) {
       // Non-critical housekeeping - retried next month-change if it fails.

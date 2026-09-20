@@ -95,13 +95,38 @@ const String kEvtBannerClicked = 'banner_clicked';
 // continuous/repeating timer. See behavior_tracker.dart.
 const int kDwellThresholdSeconds = 9;
 
-// How many trailing months of behavior_summary docs are retained (extended
-// 3 -> 12 months, 2026-07-18, for Cross-Session Search Interest / long-term
+// Retention split (2026-09-20) - the 3->12mo extension below was measured
+// live to cost every user's fetch ~4x the bytes, but only ~5 of the ~19
+// behavior_summary fields (searchDayHits, topSearchKeywords, the 4
+// searchConfidence* maps) are ever read by anything that needs 12 months
+// of history (BehaviorSummarySnapshot.crossSessionSearchInterestFor and
+// friends). Every other field - productViewCounts, categoryInteractionCounts,
+// avgOrderValue, combo/veg counters, etc. - only ever feeds RecommendationEngine's
+// CURRENT-preference scoring, which has no stated need to look back a full
+// year. Splitting into two sibling subcollections (behavior_summary, the
+// original shape minus the 5 search fields, kept at the original 3-month
+// retention; behavior_summary_search, ONLY those 5 fields, kept at 12
+// months) preserves both consumers' existing behavior while cutting the
+// typical fetch's payload roughly 60-65% (measured across real production
+// accounts, see 2026-09-20 session notes) - see BehaviorTracker._flush's
+// split write and FirebaseHelper._loadBehaviorSummary's split read.
+//
+// Known, accepted migration gap: any search data written into the OLD,
+// unsplit behavior_summary shape before this shipped is NOT retroactively
+// copied into behavior_summary_search - it simply stops being read once
+// this ships. Confirmed acceptable at ship time: no production account had
+// more than 3 months of history yet (Cross-Session Search Interest's own
+// 12-month benefit had never actually been reachable by anyone), so there
+// was no real search history for any user to lose.
+const int kBehaviorSummaryCoreRetentionMonths = 3;
+
+// How many trailing months of behavior_summary_search docs are retained
+// (originally applied to the single behavior_summary collection, extended
+// 3 -> 12 months 2026-07-18 for Cross-Session Search Interest / long-term
 // preference signals - see RECOMMENDATION_SYSTEM_ARCHITECTURE.html Section
-// 19). Shared between behavior_tracker.dart's pruning logic and
-// FirebaseHelper.dart's fetch window - MUST stay in sync between the two,
-// which is exactly why this lives in one place instead of two magic numbers.
-// Real cost tradeoff, confirmed and accepted: this is a 4x increase in
-// Firestore document reads per behavior-summary fetch (12 individual
-// .get() calls instead of 3), cached 10 minutes per user session.
+// 19; narrowed to just the search-specific fields 2026-09-20, see
+// kBehaviorSummaryCoreRetentionMonths above for why). Shared between
+// behavior_tracker.dart's pruning logic and FirebaseHelper.dart's fetch
+// window - MUST stay in sync between the two, which is exactly why this
+// lives in one place instead of two magic numbers.
 const int kBehaviorSummaryRetentionMonths = 12;

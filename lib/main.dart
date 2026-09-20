@@ -13,6 +13,7 @@ import 'package:emartconsumer/model/CurrencyModel.dart';
 import 'package:emartconsumer/model/mail_setting.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
+import 'package:emartconsumer/services/behavior_summary_cache.dart';
 import 'package:emartconsumer/services/behavior/purchase_completion_listener.dart';
 import 'package:emartconsumer/services/config_refresh_gate.dart';
 import 'package:emartconsumer/services/connectivity_gate.dart';
@@ -451,7 +452,13 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
         // which UI button triggered it, ends up here as a null tick).
         final uid = _lastSeenAuthUid;
         _lastSeenAuthUid = null;
-        if (uid != null) unawaited(WalletHistoryCache.clear(uid));
+        if (uid != null) {
+          unawaited(WalletHistoryCache.clear(uid));
+          // 2026-09-20: same choke-point reasoning as WalletHistoryCache
+          // above - one account's cached behavior history must never be
+          // readable under a different account signed in on the same device.
+          unawaited(BehaviorSummaryCache.clear(uid));
+        }
       }
     });
     super.initState();
