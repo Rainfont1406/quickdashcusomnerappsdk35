@@ -25,6 +25,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:google_maps_place_picker_mb/google_maps_place_picker.dart';
 import 'package:firebase_auth/firebase_auth.dart' as auth;
 import 'package:provider/provider.dart';
+import 'package:uuid/uuid.dart';
 import 'deliveryAddressScreen/DeliveryAddressScreen.dart';
 
 class LocationPermissionScreen extends StatefulWidget {
@@ -99,6 +100,35 @@ class _LocationPermissionScreenState extends State<LocationPermissionScreen> {
 
           user.fcmToken =
               await FireStoreUtils.firebaseMessaging.getToken() ?? '';
+
+          // The location picked on THIS screen (map, or "enter location
+          // manually") was previously kept only in MyAppState.selectedPosotion
+          // - an in-memory field, never part of the User object that gets
+          // saved below, so it vanished on process death. main.dart's launch
+          // check (_navigateWithUser) routes to Home only when
+          // user.shippingAddress is non-empty, so without this the user was
+          // sent right back to this screen on every reopen despite having
+          // already picked a location - exactly mirroring what
+          // AddAddressScreen._save() already does for the "Add New Address"
+          // flow, which is why that path never showed the bug. Only fires
+          // when this is genuinely the user's first address (an existing
+          // shippingAddress list means they've already been through this
+          // screen before, or added one manually since); isDefault: true
+          // because there is nothing else for it to default against yet.
+          if (MyAppState.selectedPosotion.location != null &&
+              (user.shippingAddress == null ||
+                  user.shippingAddress!.isEmpty)) {
+            user.shippingAddress = [
+              AddressModel(
+                id: const Uuid().v4(),
+                location: MyAppState.selectedPosotion.location,
+                locality: MyAppState.selectedPosotion.locality,
+                addressAs: 'Home',
+                isDefault: true,
+              ),
+            ];
+          }
+
           await FireStoreUtils.updateCurrentUser(user);
           ShowToastDialog.closeLoader();
 
