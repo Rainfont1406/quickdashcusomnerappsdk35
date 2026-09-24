@@ -2803,6 +2803,29 @@ class FireStoreUtils {
           .within(center: center, radius: double.parse(sectionConstantModel!.nearByRadius.toString()), field: 'g', strictMode: true);
 
       _allStoresGeoSub = stream.listen((List<DocumentSnapshot> documentList) {
+        // 2026-09-20: getAllStores() is the ONLY remaining caller of the raw
+        // geoflutterfire stream left in the app - MapView, ViewAllPopularStore,
+        // and CategoryDetailsScreen were all migrated onto SharedVendorsWatcher
+        // (which IS logged) between 2026-09-06 and 2026-09-19, but this one
+        // (HomeScreen's main vendor grid, fired on every app open) was missed.
+        // It had zero FirestoreReadStats/[FirestoreListener] trace despite
+        // being the highest-traffic listener in the app - every document here
+        // is a real, billed read (or a fromCache one that may still have hit
+        // the server first, per this file's own SLOW-CACHE warning). Logged
+        // manually (not via .snapshotsLogged()) because this stream's type is
+        // the geo library's own Stream<List<DocumentSnapshot>>, not a
+        // Query<T>/DocumentReference<T> the extension methods apply to. A
+        // mixed event (some docs cache, some server) is conservatively
+        // labeled SERVER, matching this file's "don't undercount" convention.
+        final fromCache = documentList.isNotEmpty &&
+            documentList.every((d) => d.metadata.isFromCache);
+        final bytes = estimateSnapshotBytes(documentList);
+        FirestoreReadStats.record('HomeScreen.getAllStores', fromCache,
+            documentList.length, null, bytes);
+        debugPrint('[FirestoreListener] HomeScreen.getAllStores '
+            'source=${fromCache ? "CACHE" : "SERVER"} '
+            'docs=${documentList.length} bytes=${FirestoreReadStats.fmtBytes(bytes)} '
+            'at=${DateTime.now().toIso8601String()}');
         // Rebuild fresh on every Geofire event — never accumulate, never close early
         final List<VendorModel> vendors = [];
         for (var document in documentList) {
@@ -2831,8 +2854,6 @@ class FireStoreUtils {
   closeVendorStream() {
     _allStoresGeoSub?.cancel();
     _allStoresGeoSub = null;
-    _cuisineGeoSub?.cancel();
-    _cuisineGeoSub = null;
     if (vendorStreamController != null) {
       vendorStreamController!.close();
     }
@@ -2844,51 +2865,16 @@ class FireStoreUtils {
     //productStreamController.close();
   }
 
-  late StreamController<List<VendorModel>> cusionStreamController;
-  // See getAllStores' doc comment - identical leak, identical fix, for the
-  // per-cuisine nearby-vendors query.
-  StreamSubscription<List<DocumentSnapshot>>? _cuisineGeoSub;
-
-  Stream<List<VendorModel>> getVendorsByCuisineID(String cuisineID, {bool? isDinein}) async* {
-    await _cuisineGeoSub?.cancel();
-    _cuisineGeoSub = null;
-
-    cusionStreamController = StreamController<List<VendorModel>>.broadcast();
-    final controller = cusionStreamController;
-    controller.onCancel = () {
-      _cuisineGeoSub?.cancel();
-      _cuisineGeoSub = null;
-    };
-
-    var collectionReference = isDinein!
-        ? firestore.collection(VENDORS).where('categoryID', isEqualTo: cuisineID).where("enabledDiveInFuture", isEqualTo: true)
-        : firestore.collection(VENDORS).where('categoryID', isEqualTo: cuisineID);
-
-    GeoFirePoint center = geo.point(latitude: MyAppState.selectedPosotion.location!.latitude, longitude: MyAppState.selectedPosotion.location!.longitude);
-    Stream<List<DocumentSnapshot>> stream = geo
-        .collection(collectionRef: collectionReference)
-        .within(center: center, radius: double.parse(sectionConstantModel!.nearByRadius.toString()), field: 'g', strictMode: true);
-    _cuisineGeoSub = stream.listen((List<DocumentSnapshot> documentList) {
-      // Rebuild fresh on every Geofire event — never accumulate, never close early
-      final List<VendorModel> vendors = [];
-      for (var element in documentList) {
-        try {
-          final data = element.data() as Map<String, dynamic>;
-          final storeStatus = data['store_status'] as String?;
-          if (storeStatus == null || storeStatus == 'approved') {
-            vendors.add(VendorModel.fromJson(data));
-          }
-        } catch (e) {
-          print('getVendorsByCuisineID parse error: $e');
-        }
-      }
-      if (!controller.isClosed) {
-        controller.add(vendors);
-      }
-    });
-
-    yield* controller.stream;
-  }
+  // getVendorsByCuisineID() removed (2026-09-20 cost/instrumentation audit) -
+  // CategoryDetailsScreen was its last caller and was migrated off it onto
+  // SharedVendorsWatcher on 2026-09-19 (see that screen's own comment). Left
+  // in place with zero callers anywhere in lib/, it was the exact same class
+  // of live foot-gun as getViewAllOffer() below: a raw, UNLOGGED geoflutterfire
+  // radius listener (found 2026-09-20 alongside the same gap in getAllStores(),
+  // which IS still called and has now been instrumented instead of removed).
+  // If per-cuisine nearby-vendor filtering is needed again, extend
+  // SharedVendorsWatcher rather than reconnecting this - it already shares
+  // one listener per visit and is properly logged.
 
   // getViewAllOffer() removed (2026-09-02 cost cleanup) - it ran the EXACT
   // same query as getAllCoupons() below (COUPONS where isEnabled == true,
