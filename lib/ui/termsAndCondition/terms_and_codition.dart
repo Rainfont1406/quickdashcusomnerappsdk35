@@ -1,6 +1,7 @@
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/bunny_reference_mirror.dart';
 import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/services/helper.dart';
@@ -25,6 +26,13 @@ class _TermsAndConditionState extends State<TermsAndCondition> {
   }
 
   Future<void> _loadContent() async {
+    // 2026-09-25: Bunny mirror first (0 Firestore reads, cached 24h on the
+    // device); the original Firestore read below is the fallback.
+    final mirrored = await fetchLegalTextFromBunny('terms-and-conditions.json', 'terms_and_condition');
+    if (mirrored != null) {
+      if (mounted) setState(() => _content = mirrored);
+      return;
+    }
     try {
       final doc = await FireStoreUtils.firestore
           .collection(Setting)

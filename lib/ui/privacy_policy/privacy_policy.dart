@@ -1,6 +1,7 @@
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/bunny_reference_mirror.dart';
 import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
@@ -21,6 +22,17 @@ class _PrivacyPolicyScreenState extends State<PrivacyPolicyScreen> {
   @override
   void initState() {
     super.initState();
+    _load();
+  }
+
+  // 2026-09-25: Bunny mirror first (0 Firestore reads, cached 24h on the
+  // device); the original Firestore read is the fallback.
+  Future<void> _load() async {
+    final mirrored = await fetchLegalTextFromBunny('privacy-policy.json', 'privacy_policy');
+    if (mirrored != null) {
+      if (mounted) setState(() => _privacyHtml = mirrored);
+      return;
+    }
     FireStoreUtils.firestore.collection(Setting).doc('privacyPolicy').getLogged('initState:Setting').then((value) {
       if (mounted) {
         setState(() {

@@ -388,3 +388,21 @@ Future<List<LocalOfferModel>?> fetchLocalOffersFromBunny() async {
     return null;
   }
 }
+
+/// Terms & Conditions / Privacy Policy text (2026-09-25) from the admin
+/// panel's legal/*.json Bunny mirror (BunnyLegalMirrorController) - the same
+/// settings/termsAndConditions / settings/privacyPolicy text, copied with
+/// the same field name. Uses the 24h reference cache, so a repeat open costs
+/// no network at all. Returns null on any failure/empty text so the caller
+/// falls back to its original Firestore read.
+Future<String?> fetchLegalTextFromBunny(String file, String field) async {
+  try {
+    final body = await cachedBunnyGet('bunny_legal_$file',
+        'https://$_kBunnyCdnHost/legal/$file', kBunnyReferenceTtl);
+    if (body == null) return null;
+    final text = (jsonDecode(body) as Map<String, dynamic>)[field];
+    return text is String && text.trim().isNotEmpty ? text : null;
+  } catch (_) {
+    return null;
+  }
+}
