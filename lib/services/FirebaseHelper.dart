@@ -2652,6 +2652,8 @@ class FireStoreUtils {
   StreamSubscription? bookingOrdersStreamSub;
   StreamController<List<BookTableModel>>? bookingOrdersStreamController;
 
+  static const int _bookingHistoryLimit = 20;
+
   Stream<List<BookTableModel>> getBookingOrders(String userID, bool isUpComing) async* {
     bookingOrdersStreamController = StreamController<List<BookTableModel>>();
     final query = isUpComing
@@ -2668,7 +2670,11 @@ class FireStoreUtils {
             .where('date', isLessThan: Timestamp.now())
             .where("section_id", isEqualTo: sectionConstantModel!.id)
             .orderBy('date', descending: true)
-            .orderBy('createdAt', descending: true);
+            .orderBy('createdAt', descending: true)
+            // 2026-09-25: history grows forever and was loaded whole, live,
+            // on every open (~113 KB for the heaviest customer). Latest 20
+            // past bookings only; upcoming (date > now) is unchanged.
+            .limit(_bookingHistoryLimit);
 
     bookingOrdersStreamSub = query.snapshotsLogged('getBookingOrders:ORDERS_TABLE').listen((onData) async {
       final List<BookTableModel> orders = [];
@@ -3842,6 +3848,17 @@ class FireStoreUtils {
     if (slotId.isNotEmpty) {
       query = query.where('slotId', isEqualTo: slotId);
     }
+    // 2026-09-25: was every booking this vendor ever had (then filtered to
+    // one day in memory) - ~128 KB per dine-in details open for Rath, and
+    // growing forever. Now only bookings whose `date` is within a day of the
+    // chosen date: every booking has `date` (checked on all 53 in
+    // production; 28 old ones have no bookingDateKey), and `date` is never
+    // more than 5.5 h from bookingDateKey, so the +/-1 day window keeps
+    // every booking the exact in-memory check below could match. Indexes:
+    // booked_table (vendorID, date) and (vendorID, slotId, date).
+    query = query
+        .where('date', isGreaterThanOrEqualTo: Timestamp.fromDate(startOfDay.subtract(const Duration(days: 1))))
+        .where('date', isLessThan: Timestamp.fromDate(endOfDay.add(const Duration(days: 1))));
     final snapshot = await query.getLogged('getBookingCountForDate:ORDERS_TABLE');
 
     int occupiedGuests = 0;
@@ -3885,10 +3902,18 @@ class FireStoreUtils {
   }) async {
     final today = DateTime.now();
     final dateKey = '${today.year}-${today.month.toString().padLeft(2, '0')}-${today.day.toString().padLeft(2, '0')}';
+    // 2026-09-25: was all of this customer's bookings at this vendor, ever
+    // (~102 KB for the heaviest customer), filtered to today in memory. Same
+    // +/-1 day `date` window as getBookingCountForDate - the in-memory
+    // bookingDateKey == today check below is unchanged. Index: booked_table
+    // (vendorID, authorID, date).
+    final dayStart = DateTime(today.year, today.month, today.day);
     final snapshot = await firestore
         .collection(ORDERS_TABLE)
         .where('vendorID', isEqualTo: vendorId)
         .where('authorID', isEqualTo: customerId)
+        .where('date', isGreaterThanOrEqualTo: Timestamp.fromDate(dayStart.subtract(const Duration(days: 1))))
+        .where('date', isLessThan: Timestamp.fromDate(dayStart.add(const Duration(days: 2))))
         .getLogged('getExistingBookingGuestCountToday:ORDERS_TABLE');
 
     // Picks the single most recent matching booking's guest count rather
