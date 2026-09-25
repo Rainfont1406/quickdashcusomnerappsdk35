@@ -391,7 +391,11 @@ class PaymentScreenState extends State<PaymentScreen> {
 
   Future<void> _loadSeatAvailability() async {
     try {
-      final vendor = await FireStoreUtils().getVendorByVendorID(widget.products.first.vendorID);
+      // 2026-09-25: seat settings only - vendor_live (~0.4 KB) first,
+      // full vendor doc as the fallback.
+      final vendorId = widget.products.first.vendorID;
+      final vendor = await FireStoreUtils().getVendorLive(vendorId) ??
+          await FireStoreUtils().getVendorByVendorID(vendorId);
       if (!mounted) return;
       setState(() {
         _diningVendor = vendor;
@@ -4380,6 +4384,7 @@ class PaymentScreenState extends State<PaymentScreen> {
     push(
       context,
       CheckoutScreen(
+        cartVendorModel: widget.cartVendorModel,
         id: oid,
         isPaymentDone: val,
         paymentType: paymentType,

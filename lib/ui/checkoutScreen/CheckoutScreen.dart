@@ -50,6 +50,10 @@ class CheckoutScreen extends StatefulWidget {
   // is correctly rejected as permission-denied. Only the remaining client
   // side-effects (stock decrement, confirmation UI) still need to run.
   final OrderModel? alreadyPlacedOrder;
+  // 2026-09-25: CartScreen's already-fetched full vendor, passed through
+  // PaymentScreen - used for the order's embedded vendor snapshot so this
+  // screen only needs the tiny vendor_live doc for its live service gate.
+  final VendorModel? cartVendorModel;
 
   const CheckoutScreen({
     Key? key,
@@ -76,6 +80,7 @@ class CheckoutScreen extends StatefulWidget {
     this.orderType,
     this.billPayRequestId,
     this.alreadyPlacedOrder,
+    this.cartVendorModel,
   }) : super(key: key);
 
   @override
@@ -959,9 +964,29 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     await showProgress('Please wait...'.tr(), false);
 
     try {
-      final VendorModel vendorModel = await _fireStoreUtils
-          .getVendorByVendorID(tempProducts.first.vendorID)
-          .whenComplete(() => _setPrefData());
+      // 2026-09-25: the live service gate below (and the analytics
+      // cuisineIds/businessTypeId) only needs vendor_live/{id} (~0.4 KB,
+      // fresh server read); the order's embedded vendor snapshot comes from
+      // CartScreen's full copy (cartVendorModel). If either is unavailable,
+      // fall back to the original single full-doc read for both.
+      final String checkoutVendorId = tempProducts.first.vendorID;
+      final VendorModel? cartVendor = widget.cartVendorModel?.id == checkoutVendorId
+          ? widget.cartVendorModel
+          : null;
+      VendorModel? liveVendor;
+      VendorModel? fullVendor;
+      try {
+        if (cartVendor != null) {
+          liveVendor = await _fireStoreUtils.getVendorLive(checkoutVendorId);
+        }
+        if (liveVendor == null) {
+          fullVendor = await _fireStoreUtils.getVendorByVendorID(checkoutVendorId);
+        }
+      } finally {
+        await _setPrefData();
+      }
+      final VendorModel vendorModel = liveVendor ?? fullVendor!;
+      final VendorModel orderSnapshotVendor = fullVendor ?? cartVendor!;
 
       // ── Live service-type gate ───────────────────────────────────────────
       final bool _isTakeawayOrder = widget.take_away ?? false;
@@ -1117,7 +1142,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
         status: widget.orderType == 'Bill Pay'
             ? ORDER_STATUS_COMPLETED
             : ORDER_STATUS_PLACED,
-        vendor: vendorModel,
+        vendor: orderSnapshotVendor,
         vendorID: tempProducts.first.vendorID,
         discount: widget.discount,
         couponCode: widget.couponCode,

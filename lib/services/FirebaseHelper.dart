@@ -3494,6 +3494,28 @@ class FireStoreUtils {
   // egress saving for real staleness risk on the one path where freshness
   // actually matters - not worth it, unlike the passive browsing/display
   // call sites getVendor() covers (Home, Product Details, reviews, etc.).
+  /// 2026-09-25: the tiny vendor_live/{vendorId} doc (written only by the
+  /// syncVendorLive Cloud Function) - the vendor's service switches, open
+  /// status, seat settings, cuisineIds and businessTypeId, ~0.4 KB instead
+  /// of the full vendor doc (2-10 KB). Fresh (server) read, same as
+  /// getVendorByVendorID, for the checkout-time gates that need current
+  /// values but not the rest of the doc. Returns null if the doc is missing
+  /// or the read fails - callers then fall back to getVendorByVendorID.
+  Future<VendorModel?> getVendorLive(String vendorID) async {
+    try {
+      final doc = await firestore
+          .collection('vendor_live')
+          .doc(vendorID)
+          .getLogged('getVendorLive:vendor_live');
+      final data = doc.data();
+      if (!doc.exists || data == null) return null;
+      return VendorModel.fromJson(data);
+    } catch (e) {
+      debugPrint('getVendorLive($vendorID) failed, falling back to full doc: $e');
+      return null;
+    }
+  }
+
   Future<VendorModel> getVendorByVendorID(String vendorID) async {
     late VendorModel vendor;
     QuerySnapshot<Map<String, dynamic>> vendorsQuery = await firestore.collection(VENDORS).where('id', isEqualTo: vendorID).getLogged('getVendorByVendorID:VENDORS');
