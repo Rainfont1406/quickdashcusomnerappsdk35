@@ -6,6 +6,7 @@ import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/helper.dart';
+import 'package:emartconsumer/services/shared_vendors_watcher.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:flutter/material.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
@@ -286,7 +287,22 @@ class _FavouriteStoreScreenState extends State<FavouriteStoreScreen> with Single
         lstFavourite.addAll(value);
       });
     });
-    vendorFuture = fireStoreUtils.getVendors();
+    // 2026-09-25: was fireStoreUtils.getVendors() - every vendor record in
+    // the section straight from Firestore, uncached, on every open (~19
+    // reads / ~40 KB now, growing with each vendor). SharedVendorsWatcher
+    // already holds the same whole-section, approved+active list (Bunny
+    // vendor list + live open/closed overlay) that Home uses, so take its
+    // current value (0 Firestore reads). Falls back to the original query
+    // if the watcher has nothing within 8 s or fails.
+    final sectionId = sectionConstantModel?.id ?? '';
+    final lat = MyAppState.selectedPosotion.location?.latitude ?? 0.0;
+    final lng = MyAppState.selectedPosotion.location?.longitude ?? 0.0;
+    vendorFuture = SharedVendorsWatcher.watch(sectionId, lat, lng)
+        .first
+        .timeout(const Duration(seconds: 8))
+        .then((vendors) async =>
+            vendors.isNotEmpty ? vendors : await fireStoreUtils.getVendors())
+        .catchError((_) => fireStoreUtils.getVendors());
 
     vendorFuture.then((value) {
       setState(() {

@@ -26,7 +26,11 @@ class _StorePhotosState extends State<StorePhotos> {
   @override
   void initState() {
     super.initState();
-    photofuture = fireStoreUtils.getVendorByVendorID(widget.vendorModel.id);
+    // 2026-09-25: was getVendorByVendorID() - a fresh full vendor read on
+    // every open, although the caller already passes the vendor (photos
+    // included). Currently unreachable (its only entry point is commented
+    // out in VendorProductsScreen), kept at 0 reads in case it's re-enabled.
+    photofuture = Future.value(widget.vendorModel);
   }
 
   @override
@@ -41,19 +45,19 @@ class _StorePhotosState extends State<StorePhotos> {
                 future: photofuture,
                 // initialData: [],
                 builder: (context, snapshot) {
-                  if (snapshot.connectionState != ConnectionState.waiting && snapshot.data!.photos.isEmpty) {
-                    if (snapshot.data!.photo.isNotEmpty) {
-                      snapshot.data!.photos.add(snapshot.data!.photo);
-                    }
-                  }
-
                   if (snapshot.connectionState == ConnectionState.waiting) {
                     return Center(
                       child: CircularProgressIndicator.adaptive(
                         valueColor: AlwaysStoppedAnimation(AppThemeData.primary500),
                       ),
                     );
-                  } else if (snapshot.data!.photos.isEmpty) {
+                  }
+                  // Local list - the vendor object is shared with the
+                  // screen that opened this one, so don't append to it.
+                  final List<dynamic> photos = snapshot.data!.photos.isNotEmpty
+                      ? List<dynamic>.from(snapshot.data!.photos)
+                      : (snapshot.data!.photo.isNotEmpty ? <dynamic>[snapshot.data!.photo] : <dynamic>[]);
+                  if (photos.isEmpty) {
                     return Center(child: showEmptyState("No images are available.".tr(), context));
                   }
                   return GridView.count(
@@ -63,11 +67,11 @@ class _StorePhotosState extends State<StorePhotos> {
                       mainAxisSpacing: 10.0,
                       childAspectRatio: 5 / 4,
                       padding: const EdgeInsets.all(10.0),
-                      children: List.generate(snapshot.data!.photos.length, (index) {
+                      children: List.generate(photos.length, (index) {
                         if (snapshot.data!.hidephotos == false) {
                           return InkWell(
                             onTap: () {
-                              push(context, FullScreenImageViewer(imageUrl: snapshot.data!.photos[index]));
+                              push(context, FullScreenImageViewer(imageUrl: photos[index]));
                             },
                             child: Card(
                                 color: const Color(0xffE7EAED),
@@ -76,7 +80,7 @@ class _StorePhotosState extends State<StorePhotos> {
                                 child: CachedNetworkImage(
                                     height: 70,
                                     width: 100,
-                                    imageUrl: snapshot.data!.photos[index],
+                                    imageUrl: photos[index],
                                     imageBuilder: (context, imageProvider) => Container(
                                           width: 70,
                                           height: 100,
