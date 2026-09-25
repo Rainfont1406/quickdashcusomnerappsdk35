@@ -74,6 +74,31 @@ class SharedVendorsWatcher {
   static List<VendorModel>? _latest;
   static String? _activeKey;
 
+  /// 2026-09-25: a vendor from the list this watcher already holds on the
+  /// phone (Bunny vendor list + live open/closed overlay) - 0 Firestore
+  /// reads. null when the list isn't loaded yet, the vendor isn't in it
+  /// (unapproved/inactive vendors are filtered out of it), or - when
+  /// [sectionId] is given - the list belongs to a different section.
+  static VendorModel? findInCurrentList(String vendorId, {String? sectionId}) {
+    final key = _activeKey;
+    final list = _latest;
+    if (key == null || list == null || vendorId.isEmpty) return null;
+    if (sectionId != null && sectionId.isNotEmpty && !key.startsWith('$sectionId:')) {
+      return null;
+    }
+    for (final v in list) {
+      if (v.id == vendorId) return v;
+    }
+    return null;
+  }
+
+  /// For screens that only need a vendor to show it and open its page (e.g.
+  /// the story header): the on-phone list first, else the existing
+  /// 10-minute-cached full read.
+  static Future<VendorModel?> resolveForDisplay(String vendorId) async {
+    return findInCurrentList(vendorId) ?? await FireStoreUtils.getVendor(vendorId);
+  }
+
   static String _keyFor(String sectionId, double lat, double lng) {
     // Rounded to ~1km so tiny GPS jitter between visits doesn't count as a
     // "location changed, restart" event.

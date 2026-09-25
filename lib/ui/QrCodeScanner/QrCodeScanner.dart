@@ -5,6 +5,7 @@ import 'package:emartconsumer/model/SectionModel.dart';
 import 'package:emartconsumer/model/User.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/shared_vendors_watcher.dart';
 import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
@@ -173,22 +174,49 @@ class _QrCodeScannerState extends State<QrCodeScanner>
     if (mounted) setState(() { _detected = false; _isVerifying = true; _verifyError = null; });
 
     try {
-      // Live Firestore fetch — never use the stale allstoreList cache.
-      final query = await FireStoreUtils.firestore
-          .collection(VENDORS)
-          .where('id', isEqualTo: qrValue)
-          .limit(1)
-          .getLogged('onDetect:VENDORS');
-
-      if (!mounted) return;
-
-      // ── Gate 1: vendor doesn't exist ──────────────────────────────
-      if (query.docs.isEmpty) {
-        _setVerifyError('Restaurant not found. The QR code may be invalid or outdated.'.tr());
-        return;
+      // 2026-09-25: the gates below still run on LIVE server data, but from
+      // the tiny vendor_live/{id} doc (~0.3 KB: store_status, isActive,
+      // section_id, ...) instead of the full vendor record (2.5-10 KB); the
+      // page itself gets the vendor from the list already on the phone
+      // (SharedVendorsWatcher - the same source Home uses to open a
+      // restaurant). Anything unusual - no vendor_live doc, vendor not in the
+      // on-phone list, an id that can't be a doc id, a read error - falls
+      // through to the original full live fetch below, unchanged.
+      Map<String, dynamic>? data;
+      VendorModel? listVendor;
+      if (qrValue.isNotEmpty && !qrValue.contains('/')) {
+        listVendor = SharedVendorsWatcher.findInCurrentList(qrValue,
+            sectionId: sectionConstantModel?.id);
+        if (listVendor != null) {
+          try {
+            final live = await FireStoreUtils.firestore
+                .collection('vendor_live')
+                .doc(qrValue)
+                .getLogged('onDetect:vendor_live');
+            if (live.exists) data = live.data();
+          } catch (_) {}
+        }
       }
+      if (data == null) {
+        listVendor = null;
+        // Live Firestore fetch — never use the stale allstoreList cache.
+        final query = await FireStoreUtils.firestore
+            .collection(VENDORS)
+            .where('id', isEqualTo: qrValue)
+            .limit(1)
+            .getLogged('onDetect:VENDORS');
 
-      final data = query.docs.first.data();
+        if (!mounted) return;
+
+        // ── Gate 1: vendor doesn't exist ──────────────────────────────
+        if (query.docs.isEmpty) {
+          _setVerifyError('Restaurant not found. The QR code may be invalid or outdated.'.tr());
+          return;
+        }
+
+        data = query.docs.first.data();
+      }
+      if (!mounted) return;
 
       // ── Gate 2: admin banned / not approved ───────────────────────
       final storeStatus = data['store_status'] as String?;
@@ -210,7 +238,7 @@ class _QrCodeScannerState extends State<QrCodeScanner>
 
       // ── All gates passed — navigate ────────────────────────────────
       if (mounted) setState(() => _isVerifying = false);
-      final VendorModel vendor = VendorModel.fromJson(data);
+      final VendorModel vendor = listVendor ?? VendorModel.fromJson(data);
       if (mounted) {
         precacheVendorHeroImage(context, vendor);
         Navigator.pop(context);

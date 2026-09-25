@@ -9,7 +9,7 @@ import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/model/story_model.dart';
-import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/shared_vendors_watcher.dart';
 import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/services/behavior/behavior_event_types.dart';
 import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
@@ -784,7 +784,9 @@ class _VendorHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return FutureBuilder<VendorModel?>(
-      future: FireStoreUtils.getVendor(vendorId),
+      // 2026-09-25: the vendor list already on the phone first (0 reads);
+      // the 10-minute-cached full read only if it isn't there.
+      future: SharedVendorsWatcher.resolveForDisplay(vendorId),
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
           return _buildSkeleton();
