@@ -2199,7 +2199,37 @@ class FireStoreUtils {
     return _deliveryChargeCache;
   }
 
-  static Future<List<SectionModel>> getSections() async {
+  // 2026-09-25: the location screen and the service list both called this
+  // uncached. Sections are admin config (changes rarely, but can change any
+  // time) - 30-minute in-memory cache plus a shared in-flight read so two
+  // callers racing on the same frame don't both query. In memory only:
+  // SectionModel carries nested maps the on-device list cache would drop.
+  static List<SectionModel>? _sectionsCache;
+  static DateTime? _sectionsCachedAt;
+  static Future<List<SectionModel>>? _sectionsInFlight;
+  static const Duration _sectionsCacheTtl = Duration(minutes: 30);
+
+  static Future<List<SectionModel>> getSections() {
+    final cached = _sectionsCache;
+    final at = _sectionsCachedAt;
+    if (cached != null && at != null && DateTime.now().difference(at) < _sectionsCacheTtl) {
+      debugPrint('[Cache] getSections served from memory - 0 Firestore reads');
+      return Future.value(cached);
+    }
+    final inFlight = _sectionsInFlight;
+    if (inFlight != null) return inFlight;
+    final future = _fetchSections().then((list) {
+      if (list.isNotEmpty) {
+        _sectionsCache = list;
+        _sectionsCachedAt = DateTime.now();
+      }
+      return list;
+    }).whenComplete(() => _sectionsInFlight = null);
+    _sectionsInFlight = future;
+    return future;
+  }
+
+  static Future<List<SectionModel>> _fetchSections() async {
     List<SectionModel> sections = [];
     QuerySnapshot<Map<String, dynamic>> productsQuery = await firestore.collection(SECTION).where("isActive", isEqualTo: true).getLogged('getSections:SECTION');
 
@@ -3117,13 +3147,33 @@ class FireStoreUtils {
     });
     return currency;
   }*/
+  // 2026-09-25: currency is admin config that essentially never changes,
+  // but this ran a fresh query on every location selection / service-list
+  // open. 7-day on-device cache (ConfigRefreshGate list - every currency
+  // field is a plain value, so nothing is dropped); the original query runs
+  // on a miss and refills it.
+  static const String _currencyCacheKey = 'activeCurrency';
+  static const Duration _currencyCacheTtl = Duration(days: 7);
+
   Future<CurrencyModel?> getCurrency() async {
     CurrencyModel? currency;
+    final cachedCurrency = await ConfigRefreshGate.readList(_currencyCacheKey, _currencyCacheTtl);
+    if (cachedCurrency != null && cachedCurrency.isNotEmpty) {
+      try {
+        debugPrint('[ConfigCache] currency served from on-device cache - 0 Firestore reads');
+        return CurrencyModel.fromJson(cachedCurrency.first);
+      } catch (_) {}
+    }
     await firestore.collection(Currency).where("isActive", isEqualTo: true).getLogged('getCurrency:Currency').then((value) {
       if (value.docs.isNotEmpty) {
         currency = CurrencyModel.fromJson(value.docs.first.data());
       }
     });
+    final fetched = currency;
+    if (fetched != null) {
+      // ignore: unawaited_futures
+      ConfigRefreshGate.writeList(_currencyCacheKey, [fetched.toJson()]);
+    }
     return currency;
   }
 

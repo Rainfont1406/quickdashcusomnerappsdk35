@@ -180,6 +180,14 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
 
   static Future<void> get initialRoutingDone => _initialRoutingCompleter.future;
 
+  // 2026-09-25: completes once initializeFlutterFire() has applied the 7-doc
+  // app settings batch (from the 7-day on-device cache or a fresh fetch).
+  // true = globalSettings was in it, so AppThemeData.primary300 is already
+  // set from app_customer_color. OnBoardingController waits on this instead
+  // of re-reading settings/globalSettings itself.
+  static final Completer<bool> _appSettingsCompleter = Completer<bool>();
+  static Future<bool> get appSettingsApplied => _appSettingsCompleter.future;
+
   //  late Stream<StripeKeyModel> futureStirpe;
   //  String? data,d;
 
@@ -269,6 +277,7 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
     if (globalSettings != null) {
       AppThemeData.primary300 = Color(int.parse(
           globalSettings['app_customer_color'].replaceFirst("#", "0xff")));
+      if (!_appSettingsCompleter.isCompleted) _appSettingsCompleter.complete(true);
       final rawMaxCombined = globalSettings['maxCombinedDiscountPercent'];
       final parsedMaxCombined = double.tryParse(rawMaxCombined?.toString() ?? '');
       if (parsedMaxCombined != null && parsedMaxCombined > 0 && parsedMaxCombined <= 100) {
@@ -359,6 +368,9 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
     } catch (e) {
       debugPrint(e.toString());
     }
+    // Never leave OnBoardingController waiting: false = colour not applied
+    // (globalSettings missing or the batch failed) - it then reads it itself.
+    if (!_appSettingsCompleter.isCompleted) _appSettingsCompleter.complete(false);
   }
 
   DarkThemeProvider themeChangeProvider = DarkThemeProvider();

@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:emartconsumer/constants.dart';
+import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/on_boarding_model.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/firestore_instrumentation.dart';
@@ -23,7 +24,17 @@ class OnBoardingController extends GetxController {
   RxList<OnBoardingModel> onBoardingList = <OnBoardingModel>[].obs;
 
   getOnBoardingData() async {
+    // 2026-09-25: app start (MyAppState.initializeFlutterFire) already loads
+    // settings/globalSettings in its 7-doc settings batch (7-day on-device
+    // cache) and applies app_customer_color. Wait for that instead of
+    // reading the same doc again; only read it here if the batch didn't
+    // apply the colour (missing doc / failed fetch / 5 s timeout).
+    bool colourApplied = false;
     try {
+      colourApplied = await MyAppState.appSettingsApplied
+          .timeout(const Duration(seconds: 5));
+    } catch (_) {}
+    if (!colourApplied) try {
       // 2026-09-19: was a raw .get(), invisible to FirestoreReadStats - a
       // second, independent unlogged read of the exact same doc main.dart's
       // own warm-up call already reads.
