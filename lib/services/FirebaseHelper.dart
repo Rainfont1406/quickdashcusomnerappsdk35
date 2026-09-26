@@ -1427,15 +1427,28 @@ class FireStoreUtils {
   }
 
   static Future<NotificationModel?> getNotificationContent(String type) async {
+    final cacheKey = 'notification_text_$type';
+    try {
+      final cached = await ConfigRefreshGate.readRaw(cacheKey, _messageTextTtl);
+      if (cached != null) {
+        debugPrint('[ConfigCache] $cacheKey from on-device cache - 0 Firestore reads');
+        return NotificationModel.fromJson(jsonDecode(cached) as Map<String, dynamic>);
+      }
+    } catch (_) {}
     NotificationModel? notificationModel;
+    var fromFirestore = false;
     await firestore.collection(dynamicNotification).where('type', isEqualTo: type).getLogged('getNotificationContent:dynamicNotification').then((value) {
       if (value.docs.isNotEmpty) {
-
         notificationModel = NotificationModel.fromJson(value.docs.first.data());
+        fromFirestore = true;
       } else {
         notificationModel = NotificationModel(id: "", message: "Notification setup is pending".tr(), subject: "setup notification".tr(), type: "");
       }
     });
+    // Only real texts are cached - never the "setup pending" placeholder.
+    if (fromFirestore && notificationModel != null) {
+      unawaited(ConfigRefreshGate.writeRaw(cacheKey, jsonEncode(notificationModel!.toJson())));
+    }
     return notificationModel;
   }
 
@@ -3486,13 +3499,33 @@ class FireStoreUtils {
   static Future<List<VendorCategoryModel>> getVendorCategoriesByIds(
       List<String> vendorCategoryIds) async {
     if (vendorCategoryIds.isEmpty) return [];
+    // 2026-09-26: the section's published categories are already mirrored on
+    // Bunny (category-lists/{section}.json - same section_id + publish==true
+    // filter as the query below; Vendor Web reads the same file) and usually
+    // already on the phone from Home/Search. Take them from there first; only
+    // ids missing from it (e.g. created minutes ago) go to Firestore. Device
+    // audit: this was 6-8 reads / ~3 KB on every restaurant first open.
+    final fromBunny = <VendorCategoryModel>[];
+    final sectionId = sectionConstantModel?.id;
+    if (sectionId != null && sectionId.isNotEmpty) {
+      final mirrored = await fetchCategoriesFromBunny(sectionId);
+      if (mirrored != null) {
+        final wanted = vendorCategoryIds.toSet();
+        fromBunny.addAll(mirrored.where((c) => c.id != null && wanted.contains(c.id)));
+      }
+    }
+    final foundIds = fromBunny.map((c) => c.id).toSet();
+    final missing = vendorCategoryIds.where((id) => !foundIds.contains(id)).toList();
+    if (fromBunny.isNotEmpty) {
+      debugPrint('[getVendorCategoriesByIds] ${fromBunny.length} categories from Bunny - 0 Firestore reads; ${missing.length} not in the mirror');
+    }
     const chunkSize = 30;
     final chunks = <List<String>>[];
-    for (var i = 0; i < vendorCategoryIds.length; i += chunkSize) {
-      final end = i + chunkSize < vendorCategoryIds.length
+    for (var i = 0; i < missing.length; i += chunkSize) {
+      final end = i + chunkSize < missing.length
           ? i + chunkSize
-          : vendorCategoryIds.length;
-      chunks.add(vendorCategoryIds.sublist(i, end));
+          : missing.length;
+      chunks.add(missing.sublist(i, end));
     }
     final results = await Future.wait(chunks.map((chunk) async {
       try {
@@ -3510,7 +3543,7 @@ class FireStoreUtils {
         return <VendorCategoryModel>[];
       }
     }));
-    final fetched = results.expand((r) => r).toList();
+    final fetched = [...fromBunny, ...results.expand((r) => r)];
 
     // Seed the same session cache newVendorProductsScreen checks *before*
     // calling this (productCategoryById, constants.dart) so a second vendor
@@ -3541,6 +3574,21 @@ class FireStoreUtils {
   }
 
   Future<VendorCategoryModel?> getVendorCategoryByCategoryId(String vendorCategoryID) async {
+    // 2026-09-26: Bunny category list first (usually already on the phone),
+    // same as getVendorCategoriesByIds; the document read below is now only
+    // a fallback (e.g. a category not in this section's published mirror).
+    final sectionId = sectionConstantModel?.id;
+    if (sectionId != null && sectionId.isNotEmpty && vendorCategoryID.isNotEmpty) {
+      final mirrored = await fetchCategoriesFromBunny(sectionId);
+      if (mirrored != null) {
+        for (final c in mirrored) {
+          if (c.id == vendorCategoryID) {
+            debugPrint('[getVendorCategoryByCategoryId] $vendorCategoryID from Bunny - 0 Firestore reads');
+            return c;
+          }
+        }
+      }
+    }
     DocumentSnapshot<Map<String, dynamic>> documentReference = await firestore.collection(CATEGORIES).doc(vendorCategoryID).getLogged('getVendorCategoryByCategoryId:CATEGORIES');
     if (documentReference.data() != null && documentReference.exists) {
       return VendorCategoryModel.fromJson(documentReference.data()!);
@@ -4565,13 +4613,29 @@ class FireStoreUtils {
     await sendMail(subject: subjectNewString, isAdmin: emailTemplateModel.isSendToAdmin, body: newString, recipients: [MyAppState.currentUser!.email]);
   }
 
+  // 2026-09-26: email templates and notification texts are admin-edited
+  // text that rarely changes, but were re-read on every order placed (device
+  // test: 2 reads / ~2.3 KB per order). Kept on the device for 24 h.
+  static const Duration _messageTextTtl = Duration(hours: 24);
+
   static Future<EmailTemplateModel?> getEmailTemplates(String type) async {
+    final cacheKey = 'email_template_$type';
+    try {
+      final cached = await ConfigRefreshGate.readRaw(cacheKey, _messageTextTtl);
+      if (cached != null) {
+        debugPrint('[ConfigCache] $cacheKey from on-device cache - 0 Firestore reads');
+        return EmailTemplateModel.fromJson(jsonDecode(cached) as Map<String, dynamic>);
+      }
+    } catch (_) {}
     EmailTemplateModel? emailTemplateModel;
     await firestore.collection(emailTemplates).where('type', isEqualTo: type).getLogged('getEmailTemplates:emailTemplates').then((value) {
       if (value.docs.isNotEmpty) {
         emailTemplateModel = EmailTemplateModel.fromJson(value.docs.first.data());
       }
     });
+    if (emailTemplateModel != null) {
+      unawaited(ConfigRefreshGate.writeRaw(cacheKey, jsonEncode(emailTemplateModel!.toJson())));
+    }
     return emailTemplateModel;
   }
 

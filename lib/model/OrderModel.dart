@@ -314,7 +314,11 @@ class OrderModel {
 
   Map<String, dynamic> toJson() {
     return {
-      'address': address == null ? null : this.address!.toJson(),
+      // 2026-09-26: omitted (not null) when there's no address (Dining /
+      // Takeaway). Vendor Web/App builds before today parsed a null
+      // address as a crash and silently dropped the whole order - a
+      // missing key they already handle. Same data either way.
+      if (address != null) 'address': this.address!.toJson(),
       'author': _authorSnapshot(author),
       'authorID': authorID,
       'payment_method': payment_method,

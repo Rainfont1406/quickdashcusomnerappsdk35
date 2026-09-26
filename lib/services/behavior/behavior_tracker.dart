@@ -66,7 +66,18 @@ class BehaviorTracker {
   // in this file. A no-op call when the queue is already empty (see
   // _flush()'s own early-return), so an idle app with nothing tracked costs
   // nothing extra.
-  static const Duration _periodicFlushInterval = Duration(minutes: 10);
+  // 2026-09-26: 10 -> 30 min, plus a minimum gap between flushes (below).
+  // Each flush writes several documents (a raw batch doc + summaries +
+  // engagement docs), so fewer, fuller flushes = far fewer billed writes for
+  // exactly the same events (the queue is persisted on the device).
+  static const Duration _periodicFlushInterval = Duration(minutes: 30);
+  static const Duration _minFlushGap = Duration(minutes: 2);
+  static DateTime? _lastFlushAt;
+
+  /// Background / reconnect / periodic flushes are skipped if one ran less
+  /// than [_minFlushGap] ago; the queue-full (threshold) flush is not.
+  static bool _flushedRecently() =>
+      _lastFlushAt != null && DateTime.now().difference(_lastFlushAt!) < _minFlushGap;
   static Timer? _periodicFlushTimer;
 
   // Category preference weighting (2026-07-22, revised same day) - an
@@ -294,7 +305,7 @@ class BehaviorTracker {
     // once here rather than per-login.
     _periodicFlushTimer?.cancel();
     _periodicFlushTimer = Timer.periodic(_periodicFlushInterval, (_) {
-      if (_queue.isNotEmpty) {
+      if (_queue.isNotEmpty && !_flushedRecently()) {
         // ignore: unawaited_futures
         _flush();
       }
@@ -345,14 +356,14 @@ class BehaviorTracker {
   /// Wired from main.dart's didChangeAppLifecycleState for
   /// paused/inactive/detached.
   static void onAppBackgrounded() {
-    if (_queue.isEmpty) return;
+    if (_queue.isEmpty || _flushedRecently()) return;
     // ignore: unawaited_futures
     _flush();
   }
 
   /// Wired from connectivity_gate.dart's offline->online transition.
   static void onReconnected() {
-    if (_queue.isEmpty) return;
+    if (_queue.isEmpty || _flushedRecently()) return;
     // ignore: unawaited_futures
     _flush();
   }
@@ -1004,6 +1015,7 @@ class BehaviorTracker {
       }
 
       await writeBatch.commit();
+      _lastFlushAt = DateTime.now();
 
       // Only clear on confirmed success - on any failure above, the queue
       // (memory + persisted) is left exactly as it was, so the next trigger

@@ -571,7 +571,14 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
       // process lifetime (unlike ContainerScreen's own observer, which is
       // torn down and recreated on every re-navigation), so this is the
       // correct home for this hook.
-      BehaviorTracker.onAppBackgrounded();
+      // 2026-09-26: flush on paused/detached only. `inactive` fires on every
+      // notification-shade pull / app switcher / call and always comes right
+      // before `paused`, so flushing on it too doubled the flushes (device
+      // test: ~24 billed writes in 22 min of browsing, 6 batch docs in one
+      // second). Queued events are persisted on the device, so none are lost.
+      if (state != AppLifecycleState.inactive) {
+        BehaviorTracker.onAppBackgrounded();
+      }
     }
   }
 }
@@ -835,6 +842,20 @@ class OnBoardingState extends State<OnBoarding> {
   // own critical fetches a clear head start.
   static const _kProfileRefreshDelay = Duration(seconds: 8);
 
+  // 2026-09-26: the startup write of the user doc (fcmToken +
+  // lastOnlineTimestamp) used to run on EVERY app open. Each one cost a
+  // write, triggered normalizeUserPhoneOnWrite, and made every listener on
+  // the user doc re-download it (the one billed read of a cold start).
+  // lastOnlineTimestamp has no live reader (only a one-time backfill used
+  // it), so it's now refreshed at most every 12 h; a changed push token is
+  // still written immediately. Decided on the server copy BEFORE the
+  // in-memory user is updated. Field kept (additive-only rule).
+  static const _kLastOnlineRefresh = Duration(hours: 12);
+  static bool _startupUserWriteNeeded(User serverUser, String? freshToken) {
+    if ((freshToken ?? '') != serverUser.fcmToken) return true;
+    return DateTime.now().difference(serverUser.lastOnlineTimestamp.toDate()) > _kLastOnlineRefresh;
+  }
+
   Future<void> _refreshUserProfileInBackground(String uid) async {
     await Future.delayed(_kProfileRefreshDelay);
     try {
@@ -848,11 +869,16 @@ class OnBoardingState extends State<OnBoarding> {
         unawaited(_clearCachedUserProfile(uid));
         return;
       }
+      final needsWrite = _startupUserWriteNeeded(user, fcmToken);
       user.fcmToken = fcmToken ?? '';
-      user.lastOnlineTimestamp = Timestamp.now();
+      if (needsWrite) user.lastOnlineTimestamp = Timestamp.now();
       MyAppState.currentUser = user;
       unawaited(_cacheUserProfile(user));
-      unawaited(FireStoreUtils.updateCurrentUser(user));
+      if (needsWrite) {
+        unawaited(FireStoreUtils.updateCurrentUser(user));
+      } else {
+        debugPrint('[STARTUP-PERF] user doc unchanged (same token, last write < 12 h) - write skipped');
+      }
     } catch (e) {
       debugPrint('[STARTUP-PERF] _refreshUserProfileInBackground failed: $e');
     }
@@ -939,20 +965,24 @@ class OnBoardingState extends State<OnBoarding> {
           final authBranchFcmToken = authBranchResults[1] as String?;
           if (user != null && user.role == USER_ROLE_CUSTOMER) {
             if (user.active) {
+              final needsWrite = _startupUserWriteNeeded(user, authBranchFcmToken);
               user.active = true;
               user.role = USER_ROLE_CUSTOMER;
               user.fcmToken = authBranchFcmToken ?? '';
               // Every prior write site for lastOnlineTimestamp only fired on
               // sign-out, so it never reflected actual usage — bump it here,
-              // on every app open, alongside the fcmToken refresh below.
-              user.lastOnlineTimestamp = Timestamp.now();
+              // alongside the fcmToken refresh below (at most every 12 h -
+              // see _startupUserWriteNeeded).
+              if (needsWrite) user.lastOnlineTimestamp = Timestamp.now();
               // Fire-and-forget: this only persists the refreshed
               // fcmToken/active flag to Firestore. MyAppState.currentUser is
               // set from this in-memory `user` object immediately below, so
               // navigation doesn't need to wait on the write's round trip
               // (measured at ~1.5s, the single biggest chunk of this path).
-              unawaited(_timedStep('updateCurrentUser (auth branch, active)',
-                  () => FireStoreUtils.updateCurrentUser(user)));
+              if (needsWrite) {
+                unawaited(_timedStep('updateCurrentUser (auth branch, active)',
+                    () => FireStoreUtils.updateCurrentUser(user)));
+              }
               unawaited(_cacheUserProfile(user));
               await _navigateWithUser(user);
             } else {
@@ -1008,12 +1038,15 @@ class OnBoardingState extends State<OnBoarding> {
             User? user = msg91BranchResults[0] as User?;
             final msg91BranchFcmToken = msg91BranchResults[1] as String?;
             if (user != null && user.role == USER_ROLE_CUSTOMER && user.active) {
+              final needsWrite = _startupUserWriteNeeded(user, msg91BranchFcmToken);
               user.fcmToken = msg91BranchFcmToken ?? '';
-              user.lastOnlineTimestamp = Timestamp.now();
+              if (needsWrite) user.lastOnlineTimestamp = Timestamp.now();
               // Fire-and-forget — see the identical comment in the auth
               // branch above.
-              unawaited(_timedStep('updateCurrentUser (msg91 branch)',
-                  () => FireStoreUtils.updateCurrentUser(user)));
+              if (needsWrite) {
+                unawaited(_timedStep('updateCurrentUser (msg91 branch)',
+                    () => FireStoreUtils.updateCurrentUser(user)));
+              }
               unawaited(_cacheUserProfile(user));
               await _navigateWithUser(user);
             } else {

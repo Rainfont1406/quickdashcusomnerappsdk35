@@ -1926,6 +1926,10 @@ class _HomeScreenState extends State<HomeScreen> {
   List<StoryModel> allStories = [];
   bool _storiesLoaded = false;
   Set<String> _viewedTodayIds = {};
+  // 2026-09-26: session-wide memo for _loadViewedTodayIds (static so it
+  // survives HomeScreen being rebuilt on every Home visit).
+  static String? _viewedTodayFetchedFor;
+  static Set<String> _viewedTodayFromServer = {};
 
   static String get _viewedTodayKey =>
       'viewed_stories_${DateFormat('yyyy-MM-dd').format(DateTime.now())}';
@@ -2139,11 +2143,17 @@ class _HomeScreenState extends State<HomeScreen> {
     debugPrint(
         '[HOME-PERF] Future.wait([getStory, _loadViewedTodayIds]) START — '
         '${_homeInitStopwatch.elapsedMilliseconds}ms since initState');
-    await Future.wait([
-      _timedStep('getData -> getStory', () => FireStoreUtils().getStory())
-          .then((value) { allStories = value; }),
-      _timedStep('getData -> _loadViewedTodayIds', () => _loadViewedTodayIds()),
-    ]);
+    // 2026-09-26: the "viewed today" check only orders stories (unwatched
+    // first), so it's pointless with no stories - but it ran on EVERY Home
+    // visit anyway (device test: 15 Home visits = 15 empty story_views
+    // queries, each billing the 1-read minimum, with no stories live). Now it
+    // runs only when there are stories, and at most once per day per app
+    // session (views on this phone are recorded locally as they happen).
+    await _timedStep('getData -> getStory', () => FireStoreUtils().getStory())
+        .then((value) { allStories = value; });
+    if (allStories.isNotEmpty) {
+      await _timedStep('getData -> _loadViewedTodayIds', () => _loadViewedTodayIds());
+    }
     debugPrint(
         '[HOME-PERF] Future.wait([getStory, _loadViewedTodayIds]) END — elapsed '
         '${storiesStopwatch.elapsedMilliseconds}ms');
@@ -2171,6 +2181,12 @@ class _HomeScreenState extends State<HomeScreen> {
     final now = DateTime.now();
     final dateKey =
         '${now.year}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}';
+    // Once per (user, day) per app session - see _loadStories.
+    final fetchKey = '$userID|$dateKey';
+    if (_viewedTodayFetchedFor == fetchKey) {
+      _viewedTodayIds = {..._viewedTodayIds, ..._viewedTodayFromServer};
+      return;
+    }
     try {
       final snap = await FirebaseFirestore.instance
           .collection('story_views')
@@ -2183,6 +2199,8 @@ class _HomeScreenState extends State<HomeScreen> {
           .toSet();
       // Merge with whatever SharedPreferences already loaded — don't wipe local cache.
       _viewedTodayIds = {..._viewedTodayIds, ...fromFirestore};
+      _viewedTodayFetchedFor = fetchKey;
+      _viewedTodayFromServer = fromFirestore;
     } catch (_) {
       // Non-fatal — sort degrades to viewCount/discount/rating/distance order.
     }
