@@ -81,6 +81,7 @@ class HomeScreenState extends State<OrderTrackingScreen> {
   }
 
   late Stream<OrderModel?> ordersFuture;
+  StreamSubscription<OrderModel?>? _orderSub;
   OrderModel? currentOrder;
 
   late Stream<User> driverStream;
@@ -88,7 +89,8 @@ class HomeScreenState extends State<OrderTrackingScreen> {
 
   getCurrentOrder() async {
     ordersFuture = FireStoreUtils().getOrderByID(widget.orderModel.id.toString());
-    ordersFuture.listen((event) {
+    // 2026-09-26: kept and cancelled in dispose() (was never cancelled).
+    _orderSub = ordersFuture.listen((event) {
       if (event == null) return;
       setState(() {
         currentOrder = event;
@@ -115,6 +117,7 @@ class HomeScreenState extends State<OrderTrackingScreen> {
 
   @override
   void dispose() {
+    _orderSub?.cancel();
     _mapController?.dispose();
     try { fireStoreUtils.driverStreamSub.cancel(); } catch (_) {}
     super.dispose();

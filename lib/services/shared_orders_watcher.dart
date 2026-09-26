@@ -88,6 +88,39 @@ class SharedOrdersWatcher {
   // every resume (restartIfActive) - resumes are covered by the listeners.
   static String? _historyFilledFor;
 
+  // 2026-09-26: raw documents of the orders this watcher is ALREADY
+  // listening to live, shared with SharedOrderDetailWatcher. Without this,
+  // Order Details opened its own document listener on an order the live
+  // query was already watching - two server targets on one order, so every
+  // status change was billed twice while the details screen was open.
+  static final Map<String, DocumentSnapshot<Map<String, dynamic>>> _rawById = {};
+  static final Map<String, StreamController<DocumentSnapshot<Map<String, dynamic>>>> _docStreams = {};
+  static Set<String> _liveQueryIds = {};
+  static Set<String> _activeByIdIds = {};
+
+  /// True when [orderId] is currently delivered by this watcher's live
+  /// listeners (the live query, or the by-id listener for older live orders).
+  static bool isWatchingLive(String orderId) =>
+      (_newSub != null && _liveQueryIds.contains(orderId)) ||
+      (_activeSubs.isNotEmpty && _activeByIdIds.contains(orderId));
+
+  /// True when [orderId] is known here and finished (it can't change any more).
+  static bool isKnownFinished(String orderId) {
+    final order = _ordersById[orderId];
+    return order != null && isOrderSafeToCachePermanently(order);
+  }
+
+  /// Latest raw document for [orderId] from the live listeners, then every
+  /// update (including its final state when it finishes - see
+  /// _captureFinished). Costs no extra reads.
+  static Stream<DocumentSnapshot<Map<String, dynamic>>> liveDocStream(String orderId) async* {
+    final controller = _docStreams.putIfAbsent(
+        orderId, () => StreamController<DocumentSnapshot<Map<String, dynamic>>>.broadcast());
+    final latest = _rawById[orderId];
+    if (latest != null) yield latest;
+    yield* controller.stream;
+  }
+
   static StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _newSub;
   static final List<StreamSubscription<QuerySnapshot<Map<String, dynamic>>>>
       _activeSubs = [];
@@ -245,6 +278,9 @@ class SharedOrdersWatcher {
       } catch (e) {
         debugPrint('[SharedOrdersWatcher] $label parse error ${doc.id} $e');
       }
+      _rawById[doc.id] = doc;
+      final c = _docStreams[doc.id];
+      if (c != null && !c.isClosed) c.add(doc);
     }
   }
 
@@ -389,6 +425,7 @@ class SharedOrdersWatcher {
           unawaited(_captureFinished(uid, id));
         }
       }
+      _liveQueryIds = snap.docs.map((d) => d.id).toSet();
       _mergeDocs(snap.docs, 'live');
       _emit();
       _promoteSettledOrders(uid);
@@ -416,6 +453,7 @@ class SharedOrdersWatcher {
         .where((o) => !isOrderSafeToCachePermanently(o) && (since == null || o.createdAt.compareTo(since) <= 0))
         .map((o) => o.id)
         .toList();
+    _activeByIdIds = activeIds.toSet();
     for (final chunk in _chunk(activeIds, 30)) {
       final sub = _orders
           .where(FieldPath.documentId, whereIn: chunk)
@@ -504,6 +542,13 @@ class SharedOrdersWatcher {
     _ordersById.clear();
     _latest = null;
     _historyFilledFor = null;
+    _rawById.clear();
+    for (final c in _docStreams.values) {
+      c.close();
+    }
+    _docStreams.clear();
+    _liveQueryIds = {};
+    _activeByIdIds = {};
     _olderCursor = null;
     _olderFloor = null;
     hasOlder.value = false;

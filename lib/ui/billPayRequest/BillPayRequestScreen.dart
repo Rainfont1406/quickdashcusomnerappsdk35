@@ -36,6 +36,10 @@ class _BillPayRequestScreenState extends State<BillPayRequestScreen> {
   bool _expiryWriteAttempted = false;
   bool _isResponding = false;
 
+  // 2026-09-26: created once - build() runs every second for the countdown
+  // and used to create a new order stream (and listener) on each tick.
+  late final Stream<OrderModel?> _orderStream = _fireStoreUtils.getOrderByID(widget.orderId);
+
   @override
   void initState() {
     super.initState();
@@ -396,7 +400,7 @@ class _BillPayRequestScreenState extends State<BillPayRequestScreen> {
         ),
       ),
       body: StreamBuilder<OrderModel?>(
-        stream: _fireStoreUtils.getOrderByID(widget.orderId),
+        stream: _orderStream,
         builder: (context, snapshot) {
           if (!snapshot.hasData) {
             return const Center(child: CircularProgressIndicator.adaptive());

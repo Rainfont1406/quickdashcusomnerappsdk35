@@ -60,6 +60,7 @@ import 'package:emartconsumer/services/behavior/behavior_event_types.dart';
 import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/behavior_summary_cache.dart';
 import 'package:emartconsumer/services/helper.dart';
+import 'package:emartconsumer/services/shared_order_detail_watcher.dart';
 import 'package:emartconsumer/services/recommendation/behavior_summary_snapshot.dart';
 import 'package:emartconsumer/services/recommendation/recommendation_config.dart';
 import 'package:emartconsumer/services/recommendation/recommendation_engine.dart';
@@ -653,15 +654,33 @@ class FireStoreUtils {
   late StreamController<OrderModel> ordersByIdStreamController;
   late StreamSubscription ordersByIdStreamSub;
 
-  Stream<OrderModel?> getOrderByID(String inProgressOrderID) async* {
-    ordersByIdStreamController = StreamController();
-    ordersByIdStreamSub = firestore.collection(ORDERS).doc(inProgressOrderID).snapshotsLogged('getOrderByID:ORDERS').listen((onData) async {
-      if (onData.data() != null) {
-        OrderModel? orderModel = OrderModel.fromJson(onData.data()!);
-        ordersByIdStreamController.sink.add(orderModel);
-      }
-    });
-    yield* ordersByIdStreamController.stream;
+  // 2026-09-26: now backed by SharedOrderDetailWatcher (shared per order,
+  // reuses the Orders live listener, released when the caller cancels).
+  // Before: every call opened a new document listener that was never
+  // cancelled - BillPayRequestScreen rebuilds every second for its
+  // countdown and called this from build(), so it leaked one listener per
+  // second; the order tracking screen leaked one per visit.
+  Stream<OrderModel?> getOrderByID(String inProgressOrderID) {
+    StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? sub;
+    late final StreamController<OrderModel?> controller;
+    controller = StreamController<OrderModel?>(
+      onListen: () {
+        sub = SharedOrderDetailWatcher.watch(inProgressOrderID).listen((snap) {
+          final data = snap.data();
+          if (data == null) return;
+          try {
+            controller.add(OrderModel.fromJson(data));
+          } catch (e) {
+            debugPrint('getOrderByID parse error $inProgressOrderID $e');
+          }
+        }, onError: controller.addError);
+      },
+      onCancel: () async {
+        await sub?.cancel();
+        SharedOrderDetailWatcher.unwatch(inProgressOrderID);
+      },
+    );
+    return controller.stream;
   }
 
   // Customer declines a pending vendor-initiated Bill Pay request.

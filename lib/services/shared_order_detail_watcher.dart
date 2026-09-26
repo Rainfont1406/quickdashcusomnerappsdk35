@@ -4,6 +4,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/firestore_instrumentation.dart';
+import 'package:emartconsumer/services/shared_orders_watcher.dart';
 import 'package:flutter/foundation.dart';
 
 /// Shared, per-order-id live listener for OrderDetailsScreen (2026-09-15).
@@ -100,6 +101,7 @@ class _WatchEntry {
   Timer? teardownTimer;
 
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _sub;
+  bool _started = false;
   final StreamController<DocumentSnapshot<Map<String, dynamic>>> _controller =
       StreamController<DocumentSnapshot<Map<String, dynamic>>>.broadcast();
   DocumentSnapshot<Map<String, dynamic>>? _latest;
@@ -110,18 +112,59 @@ class _WatchEntry {
     yield* _controller.stream;
   }
 
+  void _onSnap(DocumentSnapshot<Map<String, dynamic>> snap) {
+    _latest = snap;
+    if (!_controller.isClosed) _controller.add(snap);
+  }
+
+  // 2026-09-26: pick the cheapest source that is still correct.
+  //  1. The Orders live listener already watches this order -> reuse its
+  //     documents (no second server listener, so a status change is billed
+  //     once, not twice).
+  //  2. The order is finished -> it can't change: read it once, from the
+  //     device first (0 reads when the SDK has it), no listener at all.
+  //  3. Otherwise (e.g. opened straight from checkout before Orders was
+  //     ever opened) -> its own live listener, as before.
   void ensureStarted() {
-    if (_sub != null) return;
+    if (_started) return;
+    _started = true;
+    if (SharedOrdersWatcher.isWatchingLive(orderId)) {
+      debugPrint('[SharedOrderDetailWatcher] $orderId: reusing the Orders live listener - no second listener, 0 extra reads');
+      _sub = SharedOrdersWatcher.liveDocStream(orderId).listen(_onSnap, onError: (Object e) {
+        debugPrint('[SharedOrderDetailWatcher] $orderId shared stream error: $e');
+      });
+      return;
+    }
+    if (SharedOrdersWatcher.isKnownFinished(orderId)) {
+      unawaited(_loadFinishedOnce());
+      return;
+    }
     _sub = FireStoreUtils.firestore
         .collection(ORDERS)
         .doc(orderId)
         .snapshotsLogged('SharedOrderDetailWatcher:ORDERS')
-        .listen((snap) {
-      _latest = snap;
-      if (!_controller.isClosed) _controller.add(snap);
-    }, onError: (Object e) {
+        .listen(_onSnap, onError: (Object e) {
       debugPrint('[SharedOrderDetailWatcher] $orderId stream error: $e');
     });
+  }
+
+  Future<void> _loadFinishedOnce() async {
+    final ref = FireStoreUtils.firestore.collection(ORDERS).doc(orderId);
+    try {
+      final cached = await ref.get(const GetOptions(source: Source.cache));
+      if (cached.exists) {
+        debugPrint('[SharedOrderDetailWatcher] $orderId: finished order from on-device cache - 0 Firestore reads');
+        _onSnap(cached);
+        return;
+      }
+    } catch (_) {
+      // not in the SDK's local cache - fall through to one server read
+    }
+    try {
+      _onSnap(await ref.getLogged('SharedOrderDetailWatcher:finished-once'));
+    } catch (e) {
+      debugPrint('[SharedOrderDetailWatcher] $orderId one-shot read failed: $e');
+    }
   }
 
   void dispose() {
