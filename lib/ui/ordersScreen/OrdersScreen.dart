@@ -145,23 +145,62 @@ class _OrdersScreenState extends State<OrdersScreen> {
 
               if (visibleOrders.isEmpty) {
                 return Center(
-                  child: showEmptyState('No Previous Orders'.tr(), context),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      showEmptyState('No Previous Orders'.tr(), context),
+                      _buildShowOlder(),
+                    ],
+                  ),
                 );
               } else {
+                // 2026-09-26: + 1 footer row for "Show older orders" - older
+                // finished orders are loaded on demand (see
+                // SharedOrdersWatcher.loadOlder), not up front.
                 return ListView.builder(
-                  itemCount: visibleOrders.length,
+                  itemCount: visibleOrders.length + 1,
                   padding: EdgeInsets.symmetric(
                     horizontal: AppSpacing.spacing4,
                     vertical: AppSpacing.spacing4,
                   ),
-                  itemBuilder: (context, index) =>
-                      buildOrderItem(visibleOrders[index]),
+                  itemBuilder: (context, index) => index == visibleOrders.length
+                      ? _buildShowOlder()
+                      : buildOrderItem(visibleOrders[index]),
                 );
               }
             },
           );
         },
       ),
+    );
+  }
+
+  Widget _buildShowOlder() {
+    return ValueListenableBuilder<bool>(
+      valueListenable: SharedOrdersWatcher.hasOlder,
+      builder: (context, hasOlder, _) {
+        if (!hasOlder) return const SizedBox(height: 8);
+        return ValueListenableBuilder<bool>(
+          valueListenable: SharedOrdersWatcher.loadingOlder,
+          builder: (context, loading, _) => Padding(
+            padding: EdgeInsets.symmetric(vertical: AppSpacing.spacing4),
+            child: Center(
+              child: loading
+                  ? CircularProgressIndicator.adaptive(
+                      valueColor: AlwaysStoppedAnimation(AppThemeData.primary500),
+                    )
+                  : TextButton.icon(
+                      onPressed: SharedOrdersWatcher.loadOlder,
+                      icon: Icon(Icons.history_rounded, color: AppThemeData.primary500),
+                      label: Text(
+                        'Show older orders'.tr(),
+                        style: TextStyle(color: AppThemeData.primary500, fontWeight: FontWeight.w600),
+                      ),
+                    ),
+            ),
+          ),
+        );
+      },
     );
   }
 

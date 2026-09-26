@@ -38,12 +38,21 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// use for the cached user profile, duplicated locally here (small, stable,
 /// not worth a shared-utility refactor of main.dart for two call sites).
 Object? _orderCacheEncodeFallback(Object? obj) {
-  if (obj is Timestamp) return {'__ts': obj.millisecondsSinceEpoch};
+  // 2026-09-26: full precision (seconds + nanoseconds). Firestore
+  // timestamps are microsecond-precise; saving milliseconds made the newest
+  // cached order look slightly older than it is, so the "newer than the
+  // newest cached" query matched it again and re-downloaded it on every
+  // start (seen on the device: 13 KB each cold start). Old '__ts' (millis)
+  // entries are still read; they heal the next time that order is cached.
+  if (obj is Timestamp) return {'__ts_s': obj.seconds, '__ts_ns': obj.nanoseconds};
   if (obj is GeoPoint) return {'__geo_lat': obj.latitude, '__geo_lng': obj.longitude};
   throw UnsupportedError('Cannot cache order field of type ${obj.runtimeType}');
 }
 
 Object? _orderCacheDecodeReviver(Object? key, Object? value) {
+  if (value is Map && value.containsKey('__ts_s')) {
+    return Timestamp(value['__ts_s'] as int, value['__ts_ns'] as int);
+  }
   if (value is Map && value.containsKey('__ts')) {
     return Timestamp.fromMillisecondsSinceEpoch(value['__ts'] as int);
   }
@@ -68,7 +77,37 @@ const Set<String> kTerminalOrderStatuses = {
   BILLPAY_STATUS_DECLINED,
   BILLPAY_STATUS_EXPIRED,
   BILLPAY_STATUS_CANCELLED,
+  // 2026-09-26: both spellings exist in production data (3 orders say plain
+  // 'Cancelled') and neither can move anywhere afterwards - without them
+  // such an order was never cached and stayed live-watched forever.
+  ORDER_STATUS_CANCELLED,
+  'Cancelled',
 };
+
+// 2026-09-26: the statuses an order can be in while it is still live. The
+// live listener (SharedOrdersWatcher) watches ONLY these, with no count
+// limit, so a finished order drops out of it and is served from the device
+// cache from then on. Anything not listed here is still picked up by the
+// start-up "newest not yet cached" query, so an unknown status can only be
+// late, never lost.
+const List<String> kLiveOrderStatuses = [
+  ORDER_STATUS_PLACED,
+  ORDER_STATUS_ACCEPTED,
+  ORDER_STATUS_ONGOING,
+  ORDER_STATUS_ASSIGNED,
+  ORDER_STATUS_DRIVER_PENDING,
+  ORDER_STATUS_DRIVER_ACCEPTED,
+  ORDER_STATUS_DRIVER_REJECTED,
+  ORDER_STATUS_SHIPPED,
+  ORDER_STATUS_IN_TRANSIT,
+  BILLPAY_STATUS_PENDING_APPROVAL,
+];
+
+// 2026-09-26: an order that isn't finished but hasn't changed for this long
+// is not live - measured in production: 53 of 54 "in progress" orders were
+// over 7 days old (abandoned test orders), only 1 was recent. Real orders
+// finish within hours. Also the live listener's createdAt window.
+const Duration kLiveOrderWindow = Duration(days: 3);
 
 // Age margin required on TOP OF a terminal status before an order is
 // considered safe to cache permanently and drop from live watching - not
@@ -82,10 +121,17 @@ const Set<String> kTerminalOrderStatuses = {
 // while still needing a customer's live attention.
 const Duration kOrderSettledAgeMargin = Duration(hours: 24);
 
+// 2026-09-26: a finished order is cached as soon as it finishes (was: 24 h
+// after), so the next Orders visit serves it from the device instead of the
+// server. The 24 h margin above is no longer applied: a correction to a
+// finished order is still caught by the weekly check, and an order that
+// goes back to a live status re-enters the live listener by itself.
+// A never-finished order that hasn't changed for kLiveOrderWindow is
+// treated as history too (stuck test orders), so it stops being watched.
 bool isOrderSafeToCachePermanently(OrderModel order) {
-  if (!kTerminalOrderStatuses.contains(order.status)) return false;
+  if (kTerminalOrderStatuses.contains(order.status)) return true;
   final referenceTime = (order.statusUpdatedAt ?? order.createdAt).toDate();
-  return DateTime.now().difference(referenceTime) > kOrderSettledAgeMargin;
+  return DateTime.now().difference(referenceTime) > kLiveOrderWindow;
 }
 
 const String _cachedOrdersKeyPrefix = 'cached_settled_orders_';

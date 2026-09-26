@@ -66,6 +66,28 @@ class SharedOrdersWatcher {
   // request's live-response window - see the class doc comment.
   static const int kTopWatchWindow = 25;
 
+  // 2026-09-26 (customer rule): finished orders come from the device cache;
+  // live orders come from Firestore with NO count limit; when the cache is
+  // empty (cleared data / reinstall / new phone) only the recent
+  // kFirstHistoryPage finished orders are fetched, and "Show older orders"
+  // pages kOlderPage more at a time. Also the weekly check's size.
+  static const int kFirstHistoryPage = 5;
+  static const int kOlderPage = 10;
+
+  /// Whether "Show older orders" can still find anything, and whether a page
+  /// is loading - read by OrdersScreen's list footer.
+  static final ValueNotifier<bool> hasOlder = ValueNotifier<bool>(false);
+  static final ValueNotifier<bool> loadingOlder = ValueNotifier<bool>(false);
+
+  // "Show older" pages from _olderCursor downwards. While a gap between the
+  // newest cached order and the start-up fetch is still being filled,
+  // _olderFloor stops the page at the newest cached order.
+  static Timestamp? _olderCursor;
+  static Timestamp? _olderFloor;
+  // The start-up history fetch runs once per uid per app process, not on
+  // every resume (restartIfActive) - resumes are covered by the listeners.
+  static String? _historyFilledFor;
+
   static StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _newSub;
   static final List<StreamSubscription<QuerySnapshot<Map<String, dynamic>>>>
       _activeSubs = [];
@@ -193,84 +215,213 @@ class SharedOrdersWatcher {
 
     _attachLiveQueries(uid);
 
-    // Skip the reconciliation check entirely when there was no local cache
-    // to seed from (a fresh install, or storage was cleared) - the "new
-    // orders" query above already had no cutoff in that case, so it just
-    // fetched the top kTopWatchWindow fresh from the server itself. Running
-    // the reconciliation pass too would re-fetch that exact same window a
-    // second time for nothing (confirmed while reasoning through the
-    // cleared-storage case: this would otherwise cost up to 2x
-    // kTopWatchWindow reads on a cleared-storage user's first reopen,
-    // instead of kTopWatchWindow once).
+    if (_historyFilledFor != uid) {
+      _historyFilledFor = uid;
+      await _fillRecentHistory(uid, cached);
+    }
+
+    // Skip the reconciliation check when there was no local cache to seed
+    // from (fresh install / cleared storage) - _fillRecentHistory just
+    // fetched the recent orders from the server, re-checking them again
+    // would pay for the same documents twice.
     if (cached.isNotEmpty && await fullReconciliationDue(uid)) {
       unawaited(_runFullReconciliation(uid));
     }
   }
 
-  static void _attachLiveQueries(String uid) {
-    final sectionId = sectionConstantModel!.id;
-    final base = FireStoreUtils.firestore
-        .collection(ORDERS)
-        .where('authorID', isEqualTo: uid)
-        .where('section_id', isEqualTo: sectionId);
+  static CollectionReference<Map<String, dynamic>> get _orders =>
+      FireStoreUtils.firestore.collection(ORDERS);
 
-    // Fixed at attach time, not recomputed per-event - any order created
-    // later in this same session still satisfies createdAt > cutoff for the
-    // life of this listener, so it never needs to be torn down and
-    // recreated mid-session just because a new order arrived.
-    Timestamp? cutoff;
-    for (final order in _ordersById.values) {
-      if (cutoff == null || order.createdAt.compareTo(cutoff) > 0) {
-        cutoff = order.createdAt;
+  static Query<Map<String, dynamic>> _mine(String uid) => _orders
+      .where('authorID', isEqualTo: uid)
+      .where('section_id', isEqualTo: sectionConstantModel!.id);
+
+  static void _mergeDocs(Iterable<DocumentSnapshot<Map<String, dynamic>>> docs, String label) {
+    for (final doc in docs) {
+      final data = doc.data();
+      if (data == null) continue;
+      try {
+        _ordersById[doc.id] = OrderModel.fromJson(data);
+      } catch (e) {
+        debugPrint('[SharedOrdersWatcher] $label parse error ${doc.id} $e');
       }
     }
+  }
 
-    // "What's new" - attaches genuinely empty (zero read cost) whenever
-    // nothing has actually happened since the last known order, which is
-    // the common case on a routine reopen.
-    final newQuery = (cutoff != null
-            ? base.where('createdAt', isGreaterThan: cutoff)
-            : base)
-        .orderBy('createdAt', descending: true)
-        .limit(kTopWatchWindow);
-    _newSub = newQuery.snapshotsLogged('SharedOrdersWatcher:new').listen((snap) {
-      for (final doc in snap.docs) {
-        try {
-          _ordersById[doc.id] = OrderModel.fromJson(doc.data());
-        } catch (e) {
-          debugPrint('[SharedOrdersWatcher] new-order parse error ${doc.id} $e');
-        }
+  static Timestamp? _oldestKnown() {
+    Timestamp? oldest;
+    for (final o in _ordersById.values) {
+      if (oldest == null || o.createdAt.compareTo(oldest) < 0) oldest = o.createdAt;
+    }
+    return oldest;
+  }
+
+  /// Start-up history fetch (once per uid per process): the newest
+  /// kFirstHistoryPage orders created after the newest cached one (or the
+  /// newest kFirstHistoryPage overall when the cache is empty). Catches
+  /// orders that finished while the Orders screen wasn't being watched -
+  /// they are cached straight away, so the next visit costs 1 read (an
+  /// empty query) and no data. Any status, so an order in a status missing
+  /// from kLiveOrderStatuses can only be late, never lost.
+  static Future<void> _fillRecentHistory(String uid, List<OrderModel> cached) async {
+    Timestamp? newestCached;
+    for (final o in cached) {
+      if (newestCached == null || o.createdAt.compareTo(newestCached) > 0) newestCached = o.createdAt;
+    }
+    try {
+      var q = _mine(uid);
+      // Exclusive: an inclusive bound would re-download the newest cached
+      // order on every start. createdAt is millisecond-precise, so one
+      // customer never has two orders on the same instant.
+      if (newestCached != null) q = q.where('createdAt', isGreaterThan: newestCached);
+      final snap = await q
+          .orderBy('createdAt', descending: true)
+          .limit(kFirstHistoryPage)
+          .getLogged('SharedOrdersWatcher:recent');
+      if (_activeUid != uid) return;
+      _mergeDocs(snap.docs, 'recent');
+      final gapMayContinue = newestCached != null && snap.docs.length == kFirstHistoryPage;
+      if (gapMayContinue) {
+        _olderCursor = snap.docs.last.data()['createdAt'] as Timestamp?;
+        _olderFloor = newestCached;
+      } else {
+        _olderCursor = _oldestKnown();
+        _olderFloor = null;
+      }
+      // Empty cache and fewer than a page back = this is everything.
+      hasOlder.value = !(cached.isEmpty && snap.docs.length < kFirstHistoryPage) && _olderCursor != null;
+      _emit();
+      _promoteSettledOrders(uid);
+      _watchActiveOutsideWindow(uid);
+    } catch (e) {
+      debugPrint('[SharedOrdersWatcher] recent history fetch failed: $e');
+      _olderCursor = _oldestKnown();
+      hasOlder.value = _olderCursor != null;
+      _emit();
+    }
+  }
+
+  /// "Show older orders": the next kOlderPage finished orders below what's
+  /// on screen. Pages that load are cached like any other finished order
+  /// (the device cache keeps the newest kMaxCachedSettledOrders).
+  static Future<void> loadOlder() async {
+    final uid = _activeUid;
+    final cursor = _olderCursor;
+    if (uid == null || cursor == null || loadingOlder.value || sectionConstantModel == null) return;
+    loadingOlder.value = true;
+    try {
+      var q = _mine(uid);
+      final floor = _olderFloor;
+      if (floor != null) q = q.where('createdAt', isGreaterThan: floor);
+      // startAfter (not createdAt < cursor) so orders sharing the cursor's
+      // exact timestamp are never skipped - verified on production data.
+      final snap = await q
+          .orderBy('createdAt', descending: true)
+          .startAfter([cursor])
+          .limit(kOlderPage)
+          .getLogged('SharedOrdersWatcher:older');
+      if (_activeUid != uid) return;
+      _mergeDocs(snap.docs, 'older');
+      if (snap.docs.length == kOlderPage) {
+        _olderCursor = snap.docs.last.data()['createdAt'] as Timestamp?;
+      } else if (floor != null) {
+        // Gap filled - carry on below the cached orders next time.
+        _olderFloor = null;
+        _olderCursor = _oldestKnown();
+      } else {
+        hasOlder.value = false;
       }
       _emit();
       _promoteSettledOrders(uid);
+    } catch (e) {
+      debugPrint('[SharedOrdersWatcher] load older failed: $e');
+    } finally {
+      loadingOlder.value = false;
+    }
+  }
+
+  /// A live order just left the live listener (it finished): read its final
+  /// state once and cache it, so every later visit serves it from the device.
+  static Future<void> _captureFinished(String uid, String orderId) async {
+    try {
+      final doc = await _orders.doc(orderId).getLogged('SharedOrdersWatcher:finished');
+      if (_activeUid != uid || !doc.exists) return;
+      _mergeDocs([doc], 'finished');
+      _emit();
+      _promoteSettledOrders(uid);
+    } catch (e) {
+      debugPrint('[SharedOrdersWatcher] finished-order fetch failed $orderId: $e');
+    }
+  }
+
+  static void _attachLiveQueries(String uid) {
+    // 2026-09-26: live = still in progress (kLiveOrderStatuses) and created
+    // within kLiveOrderWindow - NO count limit, every live order shows.
+    // Finished orders are not in this query at all: they come from the
+    // device cache. When a live order finishes it drops out of the query
+    // (a "removed" change) and _captureFinished caches its final state.
+    // Replaces the old "newer than the newest cached, limit 25" query.
+    final liveSince = Timestamp.fromDate(DateTime.now().subtract(kLiveOrderWindow));
+    _liveSince = liveSince;
+    // Orders this process already knew as live (only after a resume) - any
+    // that finished while the app was in the background won't show up as a
+    // "removed" change on this brand-new listener, so the first snapshot
+    // checks for them explicitly.
+    final knownLive = _ordersById.values
+        .where((o) => !isOrderSafeToCachePermanently(o) && o.createdAt.compareTo(liveSince) > 0)
+        .map((o) => o.id)
+        .toSet();
+    var firstSnapshot = true;
+    final liveQuery = _mine(uid)
+        .where('status', whereIn: kLiveOrderStatuses)
+        .where('createdAt', isGreaterThan: liveSince)
+        .orderBy('createdAt', descending: true);
+    _newSub = liveQuery.snapshotsLogged('SharedOrdersWatcher:live').listen((snap) {
+      for (final change in snap.docChanges) {
+        if (change.type == DocumentChangeType.removed) {
+          unawaited(_captureFinished(uid, change.doc.id));
+        }
+      }
+      if (firstSnapshot) {
+        firstSnapshot = false;
+        final stillLive = snap.docs.map((d) => d.id).toSet();
+        for (final id in knownLive.difference(stillLive)) {
+          unawaited(_captureFinished(uid, id));
+        }
+      }
+      _mergeDocs(snap.docs, 'live');
+      _emit();
+      _promoteSettledOrders(uid);
     }, onError: (Object e) {
-      debugPrint('[SharedOrdersWatcher] new-order stream error: $e');
+      debugPrint('[SharedOrdersWatcher] live-order stream error: $e');
       _emit();
     });
 
-    // Explicit re-check of every currently-known order not yet proven safe
-    // to stop watching - typically 0-3 documents for a normal customer.
-    // Queried by document id directly (no authorID/section_id filter
-    // needed - these ids only ever came from this same account's own
-    // cache/live results in the first place, and Firestore rules already
-    // gate read access on authorID regardless of query shape).
+    _watchActiveOutsideWindow(uid);
+  }
+
+  static Timestamp? _liveSince;
+
+  /// Known orders that aren't finished but were created before the live
+  /// window (e.g. an order scheduled days ahead) - watched by id so they
+  /// still update live. Usually none. Orders inside the window are already
+  /// covered by the live query, so nothing is watched twice.
+  static void _watchActiveOutsideWindow(String uid) {
+    for (final sub in _activeSubs) {
+      sub.cancel();
+    }
+    _activeSubs.clear();
+    final since = _liveSince;
     final activeIds = _ordersById.values
-        .where((o) => !isOrderSafeToCachePermanently(o))
+        .where((o) => !isOrderSafeToCachePermanently(o) && (since == null || o.createdAt.compareTo(since) <= 0))
         .map((o) => o.id)
         .toList();
     for (final chunk in _chunk(activeIds, 30)) {
-      final sub = FireStoreUtils.firestore
-          .collection(ORDERS)
+      final sub = _orders
           .where(FieldPath.documentId, whereIn: chunk)
           .snapshotsLogged('SharedOrdersWatcher:active')
           .listen((snap) {
-        for (final doc in snap.docs) {
-          try {
-            _ordersById[doc.id] = OrderModel.fromJson(doc.data());
-          } catch (e) {
-            debugPrint('[SharedOrdersWatcher] active-order parse error ${doc.id} $e');
-          }
-        }
+        _mergeDocs(snap.docs, 'active-order');
         _emit();
         _promoteSettledOrders(uid);
       }, onError: (Object e) {
@@ -301,7 +452,7 @@ class SharedOrdersWatcher {
           .where('authorID', isEqualTo: uid)
           .where('section_id', isEqualTo: sectionId)
           .orderBy('createdAt', descending: true)
-          .limit(kTopWatchWindow)
+          .limit(kFirstHistoryPage)
           .getLogged('SharedOrdersWatcher:reconciliation', const GetOptions(source: Source.server));
       if (_activeUid != uid) return; // account switched while this awaited
       for (final doc in snap.docs) {
@@ -352,6 +503,11 @@ class SharedOrdersWatcher {
     _activeUid = null;
     _ordersById.clear();
     _latest = null;
+    _historyFilledFor = null;
+    _olderCursor = null;
+    _olderFloor = null;
+    hasOlder.value = false;
+    loadingOlder.value = false;
     if (uid != null) unawaited(clearCachedOrders(uid));
   }
 }

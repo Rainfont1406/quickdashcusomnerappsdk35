@@ -23,6 +23,7 @@ import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/services/notification_service.dart';
 import 'package:emartconsumer/services/shared_orders_watcher.dart';
+import 'package:emartconsumer/services/booking_history_watcher.dart';
 import 'package:emartconsumer/services/shared_vendors_watcher.dart';
 import 'package:emartconsumer/services/wallet_history_cache.dart';
 import 'package:emartconsumer/ui/container/ContainerScreen.dart';
@@ -470,6 +471,8 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
           // above - one account's cached behavior history must never be
           // readable under a different account signed in on the same device.
           unawaited(BehaviorSummaryCache.clear(uid));
+          // 2026-09-26: cached dine-in booking history, same reasoning.
+          unawaited(BookingHistoryWatcher.clear(uid));
         }
       }
     });
