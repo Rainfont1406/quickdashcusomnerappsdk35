@@ -6,6 +6,7 @@ import '../model/ProductModel.dart';
 // cachedBunnyGet + the shared per-mirror TTL constants live here so both
 // mirror files route through one cached-GET implementation.
 import 'bunny_reference_mirror.dart';
+import 'config_refresh_gate.dart';
 
 // Bunny Pull Zone hostname product-list mirrors are served from - the same
 // CDN host every other Bunny-hosted asset in this app already resolves to
@@ -33,6 +34,36 @@ const _kBunnyCdnHost = 'cdn.quickdash.co.in';
 /// (Laravel). Different scope from fetchVendorProductsFromBunny above (one
 /// vendor's menu vs. the whole section's catalog). Returns null on any
 /// failure so the caller falls back to the original Firestore query.
+/// 2026-09-26: products already on the phone from earlier Bunny fetches (the
+/// section menu used by Search, a restaurant's own menu) - ANY age, no
+/// network at all. For stable per-product facts (veg / non-veg, digital)
+/// where a stale copy is still correct. Empty map when nothing is cached.
+Future<Map<String, ProductModel>> onDeviceProductsById({String? sectionId, String? vendorId}) async {
+  final out = <String, ProductModel>{};
+  void addAll(String? body, String listKey) {
+    if (body == null) return;
+    try {
+      final decoded = jsonDecode(body) as Map<String, dynamic>;
+      for (final item in (decoded[listKey] as List<dynamic>? ?? const [])) {
+        final map = Map<String, dynamic>.from(item as Map);
+        final createdAtMillis = map['createdAt'];
+        if (createdAtMillis is int) map['createdAt'] = Timestamp.fromMillisecondsSinceEpoch(createdAtMillis);
+        try {
+          final p = ProductModel.fromJson(map);
+          if (p.id.isNotEmpty) out[p.id] = p;
+        } catch (_) {}
+      }
+    } catch (_) {}
+  }
+  if (vendorId != null && vendorId.isNotEmpty) {
+    addAll(await ConfigRefreshGate.readRawIgnoringTtl('bunny_vendorProducts_$vendorId'), 'products');
+  }
+  if (sectionId != null && sectionId.isNotEmpty) {
+    addAll(await ConfigRefreshGate.readRawIgnoringTtl('bunny_sectionProducts_$sectionId'), 'items');
+  }
+  return out;
+}
+
 Future<List<ProductModel>?> fetchSectionProductsFromBunny(String sectionId) async {
   try {
     // Matches _productsCacheTtl (10 min) - this blob carries PRICES, so its

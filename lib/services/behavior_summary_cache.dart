@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -31,6 +32,30 @@ class BehaviorSummaryCache {
   BehaviorSummaryCache._();
 
   static const String _prefsKeyPrefix = 'cached_behavior_summary_v1_';
+
+  // 2026-09-26: the summary docs contain Firestore Timestamps, which plain
+  // jsonEncode rejects - every write failed ("Converting object to an
+  // encodable object failed: Instance of 'Timestamp'", seen on the device),
+  // so nothing was ever cached and all months were re-read after every cold
+  // start / 10-minute memory expiry. Encoded with full precision and turned
+  // back into Timestamps on read, so consumers see the same types as from
+  // Firestore.
+  static Object? _encodeFallback(Object? v) {
+    if (v is Timestamp) return {'__ts_s': v.seconds, '__ts_ns': v.nanoseconds};
+    if (v is DateTime) return {'__ts_s': v.millisecondsSinceEpoch ~/ 1000, '__ts_ns': (v.millisecondsSinceEpoch % 1000) * 1000000};
+    if (v is GeoPoint) return {'__geo_lat': v.latitude, '__geo_lng': v.longitude};
+    throw UnsupportedError('Cannot cache behavior summary value of type ${v.runtimeType}');
+  }
+
+  static Object? _decodeReviver(Object? key, Object? value) {
+    if (value is Map && value.containsKey('__ts_s')) {
+      return Timestamp(value['__ts_s'] as int, value['__ts_ns'] as int);
+    }
+    if (value is Map && value.containsKey('__geo_lat')) {
+      return GeoPoint((value['__geo_lat'] as num).toDouble(), (value['__geo_lng'] as num).toDouble());
+    }
+    return value;
+  }
   static String _prefsKey(String userId) => '$_prefsKeyPrefix$userId';
 
   /// A month is safe to trust from cache forever once it is no longer the
@@ -46,7 +71,7 @@ class BehaviorSummaryCache {
       final sp = await SharedPreferences.getInstance();
       final raw = sp.getString(_prefsKey(userId));
       if (raw == null || raw.isEmpty) return (<String, Map<String, dynamic>>{}, <String, Map<String, dynamic>>{});
-      final decoded = jsonDecode(raw);
+      final decoded = jsonDecode(raw, reviver: _decodeReviver);
       if (decoded is! Map) return (<String, Map<String, dynamic>>{}, <String, Map<String, dynamic>>{});
       final core = _decodeMonths(decoded['core']);
       final search = _decodeMonths(decoded['search']);
@@ -84,7 +109,7 @@ class BehaviorSummaryCache {
       final mergedSearch = {...existingSearch, ...freshSearch};
       final sp = await SharedPreferences.getInstance();
       await sp.setString(_prefsKey(userId),
-          jsonEncode({'core': mergedCore, 'search': mergedSearch}));
+          jsonEncode({'core': mergedCore, 'search': mergedSearch}, toEncodable: _encodeFallback));
     } catch (e) {
       debugPrint('[BehaviorSummaryCache] write failed (non-fatal): $e');
     }

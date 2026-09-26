@@ -88,6 +88,7 @@ import 'bunny_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'config_refresh_gate.dart';
+import 'shared_vendors_watcher.dart';
 import 'firestore_instrumentation.dart';
 import 'story_cache.dart';
 
@@ -3588,6 +3589,29 @@ class FireStoreUtils {
     } catch (e) {
       debugPrint('getVendorLive($vendorID) failed, falling back to full doc: $e');
       return null;
+    }
+  }
+
+  /// 2026-09-26: the vendor the Cart needs, without the full vendor document
+  /// (9.8 KB for Rath, re-read on every cart open). Static details (title,
+  /// location, delivery charge, working hours, special-discount schedule)
+  /// come from the Bunny vendor list already on the phone; the live
+  /// switches (open/closed, delivery/takeaway/dining on/off, approval) come
+  /// from vendor_live (~0.2-0.45 KB). Falls back to the full document when
+  /// the vendor isn't in the on-phone list or vendor_live can't be read.
+  /// The server re-verifies prices and availability when the order is placed.
+  Future<VendorModel> getVendorForCart(String vendorID) async {
+    final listVendor = SharedVendorsWatcher.findInCurrentList(vendorID);
+    if (listVendor == null) return getVendorByVendorID(vendorID);
+    try {
+      final doc = await firestore.collection('vendor_live').doc(vendorID).getLogged('getVendorForCart:vendor_live');
+      final live = doc.data();
+      if (!doc.exists || live == null) return getVendorByVendorID(vendorID);
+      final merged = <String, dynamic>{...listVendor.toJson(), ...live};
+      return VendorModel.fromJson(merged);
+    } catch (e) {
+      debugPrint('getVendorForCart($vendorID) fell back to the full vendor doc: $e');
+      return getVendorByVendorID(vendorID);
     }
   }
 

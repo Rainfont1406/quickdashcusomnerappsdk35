@@ -996,7 +996,7 @@ class _CartScreenState extends State<CartScreen> {
           ));
         } catch (_) {}
       }
-      vendorModel = await _fireStoreUtils.getVendorByVendorID(order.vendorID);
+      vendorModel = await _fireStoreUtils.getVendorForCart(order.vendorID);
       vendorID = order.vendorID;
       // getTaxData() already ran unconditionally from initState — no need
       // to call it again here; it's also now internally guarded against
@@ -1027,7 +1027,7 @@ class _CartScreenState extends State<CartScreen> {
     try {
       await Future.wait([
         _fireStoreUtils
-            .getVendorByVendorID(cartProducts.first.vendorID)
+            .getVendorForCart(cartProducts.first.vendorID)
             .then((value) {
           vendorModel = value;
           vendorID = cartProducts.first.vendorID;

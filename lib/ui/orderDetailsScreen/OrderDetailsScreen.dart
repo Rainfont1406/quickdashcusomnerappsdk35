@@ -1,6 +1,7 @@
 ﻿// ignore_for_file: deprecated_member_use
 
 import 'dart:async';
+import 'package:emartconsumer/services/bunny_product_mirror.dart';
 import 'dart:convert';
 import 'dart:developer';
 import 'dart:io';
@@ -142,9 +143,28 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
 
   Future<void> _runPendingProductBatch() async {
     _productBatchScheduled = false;
-    final ids = _pendingProductBatchIds.toList();
+    final allIds = _pendingProductBatchIds.toList();
     _pendingProductBatchIds = {};
-    if (ids.isEmpty) return;
+    if (allIds.isEmpty) return;
+    // 2026-09-26: these lookups only feed the veg/non-veg badge and the
+    // digital-product flag - stable facts - so the menu data already on the
+    // phone (any age) answers them with 0 Firestore reads. Only ids missing
+    // there are fetched (was: every order open read its products, 1.3 KB).
+    try {
+      final onDevice = await onDeviceProductsById(
+          sectionId: sectionConstantModel?.id, vendorId: orderModel?.vendorID);
+      for (final id in allIds) {
+        final p = onDevice[id];
+        if (p == null) continue;
+        _productByIdResolved[id] = p;
+        _productByIdPending.remove(id)?.complete(p);
+      }
+    } catch (_) {}
+    final ids = allIds.where((id) => !_productByIdResolved.containsKey(id)).toList();
+    if (ids.isEmpty) {
+      debugPrint('[OrderDetailsScreen] ${allIds.length} product(s) from on-device menu data - 0 Firestore reads');
+      return;
+    }
     try {
       final products = await FireStoreUtils().fetchProductsByIds(ids);
       for (final id in ids) {
