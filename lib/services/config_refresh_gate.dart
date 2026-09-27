@@ -171,6 +171,49 @@ class ConfigRefreshGate {
     }
   }
 
+  /// The stored body regardless of age, without the stale-fallback log line
+  /// (used to decide whether a "has it changed?" request can be sent).
+  static Future<String?> peekRaw(String key) async {
+    try {
+      final sp = await SharedPreferences.getInstance();
+      final raw = sp.getString('$_rawPrefix$key');
+      return (raw == null || raw.isEmpty) ? null : raw;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static const String _validatorPrefix = 'config_http_validator_';
+
+  /// ETag / Last-Modified of the stored body (2026-09-27), so the next
+  /// refresh can ask the CDN "changed since?" and get an empty 304 back
+  /// instead of the whole file when nothing changed.
+  static Future<Map<String, String>> readValidators(String key) async {
+    try {
+      final sp = await SharedPreferences.getInstance();
+      final raw = sp.getString('$_validatorPrefix$key');
+      if (raw == null) return const {};
+      return Map<String, String>.from(jsonDecode(raw) as Map);
+    } catch (_) {
+      return const {};
+    }
+  }
+
+  static Future<void> writeValidators(String key, String? etag, String? lastModified) async {
+    try {
+      final sp = await SharedPreferences.getInstance();
+      final v = <String, String>{
+        if (etag != null && etag.isNotEmpty) 'etag': etag,
+        if (lastModified != null && lastModified.isNotEmpty) 'lastModified': lastModified,
+      };
+      if (v.isEmpty) {
+        await sp.remove('$_validatorPrefix$key');
+      } else {
+        await sp.setString('$_validatorPrefix$key', jsonEncode(v));
+      }
+    } catch (_) {}
+  }
+
   static Future<void> writeRaw(String key, String body) async {
     try {
       final sp = await SharedPreferences.getInstance();

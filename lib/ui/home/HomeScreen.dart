@@ -433,6 +433,28 @@ class _HomeScreenState extends State<HomeScreen> {
 
     vendors = ranked.map((r) => r.vendor).toList();
     _offerBadgeByVendorId = newBadges;
+    _lastOpenVendorIds = {for (final v in vendors) if (v.isAcceptingOrders) v.id};
+  }
+
+  // 2026-09-27: open/closed on Home comes from working hours + the live
+  // on/off switch, but was only worked out when something redrew the screen
+  // - a restaurant opening at 15:00 stayed "closed" (sorted last) on a Home
+  // left open past 15:00. Once a minute this re-checks the hours already on
+  // the phone and re-sorts only if some restaurant actually flipped.
+  // No network, no Firestore.
+  Timer? _openStateTimer;
+  Set<String> _lastOpenVendorIds = {};
+
+  void _recheckOpenStates() {
+    if (!mounted || vendors.isEmpty) return;
+    final openNow = {for (final v in vendors) if (v.isAcceptingOrders) v.id};
+    if (openNow.length == _lastOpenVendorIds.length &&
+        openNow.containsAll(_lastOpenVendorIds)) {
+      return;
+    }
+    debugPrint('[HomeScreen] open/closed changed by working hours - re-sorting');
+    _sortRestaurants();
+    setState(() {});
   }
 
   void _tryHideSkeleton() {
@@ -637,6 +659,8 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
+    _openStateTimer = Timer.periodic(
+        const Duration(minutes: 1), (_) => _recheckOpenStates());
     _homeInitStopwatch.start();
     debugPrint(
         '[HOME-PERF] HomeScreen.initState START at ${DateTime.now().toIso8601String()}');
@@ -1805,7 +1829,10 @@ class _HomeScreenState extends State<HomeScreen> {
   // newVendorProductsScreen's _onManualRefresh, 90 seconds here since Home's
   // refresh is heavier (reopens the 9-geo-listener vendor query) than a
   // single vendor's product list.
-  DateTime? _lastManualRefreshAt;
+  // 2026-09-27: static - HomeScreen is rebuilt every time the customer comes
+  // back to Home from the drawer, which reset an instance field and let a
+  // pull right after "Orders -> Home" skip the 90 s limit.
+  static DateTime? _lastManualRefreshAt;
   static const Duration _manualRefreshCooldown = Duration(seconds: 90);
 
   // 2026-09-06 (revised): only the vendor list is forced genuinely fresh on
@@ -1863,6 +1890,7 @@ class _HomeScreenState extends State<HomeScreen> {
         sectionConstantModel!.id ?? '',
         MyAppState.selectedPosotion.location!.latitude,
         MyAppState.selectedPosotion.location!.longitude,
+        revalidate: true,
       );
     }
     getData();
@@ -1870,6 +1898,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   void dispose() {
+    _openStateTimer?.cancel();
     _vendorSub?.cancel();
     isDeliveryActiveNotifier.removeListener(_onDeliveryGateChanged);
     deliveryOffMessageNotifier.removeListener(_onDeliveryGateChanged);
@@ -3179,7 +3208,7 @@ class _MenuCarouselState extends State<_MenuCarousel> {
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // AllStore
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-class AllStore extends StatelessWidget {
+class AllStore extends StatefulWidget {
   final List<VendorModel> allStoreList;
   final Map<String, String> offerBadges;
   final bool isDelivery;
@@ -3193,292 +3222,340 @@ class AllStore extends StatelessWidget {
       this.productsByVendor = const {}});
 
   @override
-  Widget build(BuildContext context) {
-    return ListView.builder(
-      shrinkWrap: true,
-      padding: EdgeInsets.zero,
-      scrollDirection: Axis.vertical,
-      physics: const NeverScrollableScrollPhysics(),
-      itemCount: allStoreList.length >= 10 ? 10 : allStoreList.length,
-      addAutomaticKeepAlives: false,
-      addRepaintBoundaries: true,
-      itemBuilder: (BuildContext context, int index) {
-        final VendorModel vendorModel = allStoreList[index];
-        final bool open = vendorModel.isAcceptingOrders;
-        final String rating = calculateReview(
-          reviewCount: vendorModel.reviewsCount.toString(),
-          reviewSum: vendorModel.reviewsSum.toString(),
-        );
-        final int listLen = allStoreList.length >= 10 ? 10 : allStoreList.length;
-        final bool dark = isDarkMode(context);
+  State<AllStore> createState() => _AllStoreState();
+}
 
-        return Padding(
-          key: ValueKey(vendorModel.id),
-          padding: EdgeInsets.only(bottom: index == listLen - 1 ? 90 : 24),
-          child: InkWell(
-            onTap: () {
-              BehaviorTracker.setNextEntrySource('Home');
-              push(context, NewVendorProductsScreen(vendorModel: vendorModel));
-            },
-            borderRadius: BorderRadius.circular(24),
-            child: Container(
-              decoration: BoxDecoration(
-                color: dark ? const Color(0xFF1E1E1E) : Colors.white,
+class _AllStoreState extends State<AllStore> {
+  // 2026-09-27: the list used to stop at 10 cards with no way to see the
+  // rest, while the heading counted all of them ("11 Restaurants Around
+  // You"). Closed restaurants sort last, so a closed one at #11 simply
+  // vanished (seen with Rath). All shown cards are built at once here
+  // (shrinkWrap inside the page scroll) and each downloads its photos, so
+  // the rest come 10 per tap instead of all up front.
+  static const int _pageSize = 10;
+  int _shown = _pageSize;
+
+  @override
+  Widget build(BuildContext context) {
+    final allStoreList = widget.allStoreList;
+    final offerBadges = widget.offerBadges;
+    final isDelivery = widget.isDelivery;
+    final int listLen =
+        allStoreList.length > _shown ? _shown : allStoreList.length;
+    final int remaining = allStoreList.length - listLen;
+    return Column(
+      children: [
+    ListView.builder(
+          shrinkWrap: true,
+          padding: EdgeInsets.zero,
+          scrollDirection: Axis.vertical,
+          physics: const NeverScrollableScrollPhysics(),
+          itemCount: listLen,
+          addAutomaticKeepAlives: false,
+          addRepaintBoundaries: true,
+          itemBuilder: (BuildContext context, int index) {
+            final VendorModel vendorModel = allStoreList[index];
+            final bool open = vendorModel.isAcceptingOrders;
+            final String rating = calculateReview(
+              reviewCount: vendorModel.reviewsCount.toString(),
+              reviewSum: vendorModel.reviewsSum.toString(),
+            );
+            final bool dark = isDarkMode(context);
+
+            return Padding(
+              key: ValueKey(vendorModel.id),
+              padding: EdgeInsets.only(
+                  bottom: index == listLen - 1 && remaining == 0 ? 90 : 24),
+              child: InkWell(
+                onTap: () {
+                  BehaviorTracker.setNextEntrySource('Home');
+                  push(context, NewVendorProductsScreen(vendorModel: vendorModel));
+                },
                 borderRadius: BorderRadius.circular(24),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: dark ? 0.30 : 0.11),
-                    blurRadius: 28,
-                    offset: const Offset(0, 10),
-                  ),
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.05),
-                    blurRadius: 6,
-                    offset: const Offset(0, 2),
-                  ),
-                ],
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // â”€â”€ Cinematic image area â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-                  Stack(
-                    children: [
-                      SizedBox(
-                        height: Responsive.height(24, context),
-                        width: double.infinity,
-                        child: isDelivery
-                            ? _MenuCarousel(
-                                vendorModel: vendorModel,
-                                height: Responsive.height(24, context),
-                                borderRadius: const BorderRadius.only(
-                                  topLeft: Radius.circular(24),
-                                  topRight: Radius.circular(24),
-                                ),
-                                sectionLabel: 'RestaurantList',
-                              )
-                            : _RestaurantCardImage(
-                                vendorModel: vendorModel,
-                                height: Responsive.height(24, context),
-                                borderRadius: const BorderRadius.only(
-                                  topLeft: Radius.circular(24),
-                                  topRight: Radius.circular(24),
-                                ),
-                                sectionLabel: 'RestaurantList',
-                              ),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: dark ? const Color(0xFF1E1E1E) : Colors.white,
+                    borderRadius: BorderRadius.circular(24),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: dark ? 0.30 : 0.11),
+                        blurRadius: 28,
+                        offset: const Offset(0, 10),
                       ),
-                      // Cinematic bottom gradient
-                      Positioned(
-                        left: 0,
-                        right: 0,
-                        bottom: 0,
-                        height: 70,
-                        child: ClipRRect(
-                          borderRadius: const BorderRadius.only(
-                            topLeft: Radius.circular(24),
-                            topRight: Radius.circular(24),
-                          ),
-                          child: DecoratedBox(
-                            decoration: BoxDecoration(
-                              gradient: LinearGradient(
-                                begin: Alignment.topCenter,
-                                end: Alignment.bottomCenter,
-                                colors: [
-                                  Colors.transparent,
-                                  Colors.black.withValues(alpha: 0.40),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ),
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.05),
+                        blurRadius: 6,
+                        offset: const Offset(0, 2),
                       ),
-                      if (!open)
-                        Positioned(
-                          top: 12,
-                          left: 12,
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 8, vertical: 4),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFFFEEEE),
-                              borderRadius: BorderRadius.circular(50),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: const Color(0xFFDC2626)
-                                      .withValues(alpha: 0.25),
-                                  blurRadius: 8,
-                                  offset: const Offset(0, 3),
-                                ),
-                              ],
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Container(
-                                  width: 6,
-                                  height: 6,
-                                  decoration: const BoxDecoration(
-                                    color: Color(0xFFDC2626),
-                                    shape: BoxShape.circle,
-                                  ),
-                                ),
-                                const SizedBox(width: 4),
-                                const Text(
-                                  'Closed',
-                                  style: TextStyle(
-                                    color: Color(0xFFDC2626),
-                                    fontSize: 11,
-                                    height: 1.2,
-                                    fontFamily: AppThemeData.semiBold,
-                                    letterSpacing: 0.1,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      if (offerBadges[vendorModel.id] != null)
-                        Positioned(
-                          top: 12,
-                          right: 12,
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 9, vertical: 5),
-                            decoration: BoxDecoration(
-                              color: AppThemeData.primary500,
-                              borderRadius: BorderRadius.circular(50),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: AppThemeData.primary500
-                                      .withValues(alpha: 0.35),
-                                  blurRadius: 8,
-                                  offset: const Offset(0, 3),
-                                ),
-                              ],
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                const Icon(Icons.local_offer_rounded,
-                                    color: Colors.white, size: 11),
-                                const SizedBox(width: 4),
-                                Text(
-                                  offerBadges[vendorModel.id]!,
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 11,
-                                    height: 1.2,
-                                    fontFamily: AppThemeData.semiBold,
-                                    letterSpacing: 0.1,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
                     ],
                   ),
-                  // â”€â”€ Info section â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            if (open)
-                              Container(
-                                width: 7,
-                                height: 7,
-                                margin: const EdgeInsets.only(right: 7),
-                                decoration: const BoxDecoration(
-                                  color: Color(0xFF16A34A),
-                                  shape: BoxShape.circle,
-                                ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // â”€â”€ Cinematic image area â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                      Stack(
+                        children: [
+                          SizedBox(
+                            height: Responsive.height(24, context),
+                            width: double.infinity,
+                            child: isDelivery
+                                ? _MenuCarousel(
+                                    vendorModel: vendorModel,
+                                    height: Responsive.height(24, context),
+                                    borderRadius: const BorderRadius.only(
+                                      topLeft: Radius.circular(24),
+                                      topRight: Radius.circular(24),
+                                    ),
+                                    sectionLabel: 'RestaurantList',
+                                  )
+                                : _RestaurantCardImage(
+                                    vendorModel: vendorModel,
+                                    height: Responsive.height(24, context),
+                                    borderRadius: const BorderRadius.only(
+                                      topLeft: Radius.circular(24),
+                                      topRight: Radius.circular(24),
+                                    ),
+                                    sectionLabel: 'RestaurantList',
+                                  ),
+                          ),
+                          // Cinematic bottom gradient
+                          Positioned(
+                            left: 0,
+                            right: 0,
+                            bottom: 0,
+                            height: 70,
+                            child: ClipRRect(
+                              borderRadius: const BorderRadius.only(
+                                topLeft: Radius.circular(24),
+                                topRight: Radius.circular(24),
                               ),
-                            Expanded(
-                              child: Text(
-                                vendorModel.title.toString(),
-                                maxLines: 1,
-                                style: TextStyle(
-                                  fontSize: 18,
-                                  fontFamily: AppThemeData.bold,
-                                  color: dark ? Colors.white : const Color(0xFF111111),
-                                  overflow: TextOverflow.ellipsis,
-                                  letterSpacing: -0.3,
+                              child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                  gradient: LinearGradient(
+                                    begin: Alignment.topCenter,
+                                    end: Alignment.bottomCenter,
+                                    colors: [
+                                      Colors.transparent,
+                                      Colors.black.withValues(alpha: 0.40),
+                                    ],
+                                  ),
                                 ),
                               ),
                             ),
-                          ],
-                        ),
-                        const SizedBox(height: 6),
-                        Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 10, vertical: 7),
-                          decoration: BoxDecoration(
-                            color: dark
-                                ? Colors.white.withValues(alpha: 0.08)
-                                : const Color(0xFFEDE8FF),
-                            borderRadius: BorderRadius.circular(14),
                           ),
-                          child: Row(
-                            children: [
-                              const Icon(Icons.location_on_rounded,
-                                  color: Color(0xFF7C3AED), size: 16),
-                              const SizedBox(width: 4),
-                              RoadDistanceText(
-                                vendorLat: vendorModel.latitude,
-                                vendorLon: vendorModel.longitude,
-                                showAwaySuffix: true,
-                                style: const TextStyle(
-                                  fontSize: 13,
-                                  fontFamily: AppThemeData.semiBold,
-                                  color: Color(0xFF7C3AED),
-                                ),
-                              ),
-                              const Spacer(),
-                              Container(
+                          if (!open)
+                            Positioned(
+                              top: 12,
+                              left: 12,
+                              child: Container(
                                 padding: const EdgeInsets.symmetric(
-                                    horizontal: 9, vertical: 4),
+                                    horizontal: 8, vertical: 4),
                                 decoration: BoxDecoration(
-                                  color: const Color(0xFFDCFCE7),
-                                  borderRadius: BorderRadius.circular(20),
-                                  border: Border.all(
-                                      color: const Color(0xFF16A34A)
-                                          .withValues(alpha: 0.35),
-                                      width: 1),
+                                  color: const Color(0xFFFFEEEE),
+                                  borderRadius: BorderRadius.circular(50),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: const Color(0xFFDC2626)
+                                          .withValues(alpha: 0.25),
+                                      blurRadius: 8,
+                                      offset: const Offset(0, 3),
+                                    ),
+                                  ],
                                 ),
                                 child: Row(
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
-                                    const Icon(Icons.star_rounded,
-                                        color: Color(0xFF16A34A), size: 14),
+                                    Container(
+                                      width: 6,
+                                      height: 6,
+                                      decoration: const BoxDecoration(
+                                        color: Color(0xFFDC2626),
+                                        shape: BoxShape.circle,
+                                      ),
+                                    ),
                                     const SizedBox(width: 4),
-                                    Text(
-                                      rating,
-                                      style: const TextStyle(
+                                    const Text(
+                                      'Closed',
+                                      style: TextStyle(
+                                        color: Color(0xFFDC2626),
                                         fontSize: 11,
                                         height: 1.2,
                                         fontFamily: AppThemeData.semiBold,
-                                        color: Color(0xFF15803D),
+                                        letterSpacing: 0.1,
                                       ),
                                     ),
                                   ],
                                 ),
                               ),
-                            ],
-                          ),
+                            ),
+                          if (offerBadges[vendorModel.id] != null)
+                            Positioned(
+                              top: 12,
+                              right: 12,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 9, vertical: 5),
+                                decoration: BoxDecoration(
+                                  color: AppThemeData.primary500,
+                                  borderRadius: BorderRadius.circular(50),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: AppThemeData.primary500
+                                          .withValues(alpha: 0.35),
+                                      blurRadius: 8,
+                                      offset: const Offset(0, 3),
+                                    ),
+                                  ],
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(Icons.local_offer_rounded,
+                                        color: Colors.white, size: 11),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      offerBadges[vendorModel.id]!,
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 11,
+                                        height: 1.2,
+                                        fontFamily: AppThemeData.semiBold,
+                                        letterSpacing: 0.1,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                      // â”€â”€ Info section â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                if (open)
+                                  Container(
+                                    width: 7,
+                                    height: 7,
+                                    margin: const EdgeInsets.only(right: 7),
+                                    decoration: const BoxDecoration(
+                                      color: Color(0xFF16A34A),
+                                      shape: BoxShape.circle,
+                                    ),
+                                  ),
+                                Expanded(
+                                  child: Text(
+                                    vendorModel.title.toString(),
+                                    maxLines: 1,
+                                    style: TextStyle(
+                                      fontSize: 18,
+                                      fontFamily: AppThemeData.bold,
+                                      color: dark ? Colors.white : const Color(0xFF111111),
+                                      overflow: TextOverflow.ellipsis,
+                                      letterSpacing: -0.3,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 6),
+                            Container(
+                              width: double.infinity,
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 10, vertical: 7),
+                              decoration: BoxDecoration(
+                                color: dark
+                                    ? Colors.white.withValues(alpha: 0.08)
+                                    : const Color(0xFFEDE8FF),
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                              child: Row(
+                                children: [
+                                  const Icon(Icons.location_on_rounded,
+                                      color: Color(0xFF7C3AED), size: 16),
+                                  const SizedBox(width: 4),
+                                  RoadDistanceText(
+                                    vendorLat: vendorModel.latitude,
+                                    vendorLon: vendorModel.longitude,
+                                    showAwaySuffix: true,
+                                    style: const TextStyle(
+                                      fontSize: 13,
+                                      fontFamily: AppThemeData.semiBold,
+                                      color: Color(0xFF7C3AED),
+                                    ),
+                                  ),
+                                  const Spacer(),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 9, vertical: 4),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFFDCFCE7),
+                                      borderRadius: BorderRadius.circular(20),
+                                      border: Border.all(
+                                          color: const Color(0xFF16A34A)
+                                              .withValues(alpha: 0.35),
+                                          width: 1),
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        const Icon(Icons.star_rounded,
+                                            color: Color(0xFF16A34A), size: 14),
+                                        const SizedBox(width: 4),
+                                        Text(
+                                          rating,
+                                          style: const TextStyle(
+                                            fontSize: 11,
+                                            height: 1.2,
+                                            fontFamily: AppThemeData.semiBold,
+                                            color: Color(0xFF15803D),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
                         ),
-                      ],
-                    ),
+                      ),
+                    ],
                   ),
-                ],
+                ),
+              ),
+            );
+          },
+        ),
+        if (remaining > 0)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 90),
+            child: SizedBox(
+              width: double.infinity,
+              child: OutlinedButton(
+                onPressed: () => setState(() => _shown += _pageSize),
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  side: BorderSide(color: AppThemeData.primary300),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(24)),
+                ),
+                child: Text(
+                  "${'Show more restaurants'.tr()} ($remaining)",
+                  style: TextStyle(
+                    fontFamily: AppThemeData.semiBold,
+                    fontSize: 16,
+                    color: AppThemeData.primary500,
+                  ),
+                ),
               ),
             ),
           ),
-        );
-      },
+      ],
     );
   }
 }

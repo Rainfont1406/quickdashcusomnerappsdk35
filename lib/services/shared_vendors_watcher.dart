@@ -128,12 +128,21 @@ class SharedVendorsWatcher {
   /// Always stops any previous subscription first. Called directly by
   /// HomeScreen's pull-to-refresh (the one thing that should force a
   /// genuinely fresh check of both the static list and live statuses).
-  static void start(String sectionId, double lat, double lng) {
+  ///
+  /// 2026-09-27: the list first comes from the phone (up to 24 h old), then
+  /// ONE "has it changed on Bunny?" check runs - on the first start of this
+  /// app process (cold start) and when [revalidate] is set (pull-to-refresh).
+  /// Unchanged = empty 304 (~0.9 KB), 0 Firestore; changed = the new list is
+  /// downloaded and shown (e.g. a vendor's new working hours).
+  static void start(String sectionId, double lat, double lng, {bool revalidate = false}) {
     stop();
     if (sectionId.isEmpty) return;
     _activeKey = _keyFor(sectionId, lat, lng);
 
-    _loadBaseVendors(sectionId, lat, lng);
+    final check = revalidate || _checkedThisProcess.add(sectionId);
+    _loadBaseVendors(sectionId, lat, lng).then((_) {
+      if (check) _revalidate(sectionId, lat, lng);
+    });
     _statusSub = FireStoreUtils.firestore
         .collection('vendor_status')
         .doc(sectionId)
@@ -148,6 +157,22 @@ class SharedVendorsWatcher {
     }, onError: (Object e) {
       debugPrint('[SharedVendorsWatcher] status listener error: $e');
     });
+  }
+
+  static final Set<String> _checkedThisProcess = {};
+
+  static Future<void> _revalidate(String sectionId, double lat, double lng) async {
+    final changed = await revalidateVendorListFromBunny(sectionId);
+    if (changed == null) return;
+    if (_activeKey != _keyFor(sectionId, lat, lng)) return; // moved on meanwhile
+    _baseVendors = _withinRadius(changed, lat, lng);
+    _emit();
+  }
+
+  static List<VendorModel> _withinRadius(List<VendorModel> vendors, double lat, double lng) {
+    final radiusKm = sectionConstantModel?.nearByRadius?.toDouble();
+    if (radiusKm == null) return vendors;
+    return vendors.where((v) => _distanceKm(lat, lng, v.latitude, v.longitude) <= radiusKm).toList();
   }
 
   static Future<void> _loadBaseVendors(
@@ -207,15 +232,7 @@ class SharedVendorsWatcher {
       // section doc loads), so if sectionConstantModel itself isn't loaded
       // yet, skip the distance filter entirely rather than guessing a km
       // value that isn't the admin's to begin with.
-      final radiusKm = sectionConstantModel?.nearByRadius?.toDouble();
-      if (radiusKm != null) {
-        vendors = vendors.where((v) {
-          final distanceKm = _distanceKm(lat, lng, v.latitude, v.longitude);
-          return distanceKm <= radiusKm;
-        }).toList();
-      }
-
-      _baseVendors = vendors;
+      _baseVendors = _withinRadius(vendors, lat, lng);
       _emit();
     } catch (e) {
       debugPrint('[SharedVendorsWatcher] base vendor load error: $e');

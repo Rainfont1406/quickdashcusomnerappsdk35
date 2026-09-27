@@ -78,20 +78,95 @@ Future<String?> cachedBunnyGet(String cacheKey, String url, Duration ttl) async 
     return fresh;
   }
   try {
-    final resp =
-        await http.get(Uri.parse(url)).timeout(const Duration(seconds: 8));
-    if (resp.statusCode != 200) {
+    // 2026-09-27: when a copy is already on the phone, ask the CDN "changed
+    // since?" - an unchanged file comes back as an empty 304 (~0.9 KB of
+    // headers, measured) instead of the whole file again (vendor list
+    // 12 KB compressed, categories 40 KB, section menu 98 KB).
+    final stored = await ConfigRefreshGate.peekRaw(cacheKey);
+    final result = await _conditionalBunnyGet(cacheKey, url, stored);
+    if (result.notModified) {
+      await ConfigRefreshGate.markRefreshed(cacheKey);
+      debugPrint('[ConfigCache] $cacheKey unchanged on Bunny CDN (304) - '
+          'kept the on-phone copy, 0 bytes of body downloaded');
+      return stored;
+    }
+    final body = result.body;
+    if (body == null) {
       return ConfigRefreshGate.readRawIgnoringTtl(cacheKey);
     }
-    // ignore: unawaited_futures
-    ConfigRefreshGate.writeRaw(cacheKey, resp.body);
     debugPrint('[ConfigCache] $cacheKey fetched fresh from Bunny CDN and '
-        'cached (${resp.body.length} bytes)');
-    return resp.body;
+        'cached (${body.length} bytes)');
+    return body;
   } catch (_) {
     // Timeout/offline - an expired local copy still beats sending the caller
     // into a billed Firestore query.
     return ConfigRefreshGate.readRawIgnoringTtl(cacheKey);
+  }
+}
+
+class _BunnyGetResult {
+  final bool notModified;
+  final String? body; // new body (already stored), or null on failure
+  const _BunnyGetResult(this.notModified, this.body);
+}
+
+/// Last time each key was actually downloaded in this app process, so a
+/// "has it changed?" check right after a real download is skipped.
+final Map<String, DateTime> _bunnyDownloadedAt = {};
+
+/// One GET, conditional when [stored] exists. A 200 is stored (body +
+/// validators) before returning. Throws on network errors/timeouts.
+Future<_BunnyGetResult> _conditionalBunnyGet(
+    String cacheKey, String url, String? stored) async {
+  final headers = <String, String>{};
+  if (stored != null) {
+    final v = await ConfigRefreshGate.readValidators(cacheKey);
+    if (v['etag'] != null) headers['If-None-Match'] = v['etag']!;
+    if (v['lastModified'] != null) headers['If-Modified-Since'] = v['lastModified']!;
+  }
+  final resp = await http
+      .get(Uri.parse(url), headers: headers)
+      .timeout(const Duration(seconds: 8));
+  if (resp.statusCode == 304 && stored != null) {
+    return const _BunnyGetResult(true, null);
+  }
+  if (resp.statusCode != 200) return const _BunnyGetResult(false, null);
+  await ConfigRefreshGate.writeRaw(cacheKey, resp.body);
+  await ConfigRefreshGate.writeValidators(
+      cacheKey, resp.headers['etag'], resp.headers['last-modified']);
+  _bunnyDownloadedAt[cacheKey] = DateTime.now();
+  return _BunnyGetResult(false, resp.body);
+}
+
+/// 2026-09-27: "show the phone's copy, then check" - asks the CDN whether
+/// [url] changed since the copy on the phone, regardless of its TTL.
+/// Returns the NEW body only when it really changed (the caller then
+/// re-renders); null when unchanged (304), identical, nothing stored yet,
+/// just downloaded, or on any failure (the phone's copy stays in use).
+Future<String?> revalidateBunnyIfChanged(String cacheKey, String url) async {
+  try {
+    final last = _bunnyDownloadedAt[cacheKey];
+    if (last != null && DateTime.now().difference(last) < const Duration(seconds: 60)) {
+      return null;
+    }
+    final stored = await ConfigRefreshGate.peekRaw(cacheKey);
+    if (stored == null) return null; // the normal load path downloads it
+    final result = await _conditionalBunnyGet(cacheKey, url, stored);
+    if (result.notModified) {
+      await ConfigRefreshGate.markRefreshed(cacheKey);
+      debugPrint('[ConfigCache] $cacheKey revalidated: unchanged (304) - 0 bytes of body');
+      return null;
+    }
+    final body = result.body;
+    if (body == null || body == stored) {
+      debugPrint('[ConfigCache] $cacheKey revalidated: no change');
+      return null;
+    }
+    debugPrint('[ConfigCache] $cacheKey revalidated: CHANGED on Bunny - '
+        'downloaded ${body.length} bytes');
+    return body;
+  } catch (_) {
+    return null;
   }
 }
 
@@ -186,7 +261,28 @@ Future<List<VendorModel>?> fetchVendorListFromBunny(String sectionId) async {
         'https://$_kBunnyCdnHost/vendor-lists/$sectionId.json',
         kBunnyReferenceTtl);
     if (body == null) return null;
+    return _parseVendorList(body);
+  } catch (_) {
+    return null;
+  }
+}
 
+/// 2026-09-27: the vendor list only when it changed on Bunny since the copy
+/// on the phone (e.g. a vendor's new working hours) - null when unchanged.
+/// Used on cold start and pull-to-refresh after the phone's copy is shown.
+Future<List<VendorModel>?> revalidateVendorListFromBunny(String sectionId) async {
+  final body = await revalidateBunnyIfChanged('bunny_vendorList_$sectionId',
+      'https://$_kBunnyCdnHost/vendor-lists/$sectionId.json');
+  if (body == null) return null;
+  try {
+    return _parseVendorList(body);
+  } catch (_) {
+    return null;
+  }
+}
+
+List<VendorModel>? _parseVendorList(String body) {
+  {
     final decoded = jsonDecode(body) as Map<String, dynamic>;
     final rawItems = decoded['items'] as List<dynamic>?;
     if (rawItems == null) return null;
@@ -228,8 +324,6 @@ Future<List<VendorModel>?> fetchVendorListFromBunny(String sectionId) async {
       }
     }
     return vendors;
-  } catch (_) {
-    return null;
   }
 }
 
