@@ -325,6 +325,9 @@ class FireStoreUtils {
   static DateTime? _storyCachedAt;
   static const Duration _storyCacheTtl = Duration(minutes: 10);
 
+  static const Duration _storyProbeInterval = Duration(minutes: 15);
+  static String _storyProbeGateKey(String sectionId) => 'storyProbe_$sectionId';
+
   static void clearStoryCache() {
     _storyCache = null;
     _storyCachedAt = null;
@@ -348,6 +351,19 @@ class FireStoreUtils {
         final fullRefreshDue = !await ConfigRefreshGate.isFresh(
             StoryCache.gateKey(sectionId), StoryCache.fullRefreshInterval);
         if (!fullRefreshDue && !StoryCache.needsServerVerify(cached)) {
+          // 2026-09-28: the new-story probe below ran on every cold start
+          // (1 billed read each). Skip it when it (or a full fetch) already
+          // ran in the last 15 minutes - a new story shows up at most 15
+          // minutes late. The 6-hour full refresh and the view-package
+          // check above still apply first.
+          if (await ConfigRefreshGate.isFresh(
+              _storyProbeGateKey(sectionId), _storyProbeInterval)) {
+            _storyCache = cached;
+            _storyCachedAt = now;
+            debugPrint('[StoryCache] ${cached.length} stories served from '
+                'on-device cache (checked < 15 min ago) - 0 Firestore reads');
+            return cached;
+          }
           // Cheap change-detection: ask only for stories NEWER than everything
           // we already hold, capped at 1 document. Returns empty on the common
           // path, which Firestore bills as its 1-read minimum - so a launch
@@ -357,6 +373,8 @@ class FireStoreUtils {
           // time-based expiry factors are computable from the cached fields.
           final hasNew = await _hasNewStoriesSince(sectionId, cached);
           if (!hasNew) {
+            // ignore: unawaited_futures
+            ConfigRefreshGate.markRefreshed(_storyProbeGateKey(sectionId));
             _storyCache = cached;
             _storyCachedAt = now;
             debugPrint('[StoryCache] ${cached.length} stories served from '
@@ -391,6 +409,8 @@ class FireStoreUtils {
     // would hide every story for the whole refresh window.
     if (sectionId.isNotEmpty && story.isNotEmpty) {
       await StoryCache.write(sectionId, story);
+      // ignore: unawaited_futures
+      ConfigRefreshGate.markRefreshed(_storyProbeGateKey(sectionId));
     }
     return story;
   }
@@ -493,6 +513,20 @@ class FireStoreUtils {
         now.difference(_attributesCachedAt!) < _referenceDataCacheTtl) {
       return _attributesCache!;
     }
+    // 2026-09-28: persisted 7 days across launches (was memory-only, so
+    // every launch's first product dialog re-read the whole collection).
+    const persistKey = 'vendorAttributes';
+    try {
+      final raw = await ConfigRefreshGate.readRaw(persistKey, const Duration(days: 7));
+      if (raw != null) {
+        final list = (jsonDecode(raw) as List)
+            .map((e) => AttributesModel.fromJson(Map<String, dynamic>.from(e as Map)))
+            .toList();
+        _attributesCache = list;
+        _attributesCachedAt = now;
+        return list;
+      }
+    } catch (_) {}
     List<AttributesModel> attributesList = [];
     QuerySnapshot<Map<String, dynamic>> currencyQuery = await firestore.collection(VENDOR_ATTRIBUTES).getLogged('getAttributes:VENDOR_ATTRIBUTES');
     await Future.forEach(currencyQuery.docs, (QueryDocumentSnapshot<Map<String, dynamic>> document) {
@@ -504,6 +538,13 @@ class FireStoreUtils {
     });
     _attributesCache = attributesList;
     _attributesCachedAt = now;
+    if (attributesList.isNotEmpty) {
+      try {
+        // ignore: unawaited_futures
+        ConfigRefreshGate.writeRaw(persistKey,
+            jsonEncode(attributesList.map((a) => a.toJson()).toList()));
+      } catch (_) {}
+    }
     return attributesList;
   }
 
@@ -796,18 +837,34 @@ class FireStoreUtils {
   static Future<RollingSalesWindow> _fetchRollingSalesWindow(
       String vendorId) async {
     try {
-      final doc = await firestore
-          .collection(VENDORS)
-          .doc(vendorId)
-          .collection('computed')
-          .doc('salesSummary')
-          .getLogged('_fetchRollingSalesWindow:computed');
-      if (!doc.exists) {
+      // 2026-09-28: persisted 1 day per vendor - the summary itself is only
+      // rebuilt by the nightly updateTopProducts job, so re-reading it on
+      // every launch's store visit bought nothing. A missing summary is
+      // cached too (as an empty map).
+      const fields = ['last90Days', 'last7Days', 'productOrders90',
+          'productOrders7', 'totalOrders90', 'totalOrders7'];
+      final persistKey = 'salesSummary_$vendorId';
+      Map<String, dynamic>? data;
+      final raw = await ConfigRefreshGate.readRaw(persistKey, const Duration(days: 1));
+      if (raw != null) {
+        data = Map<String, dynamic>.from(jsonDecode(raw) as Map);
+      } else {
+        final doc = await firestore
+            .collection(VENDORS)
+            .doc(vendorId)
+            .collection('computed')
+            .doc('salesSummary')
+            .getLogged('_fetchRollingSalesWindow:computed');
+        final src = doc.data() ?? const <String, dynamic>{};
+        data = {for (final f in fields) if (src[f] != null) f: src[f]};
+        // ignore: unawaited_futures
+        ConfigRefreshGate.writeRaw(persistKey, jsonEncode(data));
+      }
+      if (data.isEmpty) {
         return const RollingSalesWindow(last90Days: {}, last7Days: {});
       }
-      final data = doc.data()!;
       Map<String, int> toIntMap(String field) {
-        final raw = data[field] as Map<String, dynamic>?;
+        final raw = (data![field] as Map?)?.cast<String, dynamic>();
         if (raw == null) return {};
         return raw.map((k, v) => MapEntry(k, (v as num?)?.toInt() ?? 0));
       }
@@ -897,9 +954,15 @@ class FireStoreUtils {
 
       final (cachedCore, cachedSearch) = await BehaviorSummaryCache.read(uid);
 
+      // 2026-09-28: the current (still-changing) month was re-read on every
+      // launch (2 billed reads). Now at most once a day - recommendations
+      // lag the user's own newest activity by up to a day.
+      final currentFresh = await ConfigRefreshGate.isFresh(
+          'behaviorSummaryCurrent_$uid', const Duration(days: 1));
       bool needsFetch(String month, Map<String, Map<String, dynamic>> cached) =>
-          !BehaviorSummaryCache.isSealed(month, currentYearMonth) ||
-          !cached.containsKey(month);
+          !cached.containsKey(month) ||
+          (!BehaviorSummaryCache.isSealed(month, currentYearMonth) &&
+              !currentFresh);
       final needCoreFetch =
           coreMonths.where((m) => needsFetch(m, cachedCore)).toList();
       final needSearchFetch =
@@ -928,6 +991,10 @@ class FireStoreUtils {
         }));
       }
       await Future.wait(fetches);
+      if (fetches.isNotEmpty) {
+        // ignore: unawaited_futures
+        ConfigRefreshGate.markRefreshed('behaviorSummaryCurrent_$uid');
+      }
 
       // ignore: unawaited_futures
       BehaviorSummaryCache.write(uid,
@@ -1017,59 +1084,80 @@ class FireStoreUtils {
   /// updating). Simpler: no extra stream, no per-screen subscription
   /// lifecycle, no extra rebuild path to maintain for a signal that changes
   /// on the order of "admin edits a business type," not per-session.
+  // 2026-09-28: was two live listeners per app session (2-3 billed reads on
+  // every launch) for data admins change "on the order of edits a business
+  // type". Now a one-time fetch persisted on the device for 7 days - an
+  // admin edit reaches apps within a week, or on reinstall.
+  static const String _businessContextCacheKey = 'businessContext';
+  static const Duration _businessContextTtl = Duration(days: 7);
+
   static void _ensureBusinessContextListeners() {
     if (_businessContextReady != null) return;
     _businessContextReady = Completer<void>();
-    var typeReady = false, cuisineReady = false;
-    void maybeComplete() {
-      if (typeReady && cuisineReady && !_businessContextReady!.isCompleted) {
-        _businessContextReady!.complete();
+    () async {
+      try {
+        final raw = await ConfigRefreshGate.readRaw(
+            _businessContextCacheKey, _businessContextTtl);
+        if (raw != null) {
+          _applyBusinessContext(jsonDecode(raw) as Map<String, dynamic>);
+          debugPrint('[ConfigCache] business context served from on-device '
+              'cache - 0 Firestore reads');
+          return;
+        }
+        final results = await Future.wait([
+          firestore
+              .collection(BUSINESS_CONTEXT_TYPE_PROFILES)
+              .getLogged('_ensureBusinessContextListeners:BUSINESS_CONTEXT_TYPE_PROFILES'),
+          firestore
+              .collection(BUSINESS_CONTEXT_CUISINE_AFFINITY)
+              .getLogged('_ensureBusinessContextListeners:BUSINESS_CONTEXT_CUISINE_AFFINITY'),
+        ]);
+        List<String> ids(dynamic v) =>
+            List<String>.from((v as List?)?.map((e) => e.toString()) ?? const []);
+        final payload = <String, dynamic>{
+          'types': {
+            for (final doc in results[0].docs)
+              doc.id: {
+                'primaryCategoryIds': ids(doc.data()['primaryCategoryIds']),
+                'secondaryCategoryIds': ids(doc.data()['secondaryCategoryIds']),
+                'lowPriorityCategoryIds': ids(doc.data()['lowPriorityCategoryIds']),
+              }
+          },
+          'cuisine': {
+            for (final doc in results[1].docs)
+              doc.id: ids(doc.data()['categoryIds'])
+          },
+        };
+        _applyBusinessContext(payload);
+        // ignore: unawaited_futures
+        ConfigRefreshGate.writeRaw(_businessContextCacheKey, jsonEncode(payload));
+      } catch (_) {
+        // Never throws - an empty map is the same "no evidence yet" no-op as
+        // before; the next launch tries again.
+      } finally {
+        if (!_businessContextReady!.isCompleted) _businessContextReady!.complete();
       }
-    }
+    }();
+  }
 
-    // Fire-and-forget - both listeners are meant to live for the entire app
-    // session with no disposal, same as this app's other global-config
-    // subscriptions, so there's no caller that ever needs the
-    // StreamSubscription object back.
-    firestore
-        .collection(BUSINESS_CONTEXT_TYPE_PROFILES)
-        .snapshotsLogged('_ensureBusinessContextListeners:BUSINESS_CONTEXT_TYPE_PROFILES')
-        .listen((snap) {
-      final map = <String, RestaurantTypeCategoryProfile>{};
-      for (final doc in snap.docs) {
-        final data = doc.data();
-        map[doc.id] = RestaurantTypeCategoryProfile(
+  static void _applyBusinessContext(Map<String, dynamic> payload) {
+    final types = (payload['types'] as Map?) ?? const {};
+    _businessTypeProfiles = {
+      for (final e in types.entries)
+        e.key.toString(): RestaurantTypeCategoryProfile(
           primaryCategoryIds:
-              Set<String>.from(data['primaryCategoryIds'] ?? const []),
+              Set<String>.from((e.value as Map)['primaryCategoryIds'] ?? const []),
           secondaryCategoryIds:
-              Set<String>.from(data['secondaryCategoryIds'] ?? const []),
+              Set<String>.from((e.value as Map)['secondaryCategoryIds'] ?? const []),
           lowPriorityCategoryIds:
-              Set<String>.from(data['lowPriorityCategoryIds'] ?? const []),
-        );
-      }
-      _businessTypeProfiles = map;
-      typeReady = true;
-      maybeComplete();
-    }, onError: (_) {
-      typeReady = true;
-      maybeComplete();
-    });
-
-    firestore
-        .collection(BUSINESS_CONTEXT_CUISINE_AFFINITY)
-        .snapshotsLogged('_ensureBusinessContextListeners:BUSINESS_CONTEXT_CUISINE_AFFINITY')
-        .listen((snap) {
-      final map = <String, Set<String>>{};
-      for (final doc in snap.docs) {
-        map[doc.id] = Set<String>.from(doc.data()['categoryIds'] ?? const []);
-      }
-      _cuisineCategoryAffinity = map;
-      cuisineReady = true;
-      maybeComplete();
-    }, onError: (_) {
-      cuisineReady = true;
-      maybeComplete();
-    });
+              Set<String>.from((e.value as Map)['lowPriorityCategoryIds'] ?? const []),
+        )
+    };
+    final cuisine = (payload['cuisine'] as Map?) ?? const {};
+    _cuisineCategoryAffinity = {
+      for (final e in cuisine.entries)
+        e.key.toString(): Set<String>.from(e.value as List? ?? const [])
+    };
   }
 
   // Recommendation Configuration (2026-07-22) - unlike Business Context

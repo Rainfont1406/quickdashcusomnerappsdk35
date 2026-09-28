@@ -2241,6 +2241,14 @@ class _HomeScreenState extends State<HomeScreen> {
       _viewedTodayIds = {..._viewedTodayIds, ..._viewedTodayFromServer};
       return;
     }
+    // 2026-09-28: across app restarts too - skip the server catch-up if it
+    // ran in the last 15 minutes. Views made on this phone are already in
+    // the local SharedPreferences copy; the server query only adds views
+    // made on another device, which can wait 15 minutes.
+    final gateKey = 'storyViews_$fetchKey';
+    if (await ConfigRefreshGate.isFresh(gateKey, const Duration(minutes: 15))) {
+      return;
+    }
     try {
       final snap = await FirebaseFirestore.instance
           .collection('story_views')
@@ -2255,6 +2263,8 @@ class _HomeScreenState extends State<HomeScreen> {
       _viewedTodayIds = {..._viewedTodayIds, ...fromFirestore};
       _viewedTodayFetchedFor = fetchKey;
       _viewedTodayFromServer = fromFirestore;
+      // ignore: unawaited_futures
+      ConfigRefreshGate.markRefreshed(gateKey);
     } catch (_) {
       // Non-fatal — sort degrades to viewCount/discount/rating/distance order.
     }

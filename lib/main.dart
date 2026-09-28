@@ -102,12 +102,20 @@ void main() async {
   // cold start paid this 1-document read with zero trace in the app's own
   // read-cost log. Switched to getLogged so it's at least visible now; the
   // warm-up behavior itself (result discarded) is unchanged.
+  // 2026-09-28: when signed in, warm up with the users/{uid} read the app
+  // makes on every launch anyway - getCurrentUser() shares its in-flight
+  // future and caches the result, so the later real call costs nothing and
+  // the throwaway globalSettings read (1 billed read per launch) is gone.
+  // Signed out: keep the old throwaway warm-up.
+  final warmUid = auth.FirebaseAuth.instance.currentUser?.uid;
   unawaited(_timedStep(
-          'Firestore warm-up (globalSettings, throwaway)',
-          () => FireStoreUtils.firestore
-              .collection(Setting)
-              .doc('globalSettings')
-              .getLogged('main:warmup-globalSettings'))
+          'Firestore warm-up',
+          () => warmUid != null
+              ? FireStoreUtils.getCurrentUser(warmUid)
+              : FireStoreUtils.firestore
+                  .collection(Setting)
+                  .doc('globalSettings')
+                  .getLogged('main:warmup-globalSettings'))
       .catchError((_) {}));
 
   await EasyLocalization.ensureInitialized();
