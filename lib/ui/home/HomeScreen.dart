@@ -160,6 +160,11 @@ class _HomeScreenState extends State<HomeScreen> {
   void didChangeDependencies() {
     super.didChangeDependencies();
     cartDatabase = Provider.of<CartDatabase>(context);
+    // Runs again whenever Home's page becomes the top page (e.g. back from a
+    // restaurant menu) - re-check the open/closed list if it's over 5 min old.
+    final wasCurrent = _routeIsCurrent;
+    _routeIsCurrent = ModalRoute.of(context)?.isCurrent ?? true;
+    if (_routeIsCurrent && !wasCurrent) _refreshStatusesIfOnScreen();
   }
 
   final fireStoreUtils = FireStoreUtils();
@@ -457,6 +462,21 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {});
   }
 
+  // 2026-09-27 (Option B): the manual open/closed switch now comes from the
+  // small Bunny status file, not a Firestore listener. Only while Home is really
+  // on screen (its page on top, app in the foreground) this asks
+  // SharedVendorsWatcher to re-check Bunny once the 5-minute TTL has passed
+  // (conditional GET: unchanged = empty 304). Anywhere else - another page
+  // pushed on top, app in the background - it makes no request at all.
+  Timer? _statusRefreshTimer;
+  bool _routeIsCurrent = true;
+
+  void _refreshStatusesIfOnScreen() {
+    if (!mounted || !_routeIsCurrent) return;
+    if (WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed) return;
+    SharedVendorsWatcher.refreshIfStale();
+  }
+
   void _tryHideSkeleton() {
     // Decoupled from _bannerReady: the restaurant list is the primary
     // content and shouldn't wait on the above-the-fold banner/categories/
@@ -661,6 +681,10 @@ class _HomeScreenState extends State<HomeScreen> {
     super.initState();
     _openStateTimer = Timer.periodic(
         const Duration(minutes: 1), (_) => _recheckOpenStates());
+    // Ticks are local checks only; a Bunny request happens at most once per
+    // 5 min, and only while Home is on screen (worst case ~5.5 min old).
+    _statusRefreshTimer = Timer.periodic(
+        const Duration(seconds: 30), (_) => _refreshStatusesIfOnScreen());
     _homeInitStopwatch.start();
     debugPrint(
         '[HOME-PERF] HomeScreen.initState START at ${DateTime.now().toIso8601String()}');
@@ -1899,6 +1923,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void dispose() {
     _openStateTimer?.cancel();
+    _statusRefreshTimer?.cancel();
     _vendorSub?.cancel();
     isDeliveryActiveNotifier.removeListener(_onDeliveryGateChanged);
     deliveryOffMessageNotifier.removeListener(_onDeliveryGateChanged);

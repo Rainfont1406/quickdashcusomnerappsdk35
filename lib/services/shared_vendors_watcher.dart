@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:math' as math;
 
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
@@ -31,6 +30,12 @@ import 'package:flutter/foundation.dart';
 ///     patched directly by syncVendorStatusAggregate on every vendor write.
 ///     A single live listener on this one small document replaces the full
 ///     per-vendor live listener for status purposes.
+///     2026-09-27 (Option B): that listener is REMOVED. Open/closed comes
+///     from the Bunny file vendor-status/{sectionId}.json (rewritten on
+///     every vendor write), re-checked every 5 min while Home is on screen;
+///     see kStatusRefreshTtl below. The server still writes vendor_status:
+///     older app builds listen to it, and this build reads it once only as
+///     a fallback when Bunny has no status file.
 ///
 /// Verified NOT a correctness regression for the two things that matter:
 ///   - Working-hours-based "closed for the night" already computes
@@ -66,16 +71,32 @@ import 'package:flutter/foundation.dart';
 class SharedVendorsWatcher {
   SharedVendorsWatcher._();
 
-  static StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _statusSub;
   static final StreamController<List<VendorModel>> _controller =
       StreamController<List<VendorModel>>.broadcast();
   static List<VendorModel> _baseVendors = [];
-  static Map<String, bool> _liveStatuses = {};
   static List<VendorModel>? _latest;
   static String? _activeKey;
 
+  /// 2026-09-27 (Option B): open/closed comes from its own tiny Bunny file,
+  /// vendor-status/{sectionId}.json ({vendorId: open?}, ~30 B a vendor),
+  /// laid over the vendor list (which no longer carries reststatus). The
+  /// vendor_status live listener is gone, so a vendor switching open/closed
+  /// costs customers 0 Firestore reads and never makes them re-download the
+  /// big list. The status file is re-checked with a conditional GET
+  /// (unchanged = empty 304) once it is older than [kStatusRefreshTtl];
+  /// Home drives that check only while it is on screen. Showing a status up
+  /// to ~5 min old is safe: Cart re-reads vendor_live from Firestore before
+  /// checkout, and the server gates (createVerifiedOrderPayment/WalletOrder/
+  /// CodOrder, createS2SUpiIntent) re-check the real vendor doc.
+  static const Duration kStatusRefreshTtl = Duration(minutes: 5);
+  static Map<String, bool>? _statuses;
+  static bool _checking = false;
+  static String? _pendingSection; // a load asked for while one was running
+  static bool _pendingForce = false;
+  static DateTime? _lastFirestoreFallbackAt;
+
   /// 2026-09-25: a vendor from the list this watcher already holds on the
-  /// phone (Bunny vendor list + live open/closed overlay) - 0 Firestore
+  /// phone (Bunny vendor list + Bunny open/closed overlay) - 0 Firestore
   /// reads. null when the list isn't loaded yet, the vendor isn't in it
   /// (unapproved/inactive vendors are filtered out of it), or - when
   /// [sectionId] is given - the list belongs to a different section.
@@ -106,17 +127,30 @@ class SharedVendorsWatcher {
   }
 
   /// Call from HomeScreen.getData() instead of fireStoreUtils.getAllStores()
-  /// directly. Safe to call on every visit - only does a real Bunny fetch +
-  /// opens the tiny status listener the first time for this (section,
-  /// location); every later call just returns the same shared stream,
-  /// seeded with whatever's already known.
+  /// directly. Safe to call on every visit - only loads the list the first
+  /// time for this (section, location); every later call returns the same
+  /// shared stream, seeded with whatever's already known, and re-checks the
+  /// status file only once it is older than [kStatusRefreshTtl].
   static Stream<List<VendorModel>> watch(
       String sectionId, double lat, double lng) {
     final key = _keyFor(sectionId, lat, lng);
-    if (_activeKey != key || _statusSub == null) {
+    if (_activeKey != key) {
       start(sectionId, lat, lng);
+    } else {
+      refreshIfStale();
     }
     return _replay();
+  }
+
+  /// Brings open/closed up to date if the phone's copy of the status file
+  /// is older than [kStatusRefreshTtl] (the age is tracked by the Bunny
+  /// cache itself, across app restarts). Inside that window this is a local
+  /// read only - so it is safe to call from timers, rebuilds and route
+  /// changes. Past it: one conditional GET (unchanged = empty 304).
+  static void refreshIfStale() {
+    final key = _activeKey;
+    if (key == null) return;
+    _loadStatuses(key.split(':').first);
   }
 
   static Stream<List<VendorModel>> _replay() async* {
@@ -125,38 +159,31 @@ class SharedVendorsWatcher {
   }
 
   /// Starts (or restarts) the shared watcher for this (section, location).
-  /// Always stops any previous subscription first. Called directly by
-  /// HomeScreen's pull-to-refresh (the one thing that should force a
-  /// genuinely fresh check of both the static list and live statuses).
+  /// Called directly by HomeScreen's pull-to-refresh with [revalidate] set
+  /// (the one thing that should force a fresh check right away).
   ///
   /// 2026-09-27: the list first comes from the phone (up to 24 h old), then
   /// ONE "has it changed on Bunny?" check runs - on the first start of this
   /// app process (cold start) and when [revalidate] is set (pull-to-refresh).
   /// Unchanged = empty 304 (~0.9 KB), 0 Firestore; changed = the new list is
-  /// downloaded and shown (e.g. a vendor's new working hours).
+  /// downloaded and shown (e.g. a vendor's new working hours). Open/closed
+  /// comes from the status file ([_loadStatuses]); [revalidate] forces that
+  /// check too.
   static void start(String sectionId, double lat, double lng, {bool revalidate = false}) {
+    final previousSection = _activeKey?.split(':').first;
+    final previousStatuses = _statuses;
     stop();
     if (sectionId.isEmpty) return;
     _activeKey = _keyFor(sectionId, lat, lng);
+    // Same section (location change, pull-to-refresh): keep showing the
+    // open/closed we already have until the fresh copy arrives.
+    if (previousSection == sectionId) _statuses = previousStatuses;
 
-    final check = revalidate || _checkedThisProcess.add(sectionId);
+    final checkList = revalidate || _checkedThisProcess.add(sectionId);
     _loadBaseVendors(sectionId, lat, lng).then((_) {
-      if (check) _revalidate(sectionId, lat, lng);
+      if (checkList) _revalidate(sectionId, lat, lng);
     });
-    _statusSub = FireStoreUtils.firestore
-        .collection('vendor_status')
-        .doc(sectionId)
-        .snapshotsLogged('SharedVendorsWatcher:vendor_status')
-        .listen((snap) {
-      final data = snap.data();
-      final rawStatuses = data?['statuses'];
-      _liveStatuses = rawStatuses is Map
-          ? rawStatuses.map((k, v) => MapEntry(k.toString(), v == true))
-          : {};
-      _emit();
-    }, onError: (Object e) {
-      debugPrint('[SharedVendorsWatcher] status listener error: $e');
-    });
+    _loadStatuses(sectionId, force: revalidate);
   }
 
   static final Set<String> _checkedThisProcess = {};
@@ -167,6 +194,69 @@ class SharedVendorsWatcher {
     if (_activeKey != _keyFor(sectionId, lat, lng)) return; // moved on meanwhile
     _baseVendors = _withinRadius(changed, lat, lng);
     _emit();
+  }
+
+  /// Loads the open/closed map: the phone's copy while it is younger than
+  /// [kStatusRefreshTtl], else a conditional GET of the Bunny status file
+  /// ([force] = ask Bunny now, for pull-to-refresh). Only if Bunny has
+  /// nothing at all (e.g. the file isn't published yet) does it fall back to
+  /// ONE Firestore read of vendor_status - at most once per
+  /// [kStatusRefreshTtl], never on a timer loop.
+  static Future<void> _loadStatuses(String sectionId, {bool force = false}) async {
+    if (sectionId.isEmpty) return;
+    if (_checking) {
+      _pendingSection = sectionId;
+      _pendingForce = _pendingForce || force;
+      return;
+    }
+    _checking = true;
+    try {
+      Map<String, bool>? statuses;
+      if (force) statuses = await revalidateVendorStatusesFromBunny(sectionId);
+      statuses ??= await fetchVendorStatusesFromBunny(sectionId, kStatusRefreshTtl);
+      statuses ??= await _statusesFromFirestore(sectionId);
+      final key = _activeKey;
+      if (key == null || key.split(':').first != sectionId) return; // moved on
+      if (statuses == null) {
+        // Nothing from Bunny or Firestore (offline, no copy on the phone):
+        // still show the list rather than nothing; the next check retries.
+        if (_statuses == null) {
+          _statuses = const {};
+          _emit();
+        }
+        return;
+      }
+      if (mapEquals(statuses, _statuses)) return; // nothing changed on screen
+      _statuses = statuses;
+      _emit();
+    } finally {
+      _checking = false;
+      final pending = _pendingSection;
+      if (pending != null) {
+        final pendingForce = _pendingForce;
+        _pendingSection = null;
+        _pendingForce = false;
+        _loadStatuses(pending, force: pendingForce);
+      }
+    }
+  }
+
+  static Future<Map<String, bool>?> _statusesFromFirestore(String sectionId) async {
+    final last = _lastFirestoreFallbackAt;
+    if (last != null && DateTime.now().difference(last) < kStatusRefreshTtl) return null;
+    _lastFirestoreFallbackAt = DateTime.now();
+    try {
+      final snap = await FireStoreUtils.firestore
+          .collection('vendor_status')
+          .doc(sectionId)
+          .getLogged('SharedVendorsWatcher:vendor_status-fallback');
+      final raw = snap.data()?['statuses'];
+      if (raw is! Map) return null;
+      return raw.map((k, v) => MapEntry(k.toString(), v == true));
+    } catch (e) {
+      debugPrint('[SharedVendorsWatcher] status fallback read failed: $e');
+      return null;
+    }
   }
 
   static List<VendorModel> _withinRadius(List<VendorModel> vendors, double lat, double lng) {
@@ -257,36 +347,28 @@ class SharedVendorsWatcher {
   static double _degToRad(double deg) => deg * (math.pi / 180.0);
 
   static void _emit() {
-    if (_baseVendors.isEmpty) return;
-    final merged = _baseVendors.map((v) {
-      final liveStatus = _liveStatuses[v.id];
-      if (liveStatus != null) v.reststatus = liveStatus;
+    // Wait for open/closed too: the list no longer carries it, and showing
+    // the list first would flash every restaurant as closed.
+    final statuses = _statuses;
+    if (_baseVendors.isEmpty || statuses == null) return;
+    final list = _baseVendors.map((v) {
+      final open = statuses[v.id];
+      if (open != null) v.reststatus = open;
       return v;
     }).toList();
-    _latest = merged;
-    if (!_controller.isClosed) _controller.add(merged);
+    _latest = list;
+    if (!_controller.isClosed) _controller.add(list);
   }
 
-  /// Restarts the watcher only if one was already active - called on app
-  /// resume, same defensive reconnect PurchaseCompletionListener/
-  /// SharedOrdersWatcher already rely on.
-  static void restartIfActive() {
-    final key = _activeKey;
-    if (key == null) return;
-    final parts = key.split(':');
-    if (parts.length != 3) return;
-    final lat = double.tryParse(parts[1]);
-    final lng = double.tryParse(parts[2]);
-    if (lat == null || lng == null) return;
-    start(parts[0], lat, lng);
-  }
+  /// Called on app resume after a long background (main.dart). There is no
+  /// live listener to reconnect any more, so this just re-checks the status
+  /// file if it is older than [kStatusRefreshTtl].
+  static void restartIfActive() => refreshIfStale();
 
   static void stop() {
-    _statusSub?.cancel();
-    _statusSub = null;
     _activeKey = null;
     _baseVendors = [];
-    _liveStatuses = {};
+    _statuses = null;
     _latest = null;
   }
 }

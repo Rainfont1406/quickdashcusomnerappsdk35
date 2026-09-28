@@ -243,19 +243,18 @@ Future<List<BannerModel>?> fetchTopBannerFromBunny(String sectionId) async {
 /// Fetches the Home screen's vendor list from Bunny instead of the live
 /// geo-listener - see BunnyVendorListMirrorController (Laravel). Carries
 /// static-ish fields only (title, photo, location, cuisines, workingHours,
-/// rating); live open/closed status is NOT trusted from this blob - see
-/// SharedVendorsWatcher, which overlays the separately-live-listened
-/// vendor_status/{sectionId} aggregate on top of whatever reststatus this
-/// mirror happens to have. Whole-section, not radius-scoped - the caller
+/// rating). Open/closed is NOT in it any more (2026-09-27, Option B) - it is
+/// the separate vendor-status/{sectionId}.json, see fetchVendorStatusesFromBunny
+/// (re-checked every 5 min while Home is on screen); Cart re-reads vendor_live.
+/// Whole-section, not radius-scoped - the caller
 /// must still apply its own radius/distance filter. Returns null on any
 /// failure so the caller falls back to the original live geo query; never
 /// throws.
 Future<List<VendorModel>?> fetchVendorListFromBunny(String sectionId) async {
   try {
     // Reference TTL is safe here even though a restaurant's open/closed state
-    // is volatile: SharedVendorsWatcher deliberately splits that out into a
-    // separate LIVE listener on vendor_status/{sectionId}, so this blob only
-    // carries the static-ish fields (title, photo, location, hours, rating).
+    // is volatile: open/closed is not in this blob (see
+    // fetchVendorStatusesFromBunny); this only carries the static-ish fields.
     final body = await cachedBunnyGet(
         'bunny_vendorList_$sectionId',
         'https://$_kBunnyCdnHost/vendor-lists/$sectionId.json',
@@ -279,6 +278,41 @@ Future<List<VendorModel>?> revalidateVendorListFromBunny(String sectionId) async
   } catch (_) {
     return null;
   }
+}
+
+/// 2026-09-27 (Option B): {vendorId: open?} from vendor-status/{sectionId}.json
+/// - written by VendorListMirror (Laravel) on every vendor save, ~30 B a
+/// vendor. The phone's copy is used while younger than [ttl]; after that a
+/// conditional GET (unchanged = empty 304). null when Bunny has nothing and
+/// the phone has no copy.
+Future<Map<String, bool>?> fetchVendorStatusesFromBunny(String sectionId, Duration ttl) async {
+  try {
+    final body = await cachedBunnyGet('bunny_vendorStatus_$sectionId',
+        'https://$_kBunnyCdnHost/vendor-status/$sectionId.json', ttl);
+    return body == null ? null : _parseVendorStatuses(body);
+  } catch (_) {
+    return null;
+  }
+}
+
+/// Pull-to-refresh: asks Bunny now whatever the phone copy's age; returns
+/// the new map only when it changed, else null.
+Future<Map<String, bool>?> revalidateVendorStatusesFromBunny(String sectionId) async {
+  final body = await revalidateBunnyIfChanged('bunny_vendorStatus_$sectionId',
+      'https://$_kBunnyCdnHost/vendor-status/$sectionId.json');
+  if (body == null) return null;
+  try {
+    return _parseVendorStatuses(body);
+  } catch (_) {
+    return null;
+  }
+}
+
+Map<String, bool>? _parseVendorStatuses(String body) {
+  final decoded = jsonDecode(body);
+  final raw = decoded is Map ? decoded['statuses'] : null;
+  if (raw is! Map) return null;
+  return raw.map((k, v) => MapEntry(k.toString(), v == true));
 }
 
 List<VendorModel>? _parseVendorList(String body) {

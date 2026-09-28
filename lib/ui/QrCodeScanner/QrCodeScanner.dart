@@ -238,7 +238,13 @@ class _QrCodeScannerState extends State<QrCodeScanner>
 
       // ── All gates passed — navigate ────────────────────────────────
       if (mounted) setState(() => _isVerifying = false);
-      final VendorModel vendor = listVendor ?? VendorModel.fromJson(data);
+      // 2026-09-27: the on-phone list's open/closed can be up to ~5 min old
+      // (Bunny status file), so lay the vendor_live data just read on top -
+      // same merge as getVendorForCart - and the menu opens with the LIVE
+      // open/closed and service switches. 0 extra reads.
+      final VendorModel vendor = listVendor != null
+          ? VendorModel.fromJson(<String, dynamic>{...listVendor.toJson(), ...data})
+          : VendorModel.fromJson(data);
       if (mounted) {
         precacheVendorHeroImage(context, vendor);
         Navigator.pop(context);

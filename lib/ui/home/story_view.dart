@@ -10,6 +10,7 @@ import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/model/story_model.dart';
 import 'package:emartconsumer/services/shared_vendors_watcher.dart';
+import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/services/behavior/behavior_event_types.dart';
 import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
@@ -796,11 +797,21 @@ class _VendorHeader extends StatelessWidget {
         }
         final vendor = snapshot.data!;
         return GestureDetector(
-          onTap: () {
+          onTap: () async {
             storyController.pause();
             BehaviorTracker.setNextEntrySource('Story');
             precacheVendorHeroImage(context, vendor);
-            push(context, NewVendorProductsScreen(vendorModel: vendor));
+            // 2026-09-27: the header's copy can have an open/closed up to
+            // ~5 min old (Bunny status file), so on TAP only (1 read of the
+            // ~0.3 KB vendor_live, not per story viewed) open the menu with
+            // the live status - same source Cart uses. On any failure, open
+            // with the copy we have; Cart re-checks before ordering anyway.
+            VendorModel toOpen = vendor;
+            try {
+              toOpen = await FireStoreUtils().getVendorForCart(vendor.id);
+            } catch (_) {}
+            if (!context.mounted) return;
+            push(context, NewVendorProductsScreen(vendorModel: toOpen));
           },
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.center,
