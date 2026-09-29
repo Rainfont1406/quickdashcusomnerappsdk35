@@ -20,9 +20,9 @@ import 'package:url_launcher/url_launcher.dart';
 /// MaterialApp's `home` via the `builder:` callback) - a pushed route would
 /// create back-button/navigation-stack edge cases on an unconditional block.
 /// Unlike ConnectivityGate, there's no retry/auto-close path here: once
-/// blocked, the only way out is an actual app update, so the check runs once
-/// at startup and never re-checks mid-session (the version can't change
-/// while the app is running).
+/// blocked, the only way out is an actual app update. The check runs at
+/// startup and again on resume if the last check was over 30 minutes ago
+/// (the admin may raise min_supported_version while the app is alive).
 class ForceUpdateGate extends StatefulWidget {
   final Widget? child;
 
@@ -32,18 +32,39 @@ class ForceUpdateGate extends StatefulWidget {
   State<ForceUpdateGate> createState() => _ForceUpdateGateState();
 }
 
-class _ForceUpdateGateState extends State<ForceUpdateGate> {
+class _ForceUpdateGateState extends State<ForceUpdateGate> with WidgetsBindingObserver {
+  // The app can stay alive in the background for days, so besides the check
+  // at app start, re-check on resume - at most once per this interval.
+  static const _resumeCheckInterval = Duration(minutes: 30);
+
   bool _blocked = false;
   String _message = '';
   String _storeUrl = '';
+  DateTime? _lastCheck;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _check();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed || _blocked) return;
+    final last = _lastCheck;
+    if (last != null && DateTime.now().difference(last) < _resumeCheckInterval) return;
     _check();
   }
 
   Future<void> _check() async {
+    _lastCheck = DateTime.now();
     try {
       final remoteConfig = FirebaseRemoteConfig.instance;
       await remoteConfig.setConfigSettings(RemoteConfigSettings(
