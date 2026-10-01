@@ -2,7 +2,7 @@ name: emartconsumer
 description: Application for eMart user.
 
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
-version: 1.0.14+14
+version: 1.0.14+15
 
 environment:
   sdk: ">=3.4.3 <4.0.0"
