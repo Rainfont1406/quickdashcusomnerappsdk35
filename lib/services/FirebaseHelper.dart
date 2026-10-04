@@ -350,6 +350,23 @@ class FireStoreUtils {
       if (cached != null && cached.isNotEmpty) {
         final fullRefreshDue = !await ConfigRefreshGate.isFresh(
             StoryCache.gateKey(sectionId), StoryCache.fullRefreshInterval);
+        // 2026-10-03: the 6-hour refresh used to block the story row on the
+        // first server round trip of the session (6-9 s on a slow network).
+        // Within staleServeLimit, show the saved list now (expiry is still
+        // evaluated on it by StoryModel.isExpired) and refresh in the background;
+        // a story close to its view cap (needsServerVerify) still waits.
+        if (fullRefreshDue &&
+            !StoryCache.needsServerVerify(cached) &&
+            await ConfigRefreshGate.isFresh(
+                StoryCache.gateKey(sectionId), StoryCache.staleServeLimit)) {
+          _storyCache = cached;
+          _storyCachedAt = now;
+          debugPrint('[StoryCache] ${cached.length} stories served from '
+              'on-device cache - 6 h refresh due, refreshing in the background');
+          // ignore: unawaited_futures
+          _refreshStoriesInBackground(sectionId);
+          return cached;
+        }
         if (!fullRefreshDue && !StoryCache.needsServerVerify(cached)) {
           // 2026-09-28: the new-story probe below ran on every cold start
           // (1 billed read each). Skip it when it (or a full fetch) already
@@ -371,17 +388,19 @@ class FireStoreUtils {
           // Expiry still resolves correctly offline: HomeScreen._filterStories
           // applies StoryModel.isExpired to whatever this returns, and both
           // time-based expiry factors are computable from the cached fields.
-          final hasNew = await _hasNewStoriesSince(sectionId, cached);
-          if (!hasNew) {
-            // ignore: unawaited_futures
-            ConfigRefreshGate.markRefreshed(_storyProbeGateKey(sectionId));
-            _storyCache = cached;
-            _storyCachedAt = now;
-            debugPrint('[StoryCache] ${cached.length} stories served from '
-                'on-device cache (no new stories) - full list not re-read');
-            return cached;
-          }
-          debugPrint('[StoryCache] new story detected - re-fetching full list');
+          // 2026-10-03: the check used to be awaited here, so the story row
+          // waited on the first server round trip of the session (5-6 s on a
+          // slow network). The list is inside its 6-hour window and no story is
+          // near its view cap (both checked above), so show it now and run the
+          // check in the background. A new story then shows on the next app
+          // open (or after the 10-minute in-memory window), not this one.
+          _storyCache = cached;
+          _storyCachedAt = now;
+          debugPrint('[StoryCache] ${cached.length} stories served from '
+              'on-device cache - new-story check running in the background');
+          // ignore: unawaited_futures
+          _probeNewStoriesInBackground(sectionId, cached);
+          return cached;
         }
       }
     }
@@ -407,12 +426,94 @@ class FireStoreUtils {
     // Persist for future cold starts. Only a non-empty result is stored: an
     // empty list here can also mean a transient failure, and caching that
     // would hide every story for the whole refresh window.
-    if (sectionId.isNotEmpty && story.isNotEmpty) {
+    // 2026-10-03: and only when the server answered. A result with
+    // isFromCache is Firestore's own old local copy (the query fell back to it
+    // when the server was slow), and saving it would restart the 6-hour clock
+    // on a list nobody has verified.
+    if (sectionId.isNotEmpty && story.isNotEmpty && !storyQuery.metadata.isFromCache) {
       await StoryCache.write(sectionId, story);
       // ignore: unawaited_futures
       ConfigRefreshGate.markRefreshed(_storyProbeGateKey(sectionId));
     }
     return story;
+  }
+
+  static bool _storyProbeRunning = false;
+
+  /// Background new-story check (see getStory). Only a real server answer
+  /// counts: unknown (null, answered from the local copy or failed) leaves the
+  /// 15-minute gate unmarked so the next start checks again; "nothing new"
+  /// marks it; a new story triggers the background full refresh, which saves
+  /// the new list for the next open.
+  Future<void> _probeNewStoriesInBackground(
+      String sectionId, List<StoryModel> cached) async {
+    if (_storyProbeRunning) return;
+    _storyProbeRunning = true;
+    try {
+      final hasNew = await _hasNewStoriesSince(sectionId, cached);
+      if (hasNew == null) return;
+      if (!hasNew) {
+        // ignore: unawaited_futures
+        ConfigRefreshGate.markRefreshed(_storyProbeGateKey(sectionId));
+        debugPrint('[StoryCache] background check: no new stories');
+        return;
+      }
+      debugPrint('[StoryCache] background check: new story detected - '
+          'refreshing the full list');
+      await _refreshStoriesInBackground(sectionId);
+    } catch (e) {
+      debugPrint('[StoryCache] background new-story check failed (ignored): $e');
+    } finally {
+      _storyProbeRunning = false;
+    }
+  }
+
+  static bool _storyBgRefreshRunning = false;
+
+  /// Background half of the stale-while-revalidate story refresh: one full
+  /// query; the result is kept (and the 6-hour clock restarted) only when the
+  /// SERVER answered. A result from Firestore's own old local copy is ignored,
+  /// so a failed refresh just tries again on the next start. A server-confirmed
+  /// empty list clears the saved copy so deleted stories stop showing.
+  Future<void> _refreshStoriesInBackground(String sectionId) async {
+    if (_storyBgRefreshRunning) return;
+    _storyBgRefreshRunning = true;
+    try {
+      final q = await firestore
+          .collection(STORY)
+          .where('sectionID', isEqualTo: sectionId)
+          .where('approved', isEqualTo: true)
+          .getLogged('getStory:STORY (background refresh)');
+      if (q.metadata.isFromCache) {
+        debugPrint('[StoryCache] background refresh answered from the local '
+            'copy - ignored, will retry on the next start');
+        return;
+      }
+      final list = <StoryModel>[];
+      for (final d in q.docs) {
+        try {
+          list.add(StoryModel.fromJson(d.data()));
+        } catch (e) {
+          print('FireStoreUtils.getStory background parse error $e');
+        }
+      }
+      if (list.isEmpty) {
+        await StoryCache.clear(sectionId);
+        _storyCache = list;
+        _storyCachedAt = DateTime.now();
+        return;
+      }
+      await StoryCache.write(sectionId, list);
+      // ignore: unawaited_futures
+      ConfigRefreshGate.markRefreshed(_storyProbeGateKey(sectionId));
+      _storyCache = list;
+      _storyCachedAt = DateTime.now();
+      debugPrint('[StoryCache] background refresh done: ${list.length} stories');
+    } catch (e) {
+      debugPrint('[StoryCache] background refresh failed (ignored): $e');
+    } finally {
+      _storyBgRefreshRunning = false;
+    }
   }
 
   /// True when at least one approved story exists in [sectionId] that is newer
@@ -425,7 +526,7 @@ class FireStoreUtils {
   /// Any failure returns true (fall back to the full fetch), so a missing
   /// index or permission problem degrades to exactly the old behaviour rather
   /// than silently showing a stale list.
-  Future<bool> _hasNewStoriesSince(
+  Future<bool?> _hasNewStoriesSince(
       String sectionId, List<StoryModel> cached) async {
     final newest = StoryCache.newestCreatedAt(cached);
     if (newest == null) return true;
@@ -437,6 +538,11 @@ class FireStoreUtils {
           .where('createdAt', isGreaterThan: newest)
           .limit(1)
           .getLogged('getStory:STORY (new-story probe)');
+      // 2026-10-03: when the server did not answer in time, Firestore returns
+      // its own old local copy (source=CACHE; seen taking 9 s on a cold start
+      // when the first server round trip is slow). An empty answer from that
+      // copy proves nothing, so report "unknown" (null) instead of "nothing new".
+      if (snap.metadata.isFromCache) return null;
       return snap.docs.isNotEmpty;
     } catch (e) {
       debugPrint('[StoryCache] new-story probe failed, falling back to a full '

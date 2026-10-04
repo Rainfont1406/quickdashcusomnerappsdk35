@@ -2,13 +2,22 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:dotted_border/dotted_border.dart';
 import 'package:easy_localization/easy_localization.dart';
+import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/LocalOfferModel.dart';
+import 'package:emartconsumer/services/app_cache_config.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:url_launcher/url_launcher.dart';
+
+// Pixel width to request from the Bunny Optimizer (and to decode at) for an
+// image shown [logicalWidth] wide: display width x pixel ratio, same rule as
+// NetworkImageWidget. Local Offers images used a plain CachedNetworkImage with
+// no resize parameters, no decode ceiling and the library's default cache.
+int _offerImagePx(BuildContext context, double logicalWidth) =>
+    (logicalWidth * MediaQuery.of(context).devicePixelRatio).round().clamp(1, 2000).toInt();
 
 // Offer detail / "gate pass"-style view for one Offers & Discounts post -
 // see LocalOffersListScreen's own header comment for the feature's overall
@@ -405,7 +414,11 @@ class _LocalOfferDetailsScreenState extends State<LocalOfferDetailsScreen> {
                   itemCount: offer.bannerImageUrls.length,
                   onPageChanged: (i) => setState(() => _bannerPage = i),
                   itemBuilder: (context, i) => CachedNetworkImage(
-                    imageUrl: offer.bannerImageUrls[i],
+                    imageUrl: bunnyOptimizedUrl(offer.bannerImageUrls[i],
+                        width: _offerImagePx(context, MediaQuery.of(context).size.width)),
+                    cacheManager: AppCacheConfig.images,
+                    maxWidthDiskCache: _offerImagePx(context, MediaQuery.of(context).size.width),
+                    memCacheWidth: _offerImagePx(context, MediaQuery.of(context).size.width),
                     width: double.infinity,
                     height: _bannerHeight,
                     fit: BoxFit.cover,

@@ -1,4 +1,5 @@
 import 'package:easy_localization/easy_localization.dart';
+import 'package:emartconsumer/services/cache_epoch.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:firebase_remote_config/firebase_remote_config.dart';
@@ -72,6 +73,11 @@ class _ForceUpdateGateState extends State<ForceUpdateGate> with WidgetsBindingOb
         minimumFetchInterval: const Duration(minutes: 1),
       ));
       await remoteConfig.fetchAndActivate();
+
+      // Remote kill switch for the on-device picture / story-video caches.
+      // Same fetch, so no extra network call; never blocks the update check.
+      // ignore: unawaited_futures
+      CacheEpoch.applyIfChanged(remoteConfig);
 
       final minVersion = remoteConfig.getString('min_supported_version');
       if (minVersion.isEmpty) return; // not configured - fail open, never block

@@ -9,6 +9,8 @@ import 'package:flutter/material.dart';
 
 import '../../AppGlobal.dart';
 import '../../constants.dart';
+import 'package:emartconsumer/utils/network_image_widget.dart';
+import 'package:emartconsumer/services/app_cache_config.dart';
 
 class StorePhotos extends StatefulWidget {
   final VendorModel vendorModel;
@@ -80,7 +82,10 @@ class _StorePhotosState extends State<StorePhotos> {
                                 child: CachedNetworkImage(
                                     height: 70,
                                     width: 100,
-                                    imageUrl: photos[index],
+                                    imageUrl: sharedImageUrl(context, photos[index], 100),
+cacheManager: AppCacheConfig.images,
+maxWidthDiskCache: imagePixelWidth(context, 100),
+memCacheWidth: imagePixelWidth(context, 100),
                                     imageBuilder: (context, imageProvider) => Container(
                                           width: 70,
                                           height: 100,
@@ -143,7 +148,10 @@ class _StoreMenuPhotoState extends State<StoreMenuPhoto> {
                             child: CachedNetworkImage(
                                 height: 70,
                                 width: 100,
-                                imageUrl: getImageVAlidUrl(VendorModel.coverPhotoUrl(widget.vendorMenuPhotos[index])),
+                                imageUrl: sharedImageUrl(context, getImageVAlidUrl(VendorModel.coverPhotoUrl(widget.vendorMenuPhotos[index])), 100),
+cacheManager: AppCacheConfig.images,
+maxWidthDiskCache: imagePixelWidth(context, 100),
+memCacheWidth: imagePixelWidth(context, 100),
                                 imageBuilder: (context, imageProvider) => Container(
                                       width: 70,
                                       height: 100,

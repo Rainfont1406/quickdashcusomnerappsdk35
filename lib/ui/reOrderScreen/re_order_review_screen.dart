@@ -17,6 +17,7 @@ import 'package:emartconsumer/ui/container/ContainerScreen.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../constants/typography.dart';
+import 'package:emartconsumer/utils/network_image_widget.dart';
 
 // ─── Data model ───────────────────────────────────────────────────────────────
 
@@ -543,14 +544,14 @@ class _ReOrderReviewScreenState extends State<ReOrderReviewScreen>
         children: [
           ClipRRect(
             borderRadius: BorderRadius.circular(12),
-            child: Image.network(
-              widget.orderModel.vendor.photo.isNotEmpty
+            child: NetworkImageWidget(
+              imageUrl: widget.orderModel.vendor.photo.isNotEmpty
                   ? widget.orderModel.vendor.photo
                   : placeholderImage,
               width: 56,
               height: 56,
               fit: BoxFit.cover,
-              errorBuilder: (_, __, ___) => Container(
+              errorWidget: Container(
                 width: 56,
                 height: 56,
                 decoration: BoxDecoration(
@@ -798,12 +799,12 @@ class _ReOrderReviewScreenState extends State<ReOrderReviewScreen>
     if (row.original.photo.isNotEmpty) {
       return ClipRRect(
         borderRadius: BorderRadius.circular(10),
-        child: Image.network(
-          row.original.photo,
+        child: NetworkImageWidget(
+          imageUrl: row.original.photo,
           width: 48,
           height: 48,
           fit: BoxFit.cover,
-          errorBuilder: (_, __, ___) => _vegIndicator(isVeg, isNonVeg),
+          errorWidget: _vegIndicator(isVeg, isNonVeg),
         ),
       );
     }

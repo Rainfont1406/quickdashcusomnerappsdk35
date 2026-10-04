@@ -52,6 +52,14 @@ class StoryCache {
   /// impression window described above.
   static const Duration fullRefreshInterval = Duration(hours: 6);
 
+  /// 2026-10-03: when the 6-hour refresh is due, a saved list younger than this
+  /// is shown immediately and refreshed in the background, instead of making
+  /// the story row wait for the first (slow) server round trip of the session.
+  /// Beyond it, the real list is awaited as before. Bounds how long a deleted
+  /// or exhausted story can stay visible: [fullRefreshInterval] + one app open,
+  /// never more than this.
+  static const Duration staleServeLimit = Duration(hours: 24);
+
   /// Cached stories at or above this fraction of their purchased view package
   /// are treated as "about to exhaust" - the cache is skipped and the real
   /// list fetched instead.
@@ -113,6 +121,15 @@ class StoryCache {
     } catch (e) {
       debugPrint('[StoryCache] write failed (non-fatal, next start re-fetches): $e');
     }
+  }
+
+  /// Forgets the saved list for [sectionId] (the server confirmed the section
+  /// now has no approved stories), so a stale copy is not shown again.
+  static Future<void> clear(String sectionId) async {
+    try {
+      final sp = await SharedPreferences.getInstance();
+      await sp.remove(_prefsKey(sectionId));
+    } catch (_) {}
   }
 
   /// The newest createdAt across [stories] - the lower bound for the

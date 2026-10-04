@@ -271,23 +271,6 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
     }
   }
 
-  // Precaches a list of network image URLs concurrently. Individual failures
-  // are swallowed; a 5-second hard timeout ensures the skeleton never blocks
-  // indefinitely on slow or unavailable images.
-  Future<void> _precacheBatch(List<String> urls) async {
-    if (!mounted || urls.isEmpty) return;
-    final futures = urls
-        .where((u) => u.isNotEmpty)
-        .map((url) =>
-            precacheImage(NetworkImage(url), context).catchError((_) {}))
-        .toList();
-    if (futures.isEmpty) return;
-    await Future.wait(futures).timeout(
-      const Duration(seconds: 5),
-      onTimeout: () => [],
-    );
-  }
-
   // Refresh cart data — kept for explicit call sites; stream handles most cases
   Future<void> _refreshCartData() async {
     if (!_cartReady) return;
@@ -800,17 +783,24 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
     // up hiding the skeleton. Each card still shows its own placeholder until
     // its image individually loads.
     if (mounted) {
-      _precacheBatch([
-        if (widget.vendorModel.photo.isNotEmpty) widget.vendorModel.photo,
-        ...widget.vendorModel.photos
-            .take(3)
-            .map((p) => VendorModel.coverPhotoUrl(p))
-            .where((s) => s.isNotEmpty && s != 'null'),
-        ...allProductList
-            .take(15)
-            .where((p) => p.photo.isNotEmpty)
-            .map((p) => p.photo),
-      ]);
+      // 2026-10-03: this used to call precacheImage(NetworkImage(url)) for the
+      // vendor photo, 3 covers and 15 product photos. That path has no disk
+      // cache and no resize parameters, so about 9 MB (Rath) was downloaded
+      // again on EVERY page open, and a second time by the widgets below on a
+      // first visit. Both calls now go through the shared image cache with
+      // the same address the widgets use, so each picture is fetched once and
+      // reused from the phone on later visits.
+      precacheVendorHeroImage(context, widget.vendorModel);
+      // 2026-10-03: 15 -> 6, about what the first screen shows. A diner usually
+      // looks at 5-10 pictures, so warming 15 downloaded pictures nobody saw;
+      // the cards load their own pictures as they scroll into view and those
+      // are cached the same way.
+      for (final p in allProductList.take(6).where((p) => p.photo.isNotEmpty)) {
+        // The product cards pass width: double.infinity (see _buildProductImage
+        // call site), which resolves to the default 800 px request.
+        precacheCarouselImage(context, getImageVAlidUrl(p.photo),
+            width: double.infinity);
+      }
     }
     if (mounted) {
       setState(() {

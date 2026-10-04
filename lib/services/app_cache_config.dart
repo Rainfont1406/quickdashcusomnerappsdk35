@@ -35,6 +35,50 @@ class AppImageCacheManager extends CacheManager with ImageCacheManager {
   AppImageCacheManager(super.config);
 }
 
+/// 2026-10-03: treats every downloaded image as immutable.
+///
+/// Every upload is saved under a new random name (server: UploadsToBunny.php,
+/// folder/uuid.ext) and the Vendor App deletes the old file when a photo is
+/// replaced, so the content behind an image URL never changes. Bunny answers
+/// with `cache-control: public, max-age=2592000` (30 days) and NO ETag, and
+/// flutter_cache_manager can only revalidate with an ETag - so once the 30 days
+/// ran out it downloaded the whole, unchanged file again. A file now stays
+/// valid for a year; it leaves the cache only when it is unused for
+/// [AppCacheConfig.imageStalePeriod] or evicted by the file-count cap.
+class ImmutableFileService extends HttpFileService {
+  @override
+  Future<FileServiceResponse> get(String url,
+      {Map<String, String>? headers}) async {
+    final response = await super.get(url, headers: headers);
+    return _LongLivedResponse(response);
+  }
+}
+
+class _LongLivedResponse implements FileServiceResponse {
+  _LongLivedResponse(this._inner);
+
+  final FileServiceResponse _inner;
+  static const Duration _validFor = Duration(days: 365);
+
+  @override
+  Stream<List<int>> get content => _inner.content;
+
+  @override
+  int? get contentLength => _inner.contentLength;
+
+  @override
+  int get statusCode => _inner.statusCode;
+
+  @override
+  DateTime get validTill => DateTime.now().add(_validFor);
+
+  @override
+  String? get eTag => _inner.eTag;
+
+  @override
+  String get fileExtension => _inner.fileExtension;
+}
+
 class AppCacheConfig {
   // ── Disk: general app imagery ───────────────────────────────────────────
   //
@@ -56,8 +100,23 @@ class AppCacheConfig {
   // bandwidth line the egress plan is trying to hold down. This is a
   // storage/bandwidth trade, not a pure win in either direction.
   static const String imageCacheKey = 'appImageCache';
-  static const int maxImageFiles = 120;
-  static const Duration imageStalePeriod = Duration(days: 7);
+  // 2026-10-03: 120 -> 500. Only pictures a user actually looked at are cached
+  // (nothing downloads a whole menu), typically 5-10 per restaurant, so 500
+  // files cover about 30 restaurants. Each picture can take TWO files (the
+  // downloaded original and its resized copy under a second key), so 500 files
+  // is about 250 pictures: roughly 25-60 MB at today's ~100 KB menu pictures,
+  // at most about 110 MB if they were all 300 KB. Least recently used go first.
+  // Revised same day: 500 -> 1000 because many menu pictures are only 30-100 KB
+  // (1000 files = about 500 pictures = about 20-80 MB; 300 KB pictures would
+  // reach 150-220 MB, which is the accepted worst case).
+  static const int maxImageFiles = 1000;
+  // 2026-10-03: 7 -> 30 days. With the file count capped (maxImageFiles) the
+  // disk is bounded either way; a longer period only stops a diner who comes
+  // back after 8-30 days from downloading the whole menu again.
+  // Revised same day: 30 -> 60 days. A picture never changes at its address and
+  // diners return to the same restaurants every few days; a file is dropped when
+  // unused for 60 days or when the file cap pushes it out.
+  static const Duration imageStalePeriod = Duration(days: 60);
 
   // MUST be ImageCacheManager, not the plain CacheManager. Found on-device
   // 2026-09-10: a plain CacheManager silently IGNORES maxWidthDiskCache and
@@ -84,6 +143,7 @@ class AppCacheConfig {
       imageCacheKey,
       stalePeriod: imageStalePeriod,
       maxNrOfCacheObjects: maxImageFiles,
+      fileService: ImmutableFileService(),
     ),
   );
 

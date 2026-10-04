@@ -10,6 +10,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_rating_bar/flutter_rating_bar.dart';
 
 import '../../constants.dart';
+import 'package:emartconsumer/utils/network_image_widget.dart';
+import 'package:emartconsumer/services/app_cache_config.dart';
 
 class Review extends StatefulWidget {
   ProductModel productModel;
@@ -88,8 +90,11 @@ class _ReviewState extends State<Review> {
                           CachedNetworkImage(
                             height: 45,
                             width: 45,
-                            imageUrl: getImageVAlidUrl(
-                                reviewList[index].profile.toString()),
+                            imageUrl: sharedImageUrl(context, getImageVAlidUrl(
+                                reviewList[index].profile.toString()), 45),
+cacheManager: AppCacheConfig.images,
+maxWidthDiskCache: imagePixelWidth(context, 45),
+memCacheWidth: imagePixelWidth(context, 45),
                             imageBuilder: (context, imageProvider) => Container(
                               decoration: BoxDecoration(
                                 borderRadius: BorderRadius.circular(35),
@@ -189,8 +194,11 @@ class _ReviewState extends State<Review> {
                                     child: CachedNetworkImage(
                                       height: 65,
                                       width: 65,
-                                      imageUrl: getImageVAlidUrl(
-                                          reviewList[index].photos![index1]),
+                                      imageUrl: sharedImageUrl(context, getImageVAlidUrl(
+                                          reviewList[index].photos![index1]), 65),
+cacheManager: AppCacheConfig.images,
+maxWidthDiskCache: imagePixelWidth(context, 65),
+memCacheWidth: imagePixelWidth(context, 65),
                                       imageBuilder: (context, imageProvider) =>
                                           Container(
                                         decoration: BoxDecoration(

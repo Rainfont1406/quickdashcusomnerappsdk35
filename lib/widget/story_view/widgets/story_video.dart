@@ -146,6 +146,14 @@ class StoryVideoState extends State<StoryVideo> {
     });
 
     if (_isHlsUrl) {
+      // 2026-10-03: HLS cannot be cached, so a Bunny story plays from its 480p
+      // MP4 copy through the rolling StoryVideoCacheManager (a replay costs no
+      // download). If the MP4 is missing or slow, fall back to HLS streaming.
+      final mp4 = StoryVideoCacheManager.mp4UrlFor(widget.videoLoader.url);
+      if (mp4 != null && !_mp4Failed) {
+        _loadCachedMp4(mp4);
+        return;
+      }
       _initPlayer(networkUrl: widget.videoLoader.url);
       return;
     }
@@ -158,6 +166,32 @@ class StoryVideoState extends State<StoryVideo> {
         setState(() { _isLoading = false; _hasError = true; });
       }
     });
+  }
+
+  // Set once the MP4 copy failed for this video, so a retry streams HLS.
+  bool _mp4Failed = false;
+
+  Future<void> _loadCachedMp4(String mp4Url) async {
+    final Map<String, String> headers =
+        widget.videoLoader.requestHeaders?.map(
+              (k, v) => MapEntry(k, v.toString()),
+            ) ??
+            const {};
+    try {
+      final file = await StoryVideoCacheManager.instance
+          .getSingleFile(mp4Url, headers: headers)
+          .timeout(const Duration(seconds: 20));
+      if (!mounted) return;
+      widget.videoLoader.videoFile = file;
+      debugPrint('[STORY-PERF][VIDEO] MP4 ready (cache/disk) — '
+          '${_loadSw?.elapsedMilliseconds}ms — $mp4Url');
+      await _initPlayer();
+    } catch (e) {
+      debugPrint('[STORY-PERF][VIDEO] MP4 unavailable ($e) — falling back to HLS');
+      _mp4Failed = true;
+      if (!mounted) return;
+      await _initPlayer(networkUrl: widget.videoLoader.url);
+    }
   }
 
   Future<void> _initPlayer({String? networkUrl}) async {
@@ -239,6 +273,15 @@ class StoryVideoState extends State<StoryVideo> {
       debugPrint('StoryVideo._initPlayer error: $e\n$st');
       debugPrint('[STORY-PERF][VIDEO] ERROR — ${_loadSw?.elapsedMilliseconds}ms — ${widget.videoLoader.url}');
       if (!mounted) return;
+      // A cached MP4 that will not play (truncated or corrupt download): drop
+      // it and stream the HLS playlist instead of showing the error state.
+      if (networkUrl == null && _isHlsUrl && !_mp4Failed) {
+        _mp4Failed = true;
+        // ignore: unawaited_futures
+        StoryVideoCacheManager.evictFor(widget.videoLoader.url);
+        await _initPlayer(networkUrl: widget.videoLoader.url);
+        return;
+      }
       setState(() { _isLoading = false; _hasError = true; });
       // Freeze the progress bar so it does not auto-advance while the error
       // widget is visible (the 10-second default duration would otherwise

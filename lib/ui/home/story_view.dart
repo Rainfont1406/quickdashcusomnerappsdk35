@@ -168,18 +168,32 @@ class MoreStoriesState extends State<MoreStories> with WidgetsBindingObserver {
       final s = url.toString();
       if (s.isEmpty) continue;
       if (s.toLowerCase().contains('.m3u8')) {
-        // HLS: pre-initialize controller so native HLS layer buffers ahead.
-        final ctrl = VideoPlayerController.networkUrl(
-          Uri.parse(s),
-          httpHeaders: const {'Referer': 'https://admin.quickdash.co.in'},
-        );
-        ctrl.initialize().then<void>((_) {
-          if (mounted) {
-            HlsPreloadRegistry.store(s, ctrl);
-          } else {
-            ctrl.dispose();
-          }
-        }).catchError((_) { ctrl.dispose(); });
+        // 2026-10-03: a Bunny story plays from its 480p MP4 copy through the
+        // rolling StoryVideoCacheManager (see StoryVideo._loadVideo), so warm
+        // that file. Only if the MP4 is unavailable, pre-initialize the HLS
+        // controller as before so the native player buffers ahead.
+        final mp4 = StoryVideoCacheManager.mp4UrlFor(s);
+        void preloadHls() {
+          final ctrl = VideoPlayerController.networkUrl(
+            Uri.parse(s),
+            httpHeaders: const {'Referer': 'https://admin.quickdash.co.in'},
+          );
+          ctrl.initialize().then<void>((_) {
+            if (mounted) {
+              HlsPreloadRegistry.store(s, ctrl);
+            } else {
+              ctrl.dispose();
+            }
+          }).catchError((_) { ctrl.dispose(); });
+        }
+        if (mp4 == null) {
+          preloadHls();
+        } else {
+          StoryVideoCacheManager.instance
+              .getSingleFile(mp4,
+                  headers: const {'Referer': 'https://admin.quickdash.co.in'})
+              .then<void>((_) {}, onError: (_) { if (mounted) preloadHls(); });
+        }
       } else {
         // Direct MP4: file-cache it.
         StoryVideoCacheManager.instance

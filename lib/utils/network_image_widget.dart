@@ -64,6 +64,16 @@ int? _targetPixelWidth(BuildContext context, double? displayWidth) {
   return (logicalWidth * dpr).round().clamp(1, 2000);
 }
 
+/// Pixel width to ask Bunny for, and to decode at, for an image shown
+/// [logicalWidth] wide (same rule NetworkImageWidget uses). For the plain
+/// CachedNetworkImage call sites that are moved onto the shared image cache.
+int imagePixelWidth(BuildContext context, double logicalWidth) =>
+    _targetPixelWidth(context, logicalWidth) ?? 800;
+
+/// The same resize URL NetworkImageWidget builds, for those call sites.
+String sharedImageUrl(BuildContext context, String url, double logicalWidth) =>
+    bunnyOptimizedUrl(url, width: imagePixelWidth(context, logicalWidth));
+
 /// Warms the cache for an upcoming carousel image using the exact same
 /// resized-URL computation NetworkImageWidget itself uses, so the cache key
 /// matches and the image is already decoded by the time a PageView actually

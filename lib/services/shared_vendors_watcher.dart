@@ -74,6 +74,11 @@ class SharedVendorsWatcher {
   static final StreamController<List<VendorModel>> _controller =
       StreamController<List<VendorModel>>.broadcast();
   static List<VendorModel> _baseVendors = [];
+  // True once the section list has loaded for the active (section, location),
+  // so an EMPTY in-radius list can be told apart from "not loaded yet" and
+  // still reach Home (which then shows its "not available in this region"
+  // message instead of waiting forever behind the loading skeleton).
+  static bool _baseLoaded = false;
   static List<VendorModel>? _latest;
   static String? _activeKey;
 
@@ -259,8 +264,17 @@ class SharedVendorsWatcher {
     }
   }
 
+  // TEST BUILDS ONLY: `--dart-define=TEST_RADIUS_KM=1` overrides the section's
+  // nearByRadius so an empty region / a real cap can be tried on a phone without
+  // touching the live admin value. Unset (the default, and every release build
+  // meant for users) = no override.
+  static final double _testRadiusKm =
+      double.tryParse(const String.fromEnvironment('TEST_RADIUS_KM')) ?? -1;
+
   static List<VendorModel> _withinRadius(List<VendorModel> vendors, double lat, double lng) {
-    final radiusKm = sectionConstantModel?.nearByRadius?.toDouble();
+    final radiusKm = _testRadiusKm > 0
+        ? _testRadiusKm
+        : sectionConstantModel?.nearByRadius?.toDouble();
     if (radiusKm == null) return vendors;
     return vendors.where((v) => _distanceKm(lat, lng, v.latitude, v.longitude) <= radiusKm).toList();
   }
@@ -323,6 +337,7 @@ class SharedVendorsWatcher {
       // yet, skip the distance filter entirely rather than guessing a km
       // value that isn't the admin's to begin with.
       _baseVendors = _withinRadius(vendors, lat, lng);
+      _baseLoaded = true;
       _emit();
     } catch (e) {
       debugPrint('[SharedVendorsWatcher] base vendor load error: $e');
@@ -350,7 +365,7 @@ class SharedVendorsWatcher {
     // Wait for open/closed too: the list no longer carries it, and showing
     // the list first would flash every restaurant as closed.
     final statuses = _statuses;
-    if (_baseVendors.isEmpty || statuses == null) return;
+    if ((_baseVendors.isEmpty && !_baseLoaded) || statuses == null) return;
     final list = _baseVendors.map((v) {
       final open = statuses[v.id];
       if (open != null) v.reststatus = open;
@@ -368,6 +383,7 @@ class SharedVendorsWatcher {
   static void stop() {
     _activeKey = null;
     _baseVendors = [];
+    _baseLoaded = false;
     _statuses = null;
     _latest = null;
   }

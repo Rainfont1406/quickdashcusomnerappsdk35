@@ -211,15 +211,18 @@ const GlobalURL = "https://admin.quickdash.co.in/";
 // yet, unaffected.
 const CloudFunctionsBaseURL = "https://asia-south1-quick-dash-84f6a.cloudfunctions.net";
 
-// createVerifiedCodOrder is DIFFERENT - deliberately NOT switched with the
-// constant above. Confirmed via `gcloud functions describe` (2026-08-23)
-// that it exists ONLY in us-central1, never asia-south1, and its source
-// code couldn't be found in any local repo to safely deploy it to a second
-// region the way the others above were. Pinning this one call to its own
-// hardcoded us-central1 URL, decoupled from CloudFunctionsBaseURL, so a
-// future base-URL change can never silently 404 every Cash-on-Delivery
-// order placed on this build.
-const CodOrderFunctionURL = "https://us-central1-quick-dash-84f6a.cloudfunctions.net/createVerifiedCodOrder";
+// createVerifiedCodOrder was DIFFERENT until 2026-10-04: it existed ONLY in
+// us-central1 (its source was lost when the other payment functions moved to
+// asia-south1), so every COD order crossed regions to read Firestore in Mumbai.
+// The source now lists BOTH regions (admin panel functions/index.js); once the
+// Mumbai copy is deployed this build should call it, next to Firestore. Older installed builds keep
+// calling the us-central1 copy, which stays deployed - never remove it while
+// those builds are in use.
+// !! SHIP ORDER: the asia-south1 copy MUST be deployed and confirmed live
+// before a build with this URL reaches users, or every COD order 404s.
+// The asia-south1 copy was deployed 2026-10-04 (admin 09e5258) and exists, so this
+// build calls it. The us-central1 copy stays deployed for older installed builds.
+const CodOrderFunctionURL = "https://asia-south1-quick-dash-84f6a.cloudfunctions.net/createVerifiedCodOrder";
 const Currency = 'currencies';
 const STORAGE_ROOT = 'emart';
 

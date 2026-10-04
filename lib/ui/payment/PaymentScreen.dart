@@ -4161,7 +4161,12 @@ class PaymentScreenState extends State<PaymentScreen> {
       couponCode: widget.couponCode,
       couponId: widget.couponId,
       sectionId: sectionConstantModel?.id ?? '',
-      adminCommission: (widget.take_away ?? false)
+      // 2026-10-04: Dining / Bill Pay (orderType set) use the Takeaway tier too,
+      // same rule as CheckoutScreen and the server (verifyOrder: takeAway ||
+      // orderType). Only take_away was checked here, so every Dining/Bill Pay
+      // order submitted the Delivery rate (10) and the server flagged
+      // 'Commission mismatch: submitted 10, verified 5' (15 orders to date).
+      adminCommission: ((widget.take_away ?? false) || isDineawayOrder)
           ? (sectionConstantModel?.adminCommision?.takeawayCommission ?? 0).toString()
           : (sectionConstantModel?.adminCommision?.commission ?? 0).toString(),
       adminCommissionType: sectionConstantModel?.adminCommision?.type,

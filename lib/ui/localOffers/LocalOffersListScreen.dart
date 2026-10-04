@@ -1,14 +1,23 @@
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:easy_localization/easy_localization.dart';
+import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/LocalOfferCategoryModel.dart';
 import 'package:emartconsumer/model/LocalOfferModel.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/app_cache_config.dart';
 import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/localOffers/LocalOfferDetailsScreen.dart';
 import 'package:flutter/material.dart';
+
+// Pixel width to request from the Bunny Optimizer (and to decode at) for an
+// image shown [logicalWidth] wide: display width x pixel ratio, same rule as
+// NetworkImageWidget. Local Offers images used a plain CachedNetworkImage with
+// no resize parameters, no decode ceiling and the library's default cache.
+int _offerImagePx(BuildContext context, double logicalWidth) =>
+    (logicalWidth * MediaQuery.of(context).devicePixelRatio).round().clamp(1, 2000).toInt();
 
 // Offers & Discounts (2026-08-03) - admin-authored local-business promotion
 // feed. Deliberately separate from the food/vendor system - no vendor/
@@ -359,7 +368,10 @@ class _CategoryChip extends StatelessWidget {
                 color: iconColor.withOpacity(dark ? 0.28 : 0.15),
                 child: (iconUrl != null && iconUrl!.isNotEmpty)
                     ? CachedNetworkImage(
-                        imageUrl: iconUrl!,
+                        imageUrl: bunnyOptimizedUrl(iconUrl!, width: _offerImagePx(context, 44)),
+                        cacheManager: AppCacheConfig.images,
+                        maxWidthDiskCache: _offerImagePx(context, 44),
+                        memCacheWidth: _offerImagePx(context, 44),
                         fit: BoxFit.cover,
                         placeholder: (context, url) => Icon(icon, size: 24, color: iconColor),
                         errorWidget: (context, url, error) => Icon(icon, size: 24, color: iconColor),
@@ -485,7 +497,11 @@ class _OfferCard extends StatelessWidget {
                 borderRadius: const BorderRadius.only(topLeft: Radius.circular(18), topRight: Radius.circular(18)),
                 child: (imageUrl ?? '').isNotEmpty
                     ? CachedNetworkImage(
-                        imageUrl: imageUrl!,
+                        imageUrl: bunnyOptimizedUrl(imageUrl!,
+                            width: _offerImagePx(context, MediaQuery.of(context).size.width - 32)),
+                        cacheManager: AppCacheConfig.images,
+                        maxWidthDiskCache: _offerImagePx(context, MediaQuery.of(context).size.width - 32),
+                        memCacheWidth: _offerImagePx(context, MediaQuery.of(context).size.width - 32),
                         fit: BoxFit.cover,
                         placeholder: (context, url) => Container(
                           color: dark ? AppThemeData.darkBgTertiary : AppThemeData.grey100,

@@ -46,6 +46,8 @@ import 'package:emartconsumer/ui/home/home_skeleton.dart';
 import 'package:emartconsumer/utils/network_image_widget.dart';
 import 'package:emartconsumer/widget/place_picker_osm.dart';
 import 'package:emartconsumer/widget/story_view/controller/story_controller.dart';
+import 'package:emartconsumer/widget/story_view/story_cache_manager.dart'
+    show StoryVideoCacheManager;
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:geocoding/geocoding.dart';
@@ -1514,6 +1516,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     //   const SizedBox(),
                     ///
 
+                    if (!_noRestaurantsHere)
                     Column(
                       mainAxisAlignment: MainAxisAlignment.start,
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1534,6 +1537,9 @@ class _HomeScreenState extends State<HomeScreen> {
                     bannerMiddleHome.isEmpty
                         ? const SizedBox()
                         : BannerView(bannerList: bannerMiddleHome, sectionLabel: 'MiddleBanner'),
+                    if (_noRestaurantsHere)
+                      _noRestaurantsInRegion()
+                    else
                     Padding(
                       padding: const EdgeInsets.symmetric(
                           horizontal: 16),
@@ -1837,6 +1843,85 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  // Shown instead of the (empty) restaurant sections when the selected
+  // location has no restaurant inside the section's nearByRadius. Same look
+  // as the Dine-in empty state: soft icon, short title, one line of help.
+  // Deliberately says nothing about delivery or a km number - this is a
+  // dine-in-first platform and the radius is an admin setting.
+  // True only once the skeleton is gone AND the vendor stream has delivered
+  // its first (possibly empty) list - so it never flashes during loading.
+  bool get _noRestaurantsHere =>
+      !isLoading && _firstVendorReceived && vendors.isEmpty;
+
+  Widget _noRestaurantsInRegion() {
+    final bool dark = isDarkMode(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(24, 48, 24, 120),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 112,
+            height: 112,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: AppThemeData.primary500.withOpacity(dark ? 0.18 : 0.10),
+            ),
+            child: Icon(Icons.location_off_outlined,
+                size: 56, color: AppThemeData.primary500),
+          ),
+          const SizedBox(height: 24),
+          Text(
+            'Restaurants are not available in this region yet'.tr(),
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 18,
+              fontFamily: AppThemeData.bold,
+              color: dark ? AppThemeData.grey50 : AppThemeData.grey900,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'We are not serving this location right now. Try a different address to see restaurants near you.'
+                .tr(),
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 14,
+              height: 1.4,
+              color: dark ? Colors.white60 : Colors.grey.shade600,
+            ),
+          ),
+          if (MyAppState.currentUser != null) ...[
+            const SizedBox(height: 24),
+            ElevatedButton.icon(
+              onPressed: _changeLocationFromEmptyState,
+              icon: const Icon(Icons.edit_location_alt_outlined, size: 20),
+              label: Text('Change location'.tr()),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppThemeData.primary500,
+                foregroundColor: Colors.white,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(24)),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  // Same flow as the address chip in the Home header (signed-in path).
+  Future<void> _changeLocationFromEmptyState() async {
+    final value = await Navigator.of(context).push(
+        MaterialPageRoute(builder: (context) => DeliveryAddressScreen()));
+    if (value != null) {
+      MyAppState.selectedPosotion = value as AddressModel;
+      _onLocationChanged();
+    }
+  }
+
   Widget _sectionTitle(String name) {
     return Text(
       name.tr(),
@@ -2038,6 +2123,14 @@ class _HomeScreenState extends State<HomeScreen> {
       }
 
       if (element1.isExpired) {
+        // Free the disk held by this story's cached video (rolling cache).
+        for (final v in element1.videoUrl) {
+          final u = v.toString();
+          if (u.isNotEmpty) {
+            // ignore: unawaited_futures
+            StoryVideoCacheManager.evictFor(u);
+          }
+        }
         print(
             '\nðŸ“ Skipping story (expired) for vendorID: ${element1.vendorID}');
         return;
@@ -2205,15 +2298,26 @@ class _HomeScreenState extends State<HomeScreen> {
     // session (views on this phone are recorded locally as they happen).
     await _timedStep('getData -> getStory', () => FireStoreUtils().getStory())
         .then((value) { allStories = value; });
-    if (allStories.isNotEmpty) {
-      await _timedStep('getData -> _loadViewedTodayIds', () => _loadViewedTodayIds());
-    }
     debugPrint(
         '[HOME-PERF] Future.wait([getStory, _loadViewedTodayIds]) END — elapsed '
         '${storiesStopwatch.elapsedMilliseconds}ms');
     if (!mounted) return;
     _storiesLoaded = true;
     _filterStories();
+    // 2026-10-03: the server catch-up for "viewed today" used to be awaited
+    // above, so the story row waited on the first server round trip of the
+    // session (5+ s on a slow network) just to order the rings. Views made on
+    // this phone are already in the local copy applied by _filterStories();
+    // this only adds views made on another device, so run it in the background
+    // and re-sort when it lands.
+    if (allStories.isNotEmpty) {
+      // ignore: unawaited_futures
+      _timedStep('getData -> _loadViewedTodayIds (background)',
+              () => _loadViewedTodayIds())
+          .then((_) {
+        if (mounted) _filterStories();
+      }).catchError((_) {});
+    }
   }
 
   /// Fetches today's story view records for the current user and populates
@@ -2650,6 +2754,9 @@ class _StoryViewState extends State<StoryView> {
                                   imageUrl: url,
                                   width: double.infinity,
                                   height: double.infinity,
+                                  // The circle is 64 px wide; with infinite width the
+                                  // resize request fell back to 800 px.
+                                  resizeWidth: 64,
                                   fit: BoxFit.cover,
                                   cacheManager: perfDiagnosticCacheManager,
                                   onLoaded: () =>

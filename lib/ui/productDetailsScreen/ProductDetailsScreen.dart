@@ -40,6 +40,7 @@ import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../vendorProductsScreen/newVendorProductsScreen.dart';
+import 'package:emartconsumer/services/app_cache_config.dart';
 
 class ProductDetailsScreen extends StatefulWidget {
   final ProductModel productModel;
@@ -522,7 +523,10 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                     },
                     allowImplicitScrolling: true,
                     itemBuilder: (context, index) => CachedNetworkImage(
-                          imageUrl: getImageVAlidUrl(productImage[index]),
+                          imageUrl: sharedImageUrl(context, getImageVAlidUrl(productImage[index]), MediaQuery.of(context).size.width),
+cacheManager: AppCacheConfig.images,
+maxWidthDiskCache: imagePixelWidth(context, MediaQuery.of(context).size.width),
+memCacheWidth: imagePixelWidth(context, MediaQuery.of(context).size.width),
                           imageBuilder: (context, imageProvider) => Container(
                             decoration: BoxDecoration(
                               image: DecorationImage(
@@ -1592,7 +1596,10 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                         child: CachedNetworkImage(
                                           height: 40,
                                           width: 40,
-                                          imageUrl: getImageVAlidUrl(widget.vendorModel.photo),
+                                          imageUrl: sharedImageUrl(context, getImageVAlidUrl(widget.vendorModel.photo), 40),
+cacheManager: AppCacheConfig.images,
+maxWidthDiskCache: imagePixelWidth(context, 40),
+memCacheWidth: imagePixelWidth(context, 40),
                                           imageBuilder: (context, imageProvider) => Container(
                                             decoration: BoxDecoration(
                                               image: DecorationImage(
@@ -1695,8 +1702,11 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                           child: CachedNetworkImage(
                                             height: 40,
                                             width: 40,
-                                            imageUrl: getImageVAlidUrl(
-                                                brandModel!.photo.toString()),
+                                            imageUrl: sharedImageUrl(context, getImageVAlidUrl(
+                                                brandModel!.photo.toString()), 40),
+cacheManager: AppCacheConfig.images,
+maxWidthDiskCache: imagePixelWidth(context, 40),
+memCacheWidth: imagePixelWidth(context, 40),
                                             imageBuilder:
                                                 (context, imageProvider) =>
                                                     Container(
@@ -2868,10 +2878,12 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                                     Expanded(
                                                         child:
                                                             CachedNetworkImage(
-                                                      imageUrl:
-                                                          getImageVAlidUrl(
+                                                      imageUrl: sharedImageUrl(context, getImageVAlidUrl(
                                                               productModel
-                                                                  .photo),
+                                                                  .photo), MediaQuery.of(context).size.width * 0.38),
+cacheManager: AppCacheConfig.images,
+maxWidthDiskCache: imagePixelWidth(context, MediaQuery.of(context).size.width * 0.38),
+memCacheWidth: imagePixelWidth(context, MediaQuery.of(context).size.width * 0.38),
                                                       imageBuilder: (context,
                                                               imageProvider) =>
                                                           Container(
@@ -3122,8 +3134,11 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                                 children: [
                                                   Expanded(
                                                       child: CachedNetworkImage(
-                                                    imageUrl: getImageVAlidUrl(
-                                                        productModel.photo),
+                                                    imageUrl: sharedImageUrl(context, getImageVAlidUrl(
+                                                        productModel.photo), MediaQuery.of(context).size.width * 0.38),
+cacheManager: AppCacheConfig.images,
+maxWidthDiskCache: imagePixelWidth(context, MediaQuery.of(context).size.width * 0.38),
+memCacheWidth: imagePixelWidth(context, MediaQuery.of(context).size.width * 0.38),
                                                     imageBuilder: (context,
                                                             imageProvider) =>
                                                         Container(
@@ -3435,10 +3450,13 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                             CachedNetworkImage(
                                               height: 45,
                                               width: 45,
-                                              imageUrl: getImageVAlidUrl(
+                                              imageUrl: sharedImageUrl(context, getImageVAlidUrl(
                                                   reviewList[index]
                                                       .profile
-                                                      .toString()),
+                                                      .toString()), 45),
+cacheManager: AppCacheConfig.images,
+maxWidthDiskCache: imagePixelWidth(context, 45),
+memCacheWidth: imagePixelWidth(context, 45),
                                               imageBuilder:
                                                   (context, imageProvider) =>
                                                       Container(
@@ -3568,11 +3586,13 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                                                       child: CachedNetworkImage(
                                                         height: 65,
                                                         width: 65,
-                                                        imageUrl:
-                                                            getImageVAlidUrl(
+                                                        imageUrl: sharedImageUrl(context, getImageVAlidUrl(
                                                                 reviewList[index]
                                                                         .photos![
-                                                                    index1]),
+                                                                    index1]), 65),
+cacheManager: AppCacheConfig.images,
+maxWidthDiskCache: imagePixelWidth(context, 65),
+memCacheWidth: imagePixelWidth(context, 65),
                                                         imageBuilder: (context,
                                                                 imageProvider) =>
                                                             Container(
