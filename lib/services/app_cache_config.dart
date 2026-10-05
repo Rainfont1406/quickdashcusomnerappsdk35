@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' as io;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
@@ -134,6 +135,27 @@ class ImageKeyRegistry {
     });
   }
 
+  /// 2026-10-05: flutter_cache_manager 3.4.1's removeFile() deletes only the
+  /// database row - its internal delete opens io.File(relativePath), a bare
+  /// file name that is not inside the cache folder, so the picture itself
+  /// stayed on disk (found on the test phone: 87 of 137 files, 65.8 MB, had no
+  /// row). So: look the file up through the manager (it resolves the real path
+  /// inside the cache folder), delete THAT file, then remove the row. If the
+  /// file is already gone the stale row is still removed.
+  static Future<void> _removeWithFile(CacheManager manager, String key) async {
+    try {
+      final info = await manager.getFileFromCache(key, ignoreMemCache: true);
+      if (info != null) {
+        try {
+          if (await info.file.exists()) await info.file.delete();
+        } catch (e) {
+          debugPrint('ImageKeyRegistry: could not delete file for $key: $e');
+        }
+      }
+    } catch (_) {}
+    await manager.removeFile(key);
+  }
+
   /// Deletes every remembered cache file whose address starts with one of
   /// [rawUrls] (the cache key is the raw address plus the width/quality query
   /// the app adds). Returns how many addresses were evicted.
@@ -147,9 +169,9 @@ class ImageKeyRegistry {
       for (final base in map.keys.toList()) {
         if (!wanted.any(base.startsWith)) continue;
         for (final rk in map[base] ?? const <String>[]) {
-          await manager.removeFile(rk);
+          await _removeWithFile(manager, rk);
         }
-        await manager.removeFile(base);
+        await _removeWithFile(manager, base);
         map.remove(base);
         evicted++;
       }
@@ -186,6 +208,87 @@ class ImageSetJanitor {
     } catch (e) {
       debugPrint('ImageSetJanitor[$group].sync failed: $e');
     }
+  }
+}
+
+/// 2026-10-05: deletes ORPHAN files of the image cache: a file that sits
+/// directly inside this cache's own folder AND that no row of this cache's
+/// database references (left behind by the library's own eviction/expiry, which
+/// deletes rows but not files). Conservative by design:
+///  - only this cache's folder (its basename must be the cache key); never any
+///    other path, never subfolders;
+///  - only plain files older than [_minAge] (a download in progress may not
+///    have its row yet);
+///  - nothing is deleted if the database cannot be read or lists no rows at all
+///    (an unreadable database must not turn every file into an "orphan");
+///  - at most [_maxDeletesPerRun] files per run and at most one run per
+///    [_every] (a flag in SharedPreferences, set only after a finished run).
+class ImageOrphanSweeper {
+  static const String _prefKey = 'image_orphan_sweep_at_v1';
+  static const Duration _every = Duration(hours: 24);
+  static const Duration _minAge = Duration(minutes: 15);
+  static const int _maxDeletesPerRun = 400;
+  static bool _running = false;
+
+  static Future<void> maybeRun() async {
+    if (_running) return;
+    _running = true;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final last = prefs.getInt(_prefKey) ?? 0;
+      final now = DateTime.now().millisecondsSinceEpoch;
+      if (now - last < _every.inMilliseconds) return;
+      final ok = await _sweep();
+      if (ok) await prefs.setInt(_prefKey, now);
+    } catch (e) {
+      debugPrint('ImageOrphanSweeper failed: $e');
+    } finally {
+      _running = false;
+    }
+  }
+
+  /// Returns true when the sweep ran to completion (also when nothing was an
+  /// orphan); false when it refused to run (then it is retried next time).
+  static Future<bool> _sweep() async {
+    final cfg = AppCacheConfig._imageConfig;
+    // The cache database opens lazily on the manager's first use; reading it
+    // before that threw "Null check operator" on the test phone. A lookup of
+    // a key that cannot exist makes the manager open it (and returns null).
+    await AppCacheConfig.images.getFileFromCache('orphan-sweep-warmup');
+    final rows = await cfg.repo.getAllObjects();
+    if (rows.isEmpty) {
+      debugPrint('ImageOrphanSweeper: database lists no rows - refusing to delete anything');
+      return false;
+    }
+    final referenced = <String>{for (final r in rows) r.relativePath};
+    final probe = await cfg.fileSystem.createFile('.orphan_probe');
+    final dir = io.Directory(probe.parent.path);
+    final dirName = dir.path.split(RegExp(r'[\\/]')).where((e) => e.isNotEmpty).last;
+    if (dirName != AppCacheConfig.imageCacheKey) {
+      debugPrint('ImageOrphanSweeper: unexpected folder "$dirName" - refusing to run');
+      return false;
+    }
+    if (!await dir.exists()) return true;
+    final cutoff = DateTime.now().subtract(_minAge);
+    var seen = 0, deleted = 0, bytes = 0;
+    await for (final e in dir.list(followLinks: false)) {
+      if (e is! io.File) continue;
+      seen++;
+      final name = e.path.split(RegExp(r'[\\/]')).last;
+      if (referenced.contains(name)) continue;
+      try {
+        final stat = await e.stat();
+        if (stat.modified.isAfter(cutoff)) continue;
+        if (deleted >= _maxDeletesPerRun) break;
+        final len = stat.size;
+        await e.delete();
+        deleted++;
+        bytes += len;
+      } catch (_) {}
+    }
+    debugPrint('ImageOrphanSweeper: $seen files in folder, ${rows.length} database rows, '
+        '$deleted orphan file(s) deleted, ${(bytes / 1048576).toStringAsFixed(1)} MB freed');
+    return true;
   }
 }
 
@@ -298,14 +401,16 @@ class AppCacheConfig {
   // maxWidth, so it only ever touches the resized entry, and the
   // now-unused original becomes the least-recently-used one and is what
   // eviction reclaims first.
-  static final AppImageCacheManager images = AppImageCacheManager(
-    Config(
-      imageCacheKey,
-      stalePeriod: imageStalePeriod,
-      maxNrOfCacheObjects: maxImageFiles,
-      fileService: ImmutableFileService(),
-    ),
+  // 2026-10-05: the Config is now a named field (same values as before - no
+  // size or period change) so ImageOrphanSweeper can reach this cache's own
+  // database and folder.
+  static final Config _imageConfig = Config(
+    imageCacheKey,
+    stalePeriod: imageStalePeriod,
+    maxNrOfCacheObjects: maxImageFiles,
+    fileService: ImmutableFileService(),
   );
+  static final AppImageCacheManager images = AppImageCacheManager(_imageConfig);
 
   // ── Per-file size ceiling ───────────────────────────────────────────────
   //

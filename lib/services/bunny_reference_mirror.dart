@@ -266,6 +266,43 @@ Future<List<VendorModel>?> fetchVendorListFromBunny(String sectionId) async {
   }
 }
 
+/// 2026-10-05: true only when the on-phone vendor list can be trusted to be
+/// COMPLETE. The list file itself has no count or version (only _builtAt +
+/// items), but the server writes a second file, vendor-status/{section}.json,
+/// from the SAME vendor query (and a vendor save patches both together), so
+/// the two must name exactly the same vendors. Used to decide whether a
+/// cleanup that deletes cached pictures is allowed: a short but valid list
+/// must never delete legitimate pictures. Fails closed: any error, missing
+/// file, empty file or mismatch returns false.
+Future<bool> vendorListLooksComplete(String sectionId,
+    {Duration statusTtl = const Duration(hours: 6)}) async {
+  try {
+    final listBody = await cachedBunnyGet(
+        'bunny_vendorList_$sectionId',
+        'https://$_kBunnyCdnHost/vendor-lists/$sectionId.json',
+        kBunnyReferenceTtl);
+    if (listBody == null) return false;
+    final decoded = jsonDecode(listBody);
+    final items = decoded is Map ? decoded['items'] : null;
+    if (items is! List || items.isEmpty) return false;
+    final listIds = <String>{
+      for (final i in items)
+        if (i is Map && i['id'] != null) i['id'].toString()
+    };
+    if (listIds.isEmpty) return false;
+    final statuses = await fetchVendorStatusesFromBunny(sectionId, statusTtl);
+    if (statuses == null || statuses.isEmpty) return false;
+    final ok = listIds.length == statuses.length && listIds.containsAll(statuses.keys);
+    if (!ok) {
+      debugPrint('[VendorListCheck] list has ${listIds.length} vendors, status file '
+          '${statuses.length} - not verified complete, picture cleanup skipped');
+    }
+    return ok;
+  } catch (_) {
+    return false;
+  }
+}
+
 /// 2026-09-27: the vendor list only when it changed on Bunny since the copy
 /// on the phone (e.g. a vendor's new working hours) - null when unchanged.
 /// Used on cold start and pull-to-refresh after the phone's copy is shown.

@@ -285,6 +285,10 @@ class SharedVendorsWatcher {
     try {
       final mirrored = await fetchVendorListFromBunny(sectionId);
       List<VendorModel> vendors;
+      // 2026-10-05: true when the list came from a fresh server read of the whole
+      // section (the Firestore fallback below) - one of the two ways a list may
+      // be trusted as complete for the picture cleanup.
+      var listFromServer = false;
       if (mirrored != null) {
         vendors = mirrored;
       } else {
@@ -296,6 +300,7 @@ class SharedVendorsWatcher {
             .collection(VENDORS)
             .where('section_id', isEqualTo: sectionId)
             .getLogged('SharedVendorsWatcher:VENDORS-fallback');
+        listFromServer = !snap.metadata.isFromCache;
         vendors = [];
         for (final doc in snap.docs) {
           final data = doc.data();
@@ -342,6 +347,11 @@ class SharedVendorsWatcher {
       // vendor that left the section). Uses the list BEFORE the radius filter,
       // so a vendor that is merely out of range keeps its pictures, and skips
       // an empty list (a failed load must never wipe the cache).
+      // 2026-10-05: cleanup only for a list that is verified COMPLETE - the
+      // mirror list must name exactly the vendors of the server's status file
+      // (see vendorListLooksComplete), or the list must be a fresh server read
+      // (the fallback). Anything else (empty, error, short/unverified) deletes
+      // nothing. A separate bounded daily sweep removes orphan files.
       if (vendors.isNotEmpty) {
         final urls = <String>{};
         for (final v in vendors) {
@@ -353,7 +363,17 @@ class SharedVendorsWatcher {
             if (o.isNotEmpty) urls.add(o);
           }
         }
-        unawaited(ImageSetJanitor.sync('vendors_$sectionId', urls));
+        final fromMirror = mirrored != null;
+        unawaited(() async {
+          final trusted =
+              fromMirror ? await vendorListLooksComplete(sectionId) : listFromServer;
+          if (trusted) {
+            await ImageSetJanitor.sync('vendors_$sectionId', urls);
+          } else {
+            debugPrint('[SharedVendorsWatcher] vendor list not verified complete - picture cleanup skipped');
+          }
+          await ImageOrphanSweeper.maybeRun();
+        }());
       }
       _baseVendors = _withinRadius(vendors, lat, lng);
       _baseLoaded = true;
