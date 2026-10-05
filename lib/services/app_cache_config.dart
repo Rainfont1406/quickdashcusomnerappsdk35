@@ -161,32 +161,38 @@ class ImageKeyRegistry {
   }
 }
 
-/// 2026-10-05: removes the cached pictures of Local Offers that are no longer
-/// shown (expired, removed, or whose banner / category icon was replaced).
-/// Remembers the last set of addresses in SharedPreferences so a change that
-/// happened while the app was closed is still caught on the next load.
-class LocalOfferImageJanitor {
-  static const String _prefKey = 'local_offer_image_urls_v1';
-
-  /// [currentUrls] must be the FULL set of addresses currently shown (all
-  /// active offers' banners + all category icons). Do not call it with an
-  /// empty set or a category-filtered subset - callers skip those cases.
-  static Future<void> sync(Iterable<String> currentUrls) async {
+/// 2026-10-05: removes the cached pictures of a GROUP of addresses that are no
+/// longer wanted (an expired Local Offer, a replaced vendor photo, a vendor
+/// that left the list). Remembers the last full set of the group in
+/// SharedPreferences, so a change made while the app was closed is caught on
+/// the next load. Every group keeps its own saved set.
+class ImageSetJanitor {
+  /// [currentUrls] must be the FULL set of addresses the group shows right now
+  /// (never a filtered or partial list). An empty set is ignored - a failed or
+  /// offline load must never wipe the cache.
+  static Future<void> sync(String group, Iterable<String> currentUrls) async {
     try {
       final current = currentUrls.where((u) => u.isNotEmpty).toSet();
       if (current.isEmpty) return;
       final prefs = await SharedPreferences.getInstance();
-      final previous = (prefs.getStringList(_prefKey) ?? const <String>[]).toSet();
+      final prefKey = 'image_set_$group';
+      final previous = (prefs.getStringList(prefKey) ?? const <String>[]).toSet();
       final gone = previous.difference(current);
       if (gone.isNotEmpty) {
         final n = await ImageKeyRegistry.evict(AppCacheConfig.images, gone);
-        debugPrint('LocalOfferImageJanitor: ${gone.length} address(es) gone, $n evicted from cache');
+        debugPrint('ImageSetJanitor[$group]: ${gone.length} address(es) gone, $n evicted from cache');
       }
-      await prefs.setStringList(_prefKey, current.toList());
+      await prefs.setStringList(prefKey, current.toList());
     } catch (e) {
-      debugPrint('LocalOfferImageJanitor.sync failed: $e');
+      debugPrint('ImageSetJanitor[$group].sync failed: $e');
     }
   }
+}
+
+/// Local Offers: all active offers' banners + all category icons.
+class LocalOfferImageJanitor {
+  static Future<void> sync(Iterable<String> currentUrls) =>
+      ImageSetJanitor.sync('local_offers', currentUrls);
 }
 
 /// 2026-10-03: treats every downloaded image as immutable.

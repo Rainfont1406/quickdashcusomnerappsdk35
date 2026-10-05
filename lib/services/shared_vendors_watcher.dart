@@ -1,3 +1,4 @@
+import 'package:emartconsumer/services/app_cache_config.dart';
 import 'dart:async';
 import 'dart:math' as math;
 
@@ -336,6 +337,24 @@ class SharedVendorsWatcher {
       // section doc loads), so if sectionConstantModel itself isn't loaded
       // yet, skip the distance filter entirely rather than guessing a km
       // value that isn't the admin's to begin with.
+      // 2026-10-05: drop the cached pictures of anything that is no longer in
+      // the whole-section list (a replaced logo / gallery / menu photo, or a
+      // vendor that left the section). Uses the list BEFORE the radius filter,
+      // so a vendor that is merely out of range keeps its pictures, and skips
+      // an empty list (a failed load must never wipe the cache).
+      if (vendors.isNotEmpty) {
+        final urls = <String>{};
+        for (final v in vendors) {
+          if (v.photo.isNotEmpty) urls.add(v.photo);
+          for (final e in [...v.photos, ...v.vendorMenuPhotos]) {
+            final c = VendorModel.coverPhotoUrl(e);
+            final o = VendorModel.originalPhotoUrl(e);
+            if (c.isNotEmpty) urls.add(c);
+            if (o.isNotEmpty) urls.add(o);
+          }
+        }
+        unawaited(ImageSetJanitor.sync('vendors_$sectionId', urls));
+      }
       _baseVendors = _withinRadius(vendors, lat, lng);
       _baseLoaded = true;
       _emit();
