@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
@@ -109,6 +111,17 @@ class _LocalOffersListScreenState extends State<LocalOffersListScreen> {
     ]);
     if (!mounted) return;
     final offers = _onlyActive(results[1] as List<LocalOfferModel>)..sort(_compareOffers);
+    // 2026-10-05: drop the cached pictures of offers that expired / were
+    // removed / got a new banner or icon. Skipped when either list is empty
+    // (a failed or offline fetch returns an empty list - that must never wipe
+    // the cache).
+    final cats = results[0] as List<LocalOfferCategoryModel>;
+    if (offers.isNotEmpty && cats.isNotEmpty) {
+      unawaited(LocalOfferImageJanitor.sync([
+        for (final o in offers) ...o.bannerImageUrls,
+        for (final c in cats) c.iconUrl ?? '',
+      ]));
+    }
     setState(() {
       _categories = results[0] as List<LocalOfferCategoryModel>;
       _allOffersUnfiltered

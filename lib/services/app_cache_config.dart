@@ -1,7 +1,11 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 // On-device cache ceilings (2026-09-10).
 //
@@ -33,6 +37,156 @@ import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 /// BaseCacheManager, not something CacheManager gets by default.
 class AppImageCacheManager extends CacheManager with ImageCacheManager {
   AppImageCacheManager(super.config);
+
+  /// 2026-10-05: also remembers which cache keys each image address used
+  /// (the original under its url key, and the display-sized copy under
+  /// `resized_w{w}_h{h}_{key}`), so ImageKeyRegistry.evict can later remove an
+  /// expired or replaced picture from disk instead of leaving it to occupy a
+  /// slot until the 60-day / 1000-file rule pushes it out.
+  @override
+  Stream<FileResponse> getImageFile(
+    String url, {
+    String? key,
+    Map<String, String>? headers,
+    bool withProgress = false,
+    int? maxHeight,
+    int? maxWidth,
+  }) {
+    ImageKeyRegistry.note(key ?? url, maxWidth, maxHeight);
+    return super.getImageFile(url,
+        key: key,
+        headers: headers,
+        withProgress: withProgress,
+        maxHeight: maxHeight,
+        maxWidth: maxWidth);
+  }
+}
+
+/// 2026-10-05: which cache keys belong to which image address, so a picture
+/// that is no longer wanted (an expired Local Offer, a replaced banner) can be
+/// deleted from the on-device cache. Kept in memory and saved (debounced) in
+/// SharedPreferences; pictures cached before this existed are not listed and
+/// simply age out by the normal 60-day / 1000-file rule. Every operation is
+/// best-effort: a failure here must never affect showing an image.
+class ImageKeyRegistry {
+  static const String _prefKey = 'image_cache_keys_v1';
+  // Upper bound on remembered addresses (oldest dropped first).
+  static const int _maxBases = 2500;
+  static Map<String, List<String>>? _map;
+  static Future<void>? _loading;
+  static Timer? _saveTimer;
+
+  static Future<void> _ensureLoaded() {
+    return _loading ??= () async {
+      final map = <String, List<String>>{};
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final raw = prefs.getString(_prefKey);
+        if (raw != null && raw.isNotEmpty) {
+          final decoded = jsonDecode(raw) as Map<String, dynamic>;
+          decoded.forEach((k, v) => map[k] = [for (final x in v as List) x.toString()]);
+        }
+      } catch (_) {}
+      _map = map;
+    }();
+  }
+
+  static void note(String baseKey, int? maxWidth, int? maxHeight) {
+    unawaited(_note(baseKey, maxWidth, maxHeight));
+  }
+
+  static Future<void> _note(String baseKey, int? maxWidth, int? maxHeight) async {
+    try {
+      await _ensureLoaded();
+      final map = _map!;
+      var changed = false;
+      final list = map.putIfAbsent(baseKey, () {
+        changed = true;
+        return <String>[];
+      });
+      if (maxWidth != null || maxHeight != null) {
+        var rk = 'resized';
+        if (maxWidth != null) rk += '_w$maxWidth';
+        if (maxHeight != null) rk += '_h$maxHeight';
+        rk += '_$baseKey';
+        if (!list.contains(rk)) {
+          list.add(rk);
+          changed = true;
+        }
+      }
+      if (map.length > _maxBases) {
+        for (final k in map.keys.take(map.length - _maxBases).toList()) {
+          map.remove(k);
+        }
+        changed = true;
+      }
+      if (changed) _scheduleSave();
+    } catch (_) {}
+  }
+
+  static void _scheduleSave() {
+    _saveTimer?.cancel();
+    _saveTimer = Timer(const Duration(seconds: 5), () async {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(_prefKey, jsonEncode(_map));
+      } catch (_) {}
+    });
+  }
+
+  /// Deletes every remembered cache file whose address starts with one of
+  /// [rawUrls] (the cache key is the raw address plus the width/quality query
+  /// the app adds). Returns how many addresses were evicted.
+  static Future<int> evict(CacheManager manager, Iterable<String> rawUrls) async {
+    var evicted = 0;
+    try {
+      await _ensureLoaded();
+      final map = _map!;
+      final wanted = rawUrls.where((u) => u.isNotEmpty).toList();
+      if (wanted.isEmpty) return 0;
+      for (final base in map.keys.toList()) {
+        if (!wanted.any(base.startsWith)) continue;
+        for (final rk in map[base] ?? const <String>[]) {
+          await manager.removeFile(rk);
+        }
+        await manager.removeFile(base);
+        map.remove(base);
+        evicted++;
+      }
+      if (evicted > 0) _scheduleSave();
+    } catch (e) {
+      debugPrint('ImageKeyRegistry.evict failed: $e');
+    }
+    return evicted;
+  }
+}
+
+/// 2026-10-05: removes the cached pictures of Local Offers that are no longer
+/// shown (expired, removed, or whose banner / category icon was replaced).
+/// Remembers the last set of addresses in SharedPreferences so a change that
+/// happened while the app was closed is still caught on the next load.
+class LocalOfferImageJanitor {
+  static const String _prefKey = 'local_offer_image_urls_v1';
+
+  /// [currentUrls] must be the FULL set of addresses currently shown (all
+  /// active offers' banners + all category icons). Do not call it with an
+  /// empty set or a category-filtered subset - callers skip those cases.
+  static Future<void> sync(Iterable<String> currentUrls) async {
+    try {
+      final current = currentUrls.where((u) => u.isNotEmpty).toSet();
+      if (current.isEmpty) return;
+      final prefs = await SharedPreferences.getInstance();
+      final previous = (prefs.getStringList(_prefKey) ?? const <String>[]).toSet();
+      final gone = previous.difference(current);
+      if (gone.isNotEmpty) {
+        final n = await ImageKeyRegistry.evict(AppCacheConfig.images, gone);
+        debugPrint('LocalOfferImageJanitor: ${gone.length} address(es) gone, $n evicted from cache');
+      }
+      await prefs.setStringList(_prefKey, current.toList());
+    } catch (e) {
+      debugPrint('LocalOfferImageJanitor.sync failed: $e');
+    }
+  }
 }
 
 /// 2026-10-03: treats every downloaded image as immutable.
