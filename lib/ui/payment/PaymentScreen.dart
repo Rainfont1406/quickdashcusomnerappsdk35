@@ -217,6 +217,13 @@ class PaymentScreenState extends State<PaymentScreen> {
   // _showDiningGuestPicker is false.
   bool _guestSheetHandled = false;
   bool _guestCountConfirmed = false;
+  // 2026-10-06: true from the moment a Dining checkout opens until the
+  // restaurant's seat settings have loaded (_loadSeatAvailability). Until
+  // then, and until the guest-count sheet is confirmed, the page shows a
+  // loader under the Order Total instead of looking blank (it used to flash
+  // the payment-method list, then blank out to "just the order total" for a
+  // few seconds before the sheet slid up - reported as a white page).
+  bool _seatCheckPending = false;
 
   bool get _showDiningGuestPicker =>
       widget.orderType == 'Dining' &&
@@ -380,6 +387,7 @@ class PaymentScreenState extends State<PaymentScreen> {
     _razorPay.on(Razorpay.EVENT_EXTERNAL_WALLET, _handleExternalWaller);
     _razorPay.on(Razorpay.EVENT_PAYMENT_ERROR, _handlePaymentError);
     if (widget.orderType == 'Dining' && widget.products.isNotEmpty) {
+      _seatCheckPending = true;
       _loadSeatAvailability();
     }
     UpiAppsService.getInstalledApps().then((apps) {
@@ -399,6 +407,7 @@ class PaymentScreenState extends State<PaymentScreen> {
       if (!mounted) return;
       setState(() {
         _diningVendor = vendor;
+        _seatCheckPending = false;
         // Club/lounge (full_session) venues don't get the rolling-
         // availability signal at all (2026-08-25) - a guest staying all
         // night doesn't map to "seats freeing up as people finish and
@@ -430,6 +439,8 @@ class PaymentScreenState extends State<PaymentScreen> {
       _maybeShowGuestCountSheet();
     } catch (_) {
       // Non-critical - the footer just shows nothing if this fails.
+      // Never leave the page on its loader if the seat check failed.
+      if (mounted) setState(() => _seatCheckPending = false);
     }
   }
 
@@ -866,7 +877,8 @@ class PaymentScreenState extends State<PaymentScreen> {
     // _loadSeatAvailability) instead of this small inline banner - until
     // it's confirmed there, the payment methods below stay hidden rather
     // than showing underneath/behind the sheet.
-    final bool readyForPayment = !_showDiningGuestPicker || _guestCountConfirmed;
+    final bool readyForPayment =
+        !_seatCheckPending && (!_showDiningGuestPicker || _guestCountConfirmed);
 
     return PopScope(
       canPop: !isProcessingOrder,
@@ -892,7 +904,25 @@ class PaymentScreenState extends State<PaymentScreen> {
             child: Padding(
               padding: const EdgeInsets.only(bottom: 24),
               child: !readyForPayment
-                  ? _buildOrderSummaryCard(dark)
+                  ? Column(
+                      children: [
+                        _buildOrderSummaryCard(dark),
+                        const SizedBox(height: 56),
+                        const SizedBox(
+                          width: 28,
+                          height: 28,
+                          child: CircularProgressIndicator(strokeWidth: 3),
+                        ),
+                        const SizedBox(height: 14),
+                        Text(
+                          'Preparing your table options...'.tr(),
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: dark ? Colors.white60 : AppThemeData.neutral500,
+                          ),
+                        ),
+                      ],
+                    )
                   : Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
