@@ -27,6 +27,7 @@ import 'package:emartconsumer/payment/orangePayScreen.dart';
 import 'package:emartconsumer/payment/xenditModel.dart';
 import 'package:emartconsumer/payment/xenditScreen.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/dining_checkout_cache.dart';
 import 'package:emartconsumer/services/behavior/behavior_event_types.dart';
 import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/device_session_service.dart';
@@ -402,8 +403,13 @@ class PaymentScreenState extends State<PaymentScreen> {
       // 2026-09-25: seat settings only - vendor_live (~0.4 KB) first,
       // full vendor doc as the fallback.
       final vendorId = widget.products.first.vendorID;
-      final vendor = await FireStoreUtils().getVendorLive(vendorId) ??
+      final userId = MyAppState.currentUser!.userID;
+      // 2026-10-07: reused from memory when this customer was here a moment
+      // ago (backed out and came back) - see DiningCheckoutCache.
+      final vendor = DiningCheckoutCache.vendor(userId, vendorId) ??
+          await FireStoreUtils().getVendorLive(vendorId) ??
           await FireStoreUtils().getVendorByVendorID(vendorId);
+      DiningCheckoutCache.putVendor(userId, vendorId, vendor);
       if (!mounted) return;
       setState(() {
         _diningVendor = vendor;
@@ -422,19 +428,42 @@ class PaymentScreenState extends State<PaymentScreen> {
       // - separate try/catch so a failure here never blocks the seat-
       // availability banner above, which already loaded fine.
       try {
-        final existingGuests = await FireStoreUtils.getExistingBookingGuestCountToday(
-          vendorId: vendor.id,
-          customerId: MyAppState.currentUser!.userID,
-        );
+        final cachedBooking = DiningCheckoutCache.existingBooking(userId, vendorId);
+        final int? existingGuests;
+        if (cachedBooking.checked) {
+          existingGuests = cachedBooking.guests;
+        } else {
+          existingGuests = await FireStoreUtils.getExistingBookingGuestCountToday(
+            vendorId: vendor.id,
+            customerId: userId,
+          );
+          DiningCheckoutCache.putExistingBooking(userId, vendorId, existingGuests);
+        }
         if (!mounted) return;
         if (existingGuests != null) {
           setState(() {
             _existingBookingGuestCount = existingGuests;
-            _diningGuestCount = existingGuests;
+            _diningGuestCount = existingGuests!;
           });
         }
       } catch (_) {
         // Non-critical - falls back to the normal interactive picker.
+      }
+      // 2026-10-07: the customer already chose a guest count a moment ago
+      // (backed out of this screen and came back) - keep it, show "Guests: X"
+      // with a Change button instead of asking again.
+      final remembered = _existingBookingGuestCount == null
+          ? DiningCheckoutCache.guestCount(userId, vendorId)
+          : null;
+      if (remembered != null && _showDiningGuestPicker) {
+        if (mounted) {
+          setState(() {
+            _diningGuestCount = remembered;
+            _guestCountConfirmed = true;
+            _guestSheetHandled = true;
+          });
+        }
+        return;
       }
       _maybeShowGuestCountSheet();
     } catch (_) {
@@ -500,7 +529,8 @@ class PaymentScreenState extends State<PaymentScreen> {
     });
   }
 
-  Future<void> _showGuestCountSheet() async {
+  Future<void> _showGuestCountSheet({bool isChange = false}) async {
+    final int previousCount = _diningGuestCount;
     final dark = isDarkMode(context);
     await showModalBottomSheet<void>(
       context: context,
@@ -536,7 +566,14 @@ class PaymentScreenState extends State<PaymentScreen> {
               onPopInvokedWithResult: (didPop, _) {
                 if (didPop) return;
                 Navigator.of(sheetContext, rootNavigator: true).pop();
-                Navigator.of(context).maybePop();
+                if (isChange) {
+                  // Changing an already-confirmed count: Back just closes the
+                  // sheet and keeps the previous number (the first-time sheet
+                  // below cancels the whole checkout instead).
+                  if (mounted) setState(() => _diningGuestCount = previousCount);
+                } else {
+                  Navigator.of(context).maybePop();
+                }
               },
               child: SafeArea(
                 // top: false - this is a bottom sheet, never reaches the status
@@ -598,6 +635,8 @@ class PaymentScreenState extends State<PaymentScreen> {
                       child: ElevatedButton(
                         onPressed: () {
                           Navigator.of(sheetContext).pop();
+                          DiningCheckoutCache.putGuestCount(MyAppState.currentUser!.userID,
+                              widget.products.first.vendorID, _diningGuestCount);
                           setState(() => _guestCountConfirmed = true);
                         },
                         style: ElevatedButton.styleFrom(
@@ -927,6 +966,7 @@ class PaymentScreenState extends State<PaymentScreen> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         _buildOrderSummaryCard(dark),
+                        _guestSummaryRow(dark),
                         Padding(
                           padding: const EdgeInsets.symmetric(horizontal: 16),
                           child: _seatAvailabilityFooterBanner(dark),
@@ -1172,6 +1212,48 @@ class PaymentScreenState extends State<PaymentScreen> {
         preferredSize: const Size.fromHeight(1),
         child: Divider(height: 1, thickness: 1,
             color: dark ? AppThemeData.darkBorderSecondary : AppThemeData.neutral200),
+      ),
+    );
+  }
+
+  // 2026-10-07: the confirmed guest count, shown on the Payment page itself
+  // (it used to be visible only in the sheet, so a customer had to go back to
+  // check it). Dining orders with the guest picker only; a table booked
+  // earlier today is read-only, anything else can be changed in place.
+  Widget _guestSummaryRow(bool dark) {
+    if (!(_showDiningGuestPicker && _guestCountConfirmed)) return const SizedBox.shrink();
+    final bool fromBooking = _existingBookingGuestCount != null;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 10, 16, 2),
+      padding: const EdgeInsets.fromLTRB(14, 6, 6, 6),
+      decoration: BoxDecoration(
+        color: dark ? AppThemeData.darkBgTertiary : const Color(0xFFF7F7F9),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: dark ? AppThemeData.darkBorderPrimary : const Color(0xFFE5E5EA)),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.event_seat_outlined, size: 18, color: dark ? Colors.white70 : Colors.grey.shade700),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              fromBooking
+                  ? '${'Guests'.tr()}: $_diningGuestCount (${'your table booking'.tr()})'
+                  : '${'Guests'.tr()}: $_diningGuestCount',
+              style: TextStyle(
+                fontSize: 14,
+                fontFamily: AppThemeData.medium,
+                color: dark ? Colors.white : AppThemeData.neutral900,
+              ),
+            ),
+          ),
+          if (!fromBooking)
+            TextButton(
+              onPressed: isProcessingOrder ? null : () => _showGuestCountSheet(isChange: true),
+              child: Text('Change'.tr(),
+                  style: const TextStyle(fontFamily: AppThemeData.semiBold, color: AppThemeData.primary500)),
+            ),
+        ],
       ),
     );
   }
