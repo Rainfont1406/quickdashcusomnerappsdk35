@@ -1,6 +1,8 @@
 import 'dart:io';
 
 import 'package:emartconsumer/theme/app_them_data.dart';
+import 'package:cached_network_image/cached_network_image.dart';
+import 'package:emartconsumer/services/app_cache_config.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:photo_view/photo_view.dart';
@@ -53,7 +55,7 @@ class _FullScreenImageViewerState extends State<FullScreenImageViewer>
   Widget build(BuildContext context) {
     final ImageProvider provider = widget.imageFile != null
         ? FileImage(widget.imageFile!) as ImageProvider
-        : NetworkImage(widget.imageUrl);
+        : CachedNetworkImageProvider(widget.imageUrl, cacheManager: AppCacheConfig.images);
 
     return Scaffold(
       backgroundColor: Colors.black,

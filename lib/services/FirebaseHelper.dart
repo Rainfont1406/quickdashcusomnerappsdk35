@@ -78,6 +78,7 @@ import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 import 'package:video_thumbnail/video_thumbnail.dart';
+import 'package:video_compress/video_compress.dart';
 
 import '../constants.dart';
 import '../model/FlutterWaveSettingDataModel.dart';
@@ -2001,41 +2002,48 @@ class FireStoreUtils {
     return uploadImageToBunny(image, 'profiles');
   }
 
+  // 2026-10-07: chat media (photos, videos, video thumbnails) goes to Bunny
+  // Storage instead of Firebase Storage - lower egress price, and the phone can
+  // keep a copy (see ChatVideoCacheManager). The function names are unchanged
+  // so the chat screen needed no other edit. Older messages keep their
+  // Firebase Storage URLs and still play.
   Future<Url> uploadChatImageToFireStorage(File image, BuildContext context) async {
     await showProgress("Please wait...".tr(), false);
-    var uniqueID = const Uuid().v4();
-    Reference upload = storage.child(STORAGE_ROOT + '/chat/images/$uniqueID.png');
-    UploadTask uploadTask = upload.putFile(image);
-    var storageRef = (await uploadTask.whenComplete(() {})).ref;
-    var downloadUrl = await storageRef.getDownloadURL();
-    var metaData = await storageRef.getMetadata();
-    hideProgress();
-    return Url(mime: metaData.contentType ?? 'image', url: downloadUrl.toString());
+    try {
+      final url = await uploadImageToBunny(image, 'chat/images');
+      return Url(mime: 'image', url: url);
+    } finally {
+      hideProgress();
+    }
   }
 
   Future<ChatVideoContainer> uploadChatVideoToFireStorage(File video, BuildContext context) async {
     await showProgress("Please wait...".tr(), false);
-    var uniqueID = const Uuid().v4();
-    Reference upload = storage.child(STORAGE_ROOT + '/chat/videos/$uniqueID.mp4');
-    File compressedVideo = await _compressVideo(video);
-    SettableMetadata metadata = SettableMetadata(contentType: 'video');
-    UploadTask uploadTask = upload.putFile(compressedVideo, metadata);
-    var storageRef = (await uploadTask.whenComplete(() {})).ref;
-    var downloadUrl = await storageRef.getDownloadURL();
-    var metaData = await storageRef.getMetadata();
-    final uint8list = await VideoThumbnail.thumbnailFile(video: downloadUrl, thumbnailPath: (await getTemporaryDirectory()).path, imageFormat: ImageFormat.PNG);
-    final file = File(uint8list ?? '');
-    String thumbnailDownloadUrl = await uploadVideoThumbnailToFireStorage(file);
-    hideProgress();
-    return ChatVideoContainer(videoUrl: Url(url: downloadUrl.toString(), mime: metaData.contentType ?? 'video'), thumbnailUrl: thumbnailDownloadUrl);
+    try {
+      final compressedVideo = await _compressVideo(video);
+      // Server cap for chat videos (BunnyController::CHAT_VIDEO_MAX_KB).
+      if (await compressedVideo.length() > 25 * 1024 * 1024) {
+        throw Exception('This video is too large to send. Please choose a shorter video.');
+      }
+      final videoUrl = await uploadFileToBunny(compressedVideo, 'chat/videos');
+      // The thumbnail is cut from the local file - no need to download the
+      // video again just to make it.
+      final thumbPath = await VideoThumbnail.thumbnailFile(
+          video: compressedVideo.path,
+          thumbnailPath: (await getTemporaryDirectory()).path,
+          imageFormat: ImageFormat.PNG);
+      String thumbnailUrl = '';
+      if (thumbPath != null) {
+        thumbnailUrl = await uploadVideoThumbnailToFireStorage(File(thumbPath));
+      }
+      return ChatVideoContainer(videoUrl: Url(url: videoUrl, mime: 'video'), thumbnailUrl: thumbnailUrl);
+    } finally {
+      hideProgress();
+    }
   }
 
   Future<String> uploadVideoThumbnailToFireStorage(File file) async {
-    var uniqueID = const Uuid().v4();
-    Reference upload = storage.child(STORAGE_ROOT + '/thumbnails/$uniqueID.png');
-    UploadTask uploadTask = upload.putFile(file);
-    var downloadUrl = await (await uploadTask.whenComplete(() {})).ref.getDownloadURL();
-    return downloadUrl.toString();
+    return uploadImageToBunny(file, 'chat/thumbnails');
   }
 
   Stream<User> getUserByID(String id) async* {
@@ -4842,7 +4850,22 @@ class FireStoreUtils {
   /// being compressed(100 = max quality - 0 = low quality)
   /// @param file the image file that will be compressed
   /// @return File a new compressed file with smaller size
-  Future<File> _compressVideo(File file) async => file;
+  /// 2026-10-07: was a no-op, so gallery videos went up at full size. Chat videos
+  /// are now shrunk to 640x480 / 24 fps before upload (about 1-2 MB per 10 s).
+  /// If compression fails the original is sent (and rejected above if over 25 MB).
+  Future<File> _compressVideo(File file) async {
+    try {
+      final info = await VideoCompress.compressVideo(file.path,
+          quality: VideoQuality.Res640x480Quality,
+          deleteOrigin: false,
+          includeAudio: true,
+          frameRate: 24);
+      if (info?.path != null) return File(info!.path!);
+    } catch (e) {
+      debugPrint('_compressVideo failed, sending the original: $e');
+    }
+    return file;
+  }
 
 
   /// save a new user document in the USERS table in firebase firestore

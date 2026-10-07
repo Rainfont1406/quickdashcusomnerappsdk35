@@ -12,6 +12,8 @@ import 'package:emartconsumer/model/conversation_model.dart';
 import 'package:emartconsumer/model/inbox_model.dart';
 import 'package:emartconsumer/send_notification.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/app_cache_config.dart';
+import 'package:emartconsumer/services/chat_video_cache.dart';
 import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
@@ -54,6 +56,29 @@ class ChatScreens extends StatefulWidget {
 }
 
 class _ChatScreensState extends State<ChatScreens> {
+  /// 2026-10-07: opens a chat video from the phone's saved copy (downloaded once
+  /// from Bunny, then kept - see ChatVideoCacheManager). If the download fails
+  /// the viewer streams it as before.
+  Future<void> _openChatVideo(String url, String heroTag) async {
+    File? saved;
+    try {
+      await showProgress('Please wait...'.tr(), false);
+      saved = await ChatVideoCacheManager.instance.getSingleFile(url);
+    } catch (e) {
+      debugPrint('chat video not cached, streaming instead: $e');
+    } finally {
+      hideProgress();
+    }
+    if (!mounted) return;
+    push(
+        context,
+        FullScreenVideoViewer(
+          heroTag: heroTag,
+          videoUrl: url,
+          videoFile: saved,
+        ));
+  }
+
   final TextEditingController _messageController = TextEditingController();
   final ScrollController _controller = ScrollController();
   final FireStoreUtils _fireStoreUtils = FireStoreUtils();
@@ -438,6 +463,7 @@ class _ChatScreensState extends State<ChatScreens> {
                                       tag: data.url!.url,
                                       child: CachedNetworkImage(
                                         imageUrl: data.url!.url,
+                                        cacheManager: AppCacheConfig.images,
                                         placeholder: (context, url) => const Center(child: CircularProgressIndicator()),
                                         errorWidget: (context, url, error) => const Icon(Icons.error),
                                       ),
@@ -450,12 +476,7 @@ class _ChatScreensState extends State<ChatScreens> {
                               heroTag: data.id,
                               backgroundColor: AppThemeData.primary500,
                               onPressed: () {
-                                push(
-                                    context,
-                                    FullScreenVideoViewer(
-                                      heroTag: data.id.toString(),
-                                      videoUrl: data.url!.url,
-                                    ));
+                                _openChatVideo(data.url!.url, data.id.toString());
                               },
                               child: const Icon(
                                 Icons.play_arrow,
@@ -510,6 +531,7 @@ class _ChatScreensState extends State<ChatScreens> {
                                         tag: data.url!.url,
                                         child: CachedNetworkImage(
                                           imageUrl: data.url!.url,
+                                          cacheManager: AppCacheConfig.images,
                                           placeholder: (context, url) => const Center(child: CircularProgressIndicator()),
                                           errorWidget: (context, url, error) => const Icon(Icons.error),
                                         ),
@@ -522,12 +544,7 @@ class _ChatScreensState extends State<ChatScreens> {
                                 heroTag: data.id,
                                 backgroundColor: AppThemeData.primary500,
                                 onPressed: () {
-                                  push(
-                                      context,
-                                      FullScreenVideoViewer(
-                                        heroTag: data.id.toString(),
-                                        videoUrl: data.url!.url,
-                                      ));
+                                  _openChatVideo(data.url!.url, data.id.toString());
                                 },
                                 child: const Icon(
                                   Icons.play_arrow,

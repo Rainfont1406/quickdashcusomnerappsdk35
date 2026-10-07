@@ -8,6 +8,7 @@ import 'package:flutter/painting.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:emartconsumer/services/chat_video_cache.dart';
 import 'package:emartconsumer/widget/story_view/story_cache_manager.dart';
 
 // On-device cache ceilings (2026-09-10).
@@ -280,7 +281,15 @@ class ImageOrphanSweeper {
       expectedFolder: StoryImageCacheManager.cacheKey,
       refuseWhenNoRows: false,
     );
-    return imagesOk && videosOk && storyImagesOk;
+    // 2026-10-07: chat videos (own folder, may legitimately be empty).
+    final chatVideosOk = await _sweepFolder(
+      label: 'chat videos',
+      manager: ChatVideoCacheManager.instance,
+      cfg: ChatVideoCacheManager.config,
+      expectedFolder: ChatVideoCacheManager.cacheKey,
+      refuseWhenNoRows: false,
+    );
+    return imagesOk && videosOk && storyImagesOk && chatVideosOk;
   }
 
   static Future<bool> _sweepFolder({

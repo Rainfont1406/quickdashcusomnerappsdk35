@@ -29,3 +29,27 @@ Future<String> uploadImageToBunny(File image, String folder) async {
   }
   return (jsonDecode(resp.body) as Map<String, dynamic>)['url'] as String;
 }
+
+/// 2026-10-07: uploads any allowed file (chat videos) to Bunny Storage via the
+/// server proxy. [folder] is 'digital' or 'chat/videos' (see BunnyController::
+/// uploadFile); chat videos are capped server-side at 25 MB.
+Future<String> uploadFileToBunny(File file, String folder) async {
+  final idToken = await auth.FirebaseAuth.instance.currentUser?.getIdToken();
+  if (idToken == null) throw Exception('Not signed in.');
+
+  final request = http.MultipartRequest(
+    'POST',
+    Uri.parse('$_kBunnyApiBase/api/bunny/file/upload'),
+  )
+    ..headers['Authorization'] = 'Bearer $idToken'
+    ..fields['folder'] = folder
+    ..files.add(await http.MultipartFile.fromPath('file', file.path));
+
+  final streamedResp = await request.send().timeout(const Duration(minutes: 3));
+  final resp = await http.Response.fromStream(streamedResp);
+
+  if (resp.statusCode != 200) {
+    throw Exception('Bunny file upload failed (folder=$folder): ${resp.body}');
+  }
+  return (jsonDecode(resp.body) as Map<String, dynamic>)['url'] as String;
+}
