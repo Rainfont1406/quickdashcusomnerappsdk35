@@ -237,6 +237,8 @@ class ImageOrphanSweeper {
       Duration(minutes: int.fromEnvironment('SWEEP_MIN_AGE_MIN', defaultValue: 15));
   static const int _maxDeletesPerRun = 400;
   static bool _running = false;
+  static const bool _testMakeOrphans = bool.fromEnvironment('SWEEP_TEST_MAKE_ORPHANS');
+  static bool _testOrphansMade = false;
 
   static Future<void> maybeRun() async {
     if (_running) return;
@@ -310,7 +312,21 @@ class ImageOrphanSweeper {
     // before that threw "Null check operator" on the test phone. A lookup of
     // a key that cannot exist makes the manager open it (and returns null).
     await manager.getFileFromCache('orphan-sweep-warmup');
-    final rows = await cfg.repo.getAllObjects();
+    var rows = await cfg.repo.getAllObjects();
+    // Test-only (--dart-define=SWEEP_TEST_MAKE_ORPHANS=1): once per app run,
+    // drops the database row of every second picture WITHOUT deleting its file -
+    // exactly what flutter_cache_manager 3.4.1 does when it evicts - so the
+    // sweep below can be seen deleting real orphans. Off in normal builds.
+    if (_testMakeOrphans && !_testOrphansMade && label == 'images' && rows.length >= 2) {
+      _testOrphansMade = true;
+      var dropped = 0;
+      for (var i = 0; i < rows.length; i += 2) {
+        await manager.removeFile(rows[i].key);
+        dropped++;
+      }
+      debugPrint('ImageOrphanSweeper[TEST]: dropped $dropped of ${rows.length} database rows, files left on disk');
+      rows = await cfg.repo.getAllObjects();
+    }
     if (rows.isEmpty && refuseWhenNoRows) {
       debugPrint('ImageOrphanSweeper[$label]: database lists no rows - refusing to delete anything');
       return false;
