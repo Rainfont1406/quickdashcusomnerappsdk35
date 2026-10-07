@@ -228,8 +228,13 @@ class ImageSetJanitor {
 ///    [_every] (a flag in SharedPreferences, set only after a finished run).
 class ImageOrphanSweeper {
   static const String _prefKey = 'image_orphan_sweep_at_v1';
-  static const Duration _every = Duration(hours: 24);
-  static const Duration _minAge = Duration(minutes: 15);
+  // Test-only switches: a build with --dart-define=SWEEP_EVERY_MIN=2
+  // --dart-define=SWEEP_MIN_AGE_MIN=1 runs the sweep every 2 minutes on files
+  // older than 1 minute. Release builds pass neither, so the defaults apply.
+  static const Duration _every =
+      Duration(minutes: int.fromEnvironment('SWEEP_EVERY_MIN', defaultValue: 24 * 60));
+  static const Duration _minAge =
+      Duration(minutes: int.fromEnvironment('SWEEP_MIN_AGE_MIN', defaultValue: 15));
   static const int _maxDeletesPerRun = 400;
   static bool _running = false;
 
