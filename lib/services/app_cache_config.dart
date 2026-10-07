@@ -435,7 +435,10 @@ class AppCacheConfig {
   // Revised same day: 30 -> 60 days. A picture never changes at its address and
   // diners return to the same restaurants every few days; a file is dropped when
   // unused for 60 days or when the file cap pushes it out.
-  static const Duration imageStalePeriod = Duration(days: 60);
+  // Test-only: --dart-define=IMAGE_STALE_MIN=5 treats a picture as unused after 5
+  // minutes instead of 60 days (never change the phone's clock to test this).
+  static const Duration imageStalePeriod =
+      Duration(minutes: int.fromEnvironment('IMAGE_STALE_MIN', defaultValue: 60 * 24 * 60));
 
   // MUST be ImageCacheManager, not the plain CacheManager. Found on-device
   // 2026-09-10: a plain CacheManager silently IGNORES maxWidthDiskCache and
