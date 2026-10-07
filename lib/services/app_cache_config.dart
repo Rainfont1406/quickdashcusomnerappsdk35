@@ -267,6 +267,7 @@ class ImageOrphanSweeper {
       cfg: AppCacheConfig._imageConfig,
       expectedFolder: AppCacheConfig.imageCacheKey,
       refuseWhenNoRows: true,
+      maxBytes: AppCacheConfig.maxImageMegabytes * 1024 * 1024,
     );
     // 2026-10-07: the story caches have the same problem (the library never
     // deletes the file when it drops a row - least-recently-used, stale,
@@ -303,6 +304,7 @@ class ImageOrphanSweeper {
     required Config cfg,
     required String expectedFolder,
     required bool refuseWhenNoRows,
+    int? maxBytes,
   }) async {
     // The cache database opens lazily on the manager's first use; reading it
     // before that threw "Null check operator" on the test phone. A lookup of
@@ -341,7 +343,48 @@ class ImageOrphanSweeper {
     }
     debugPrint('ImageOrphanSweeper[$label]: $seen files in folder, ${rows.length} database rows, '
         '$deleted orphan file(s) deleted, ${(bytes / 1048576).toStringAsFixed(1)} MB freed');
+    if (maxBytes != null) await _trimToSize(label, manager, dir, rows, maxBytes);
     return true;
+  }
+
+  /// Keeps the folder under [maxBytes]: sums the size of every file that still
+  /// has a database row, then removes the least-recently-used ones (row AND
+  /// file - the library only drops the row) until it fits.
+  static Future<void> _trimToSize(String label, CacheManager manager,
+      io.Directory dir, List<CacheObject> rows, int maxBytes) async {
+    final sized = <MapEntry<CacheObject, int>>[];
+    var total = 0;
+    for (final r in rows) {
+      final f = io.File('${dir.path}${io.Platform.pathSeparator}${r.relativePath}');
+      try {
+        if (!await f.exists()) continue;
+        final len = await f.length();
+        sized.add(MapEntry(r, len));
+        total += len;
+      } catch (_) {}
+    }
+    if (total <= maxBytes) {
+      debugPrint('ImageOrphanSweeper[$label]: size ${(total / 1048576).toStringAsFixed(1)} MB '
+          'of ${(maxBytes / 1048576).toStringAsFixed(0)} MB limit - ok');
+      return;
+    }
+    sized.sort((a, b) => (a.key.touched ?? DateTime.fromMillisecondsSinceEpoch(0))
+        .compareTo(b.key.touched ?? DateTime.fromMillisecondsSinceEpoch(0)));
+    var removed = 0, freed = 0;
+    for (final e in sized) {
+      if (total <= maxBytes || removed >= _maxDeletesPerRun) break;
+      try {
+        await manager.removeFile(e.key.key);
+        final f = io.File('${dir.path}${io.Platform.pathSeparator}${e.key.relativePath}');
+        if (await f.exists()) await f.delete();
+        total -= e.value;
+        freed += e.value;
+        removed++;
+      } catch (_) {}
+    }
+    debugPrint('ImageOrphanSweeper[$label]: over the ${(maxBytes / 1048576).toStringAsFixed(0)} MB limit - '
+        'removed $removed least-recently-used file(s), ${(freed / 1048576).toStringAsFixed(1)} MB freed, '
+        '${(total / 1048576).toStringAsFixed(1)} MB left');
   }
 }
 
@@ -428,7 +471,13 @@ class AppCacheConfig {
   // Test-only: --dart-define=IMAGE_CACHE_MAX_FILES=20 makes the library evict
   // rows early so the orphan sweep can be proven on a phone. Release builds
   // pass nothing, so this stays 1000.
-  static const int maxImageFiles = int.fromEnvironment('IMAGE_CACHE_MAX_FILES', defaultValue: 1000);
+  static const int maxImageFiles = int.fromEnvironment('IMAGE_CACHE_MAX_FILES', defaultValue: 2000);
+  // 2026-10-08: the real limit is SIZE - 1000 pictures x 300 KB = 300 MB. The
+  // library has no byte limit, so ImageOrphanSweeper enforces it: after the
+  // orphan cleanup, the least-recently-used pictures are removed until the
+  // folder is back under this. The file count above (2000) is only a backstop
+  // for lots of tiny files. Test builds: --dart-define=IMAGE_CACHE_MAX_MB=2.
+  static const int maxImageMegabytes = int.fromEnvironment('IMAGE_CACHE_MAX_MB', defaultValue: 300);
   // 2026-10-03: 7 -> 30 days. With the file count capped (maxImageFiles) the
   // disk is bounded either way; a longer period only stops a diner who comes
   // back after 8-30 days from downloading the whole menu again.
