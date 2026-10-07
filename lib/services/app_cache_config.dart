@@ -425,7 +425,10 @@ class AppCacheConfig {
   // Revised same day: 500 -> 1000 because many menu pictures are only 30-100 KB
   // (1000 files = about 500 pictures = about 20-80 MB; 300 KB pictures would
   // reach 150-220 MB, which is the accepted worst case).
-  static const int maxImageFiles = 1000;
+  // Test-only: --dart-define=IMAGE_CACHE_MAX_FILES=20 makes the library evict
+  // rows early so the orphan sweep can be proven on a phone. Release builds
+  // pass nothing, so this stays 1000.
+  static const int maxImageFiles = int.fromEnvironment('IMAGE_CACHE_MAX_FILES', defaultValue: 1000);
   // 2026-10-03: 7 -> 30 days. With the file count capped (maxImageFiles) the
   // disk is bounded either way; a longer period only stops a diner who comes
   // back after 8-30 days from downloading the whole menu again.
