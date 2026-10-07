@@ -8,6 +8,8 @@ import 'package:flutter/painting.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:emartconsumer/widget/story_view/story_cache_manager.dart';
+
 // On-device cache ceilings (2026-09-10).
 //
 // Nothing here was literally unbounded before this file existed, but the
@@ -247,25 +249,62 @@ class ImageOrphanSweeper {
     }
   }
 
-  /// Returns true when the sweep ran to completion (also when nothing was an
-  /// orphan); false when it refused to run (then it is retried next time).
+  /// Returns true when every folder was swept to completion (also when nothing
+  /// was an orphan); false when one refused to run (then it is retried next
+  /// time).
   static Future<bool> _sweep() async {
-    final cfg = AppCacheConfig._imageConfig;
+    // Restaurant / offer / product images first - it refuses to run on an empty
+    // database (kept from the first version of this sweep).
+    final imagesOk = await _sweepFolder(
+      label: 'images',
+      manager: AppCacheConfig.images,
+      cfg: AppCacheConfig._imageConfig,
+      expectedFolder: AppCacheConfig.imageCacheKey,
+      refuseWhenNoRows: true,
+    );
+    // 2026-10-07: the story caches have the same problem (the library never
+    // deletes the file when it drops a row - least-recently-used, stale,
+    // emptyCache) and had no sweep at all. Their database may legitimately be
+    // empty (everything expired), so an empty database is not a reason to stop.
+    final videosOk = await _sweepFolder(
+      label: 'story videos',
+      manager: StoryVideoCacheManager.instance,
+      cfg: StoryVideoCacheManager.config,
+      expectedFolder: StoryVideoCacheManager.cacheKey,
+      refuseWhenNoRows: false,
+    );
+    final storyImagesOk = await _sweepFolder(
+      label: 'story images',
+      manager: StoryImageCacheManager.instance,
+      cfg: StoryImageCacheManager.config,
+      expectedFolder: StoryImageCacheManager.cacheKey,
+      refuseWhenNoRows: false,
+    );
+    return imagesOk && videosOk && storyImagesOk;
+  }
+
+  static Future<bool> _sweepFolder({
+    required String label,
+    required CacheManager manager,
+    required Config cfg,
+    required String expectedFolder,
+    required bool refuseWhenNoRows,
+  }) async {
     // The cache database opens lazily on the manager's first use; reading it
     // before that threw "Null check operator" on the test phone. A lookup of
     // a key that cannot exist makes the manager open it (and returns null).
-    await AppCacheConfig.images.getFileFromCache('orphan-sweep-warmup');
+    await manager.getFileFromCache('orphan-sweep-warmup');
     final rows = await cfg.repo.getAllObjects();
-    if (rows.isEmpty) {
-      debugPrint('ImageOrphanSweeper: database lists no rows - refusing to delete anything');
+    if (rows.isEmpty && refuseWhenNoRows) {
+      debugPrint('ImageOrphanSweeper[$label]: database lists no rows - refusing to delete anything');
       return false;
     }
     final referenced = <String>{for (final r in rows) r.relativePath};
     final probe = await cfg.fileSystem.createFile('.orphan_probe');
     final dir = io.Directory(probe.parent.path);
     final dirName = dir.path.split(RegExp(r'[\\/]')).where((e) => e.isNotEmpty).last;
-    if (dirName != AppCacheConfig.imageCacheKey) {
-      debugPrint('ImageOrphanSweeper: unexpected folder "$dirName" - refusing to run');
+    if (dirName != expectedFolder) {
+      debugPrint('ImageOrphanSweeper[$label]: unexpected folder "$dirName" - refusing to run');
       return false;
     }
     if (!await dir.exists()) return true;
@@ -286,7 +325,7 @@ class ImageOrphanSweeper {
         bytes += len;
       } catch (_) {}
     }
-    debugPrint('ImageOrphanSweeper: $seen files in folder, ${rows.length} database rows, '
+    debugPrint('ImageOrphanSweeper[$label]: $seen files in folder, ${rows.length} database rows, '
         '$deleted orphan file(s) deleted, ${(bytes / 1048576).toStringAsFixed(1)} MB freed');
     return true;
   }
