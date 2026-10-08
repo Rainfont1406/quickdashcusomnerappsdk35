@@ -4,6 +4,7 @@ import 'dart:math' as math;
 
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
+import 'package:emartconsumer/widget/road_distance_text.dart';
 import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/FavouriteItemModel.dart';
 import 'package:emartconsumer/model/FavouriteModel.dart';
@@ -1349,6 +1350,21 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                                               : AppThemeData
                                                                   .grey500,
                                                         ),
+                                                      ),
+                                                    ),
+                                                    const SizedBox(width: 8),
+                                                    // 2026-10-08: same road-distance label Home shows ("5.4 km away").
+                                                    // RoadDistanceText answers from getRoadDistanceKm's per-session
+                                                    // cache (key = your position + this restaurant's position), so a
+                                                    // restaurant already listed on Home costs no new request.
+                                                    RoadDistanceText(
+                                                      vendorLat: widget.vendorModel.latitude,
+                                                      vendorLon: widget.vendorModel.longitude,
+                                                      showAwaySuffix: true,
+                                                      style: TextStyle(
+                                                        fontSize: 12,
+                                                        fontFamily: AppThemeData.semiBold,
+                                                        color: AppThemeData.primary500,
                                                       ),
                                                     ),
                                                   ],
