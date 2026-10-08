@@ -1,3 +1,4 @@
+import 'package:emartconsumer/services/perf_diagnostic_file_service.dart' show perfDiagnosticCacheManager;
 import 'package:emartconsumer/services/chat_video_cache.dart';
 import 'package:emartconsumer/services/app_cache_config.dart';
 import 'package:emartconsumer/widget/story_view/story_cache_manager.dart'
@@ -42,6 +43,7 @@ class CacheEpoch {
       await StoryImageCacheManager.instance.emptyCache();
       await StoryVideoCacheManager.instance.emptyCache();
       await ChatVideoCacheManager.instance.emptyCache();
+      await perfDiagnosticCacheManager.emptyCache();
       PaintingBinding.instance.imageCache.clear();
       PaintingBinding.instance.imageCache.clearLiveImages();
       await prefs.setInt(_prefKey, remote);

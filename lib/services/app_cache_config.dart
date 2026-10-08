@@ -9,6 +9,7 @@ import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:emartconsumer/services/chat_video_cache.dart';
+import 'package:emartconsumer/services/perf_diagnostic_file_service.dart';
 import 'package:emartconsumer/widget/story_view/story_cache_manager.dart';
 
 // On-device cache ceilings (2026-09-10).
@@ -289,6 +290,15 @@ class ImageOrphanSweeper {
       expectedFolder: StoryImageCacheManager.cacheKey,
       refuseWhenNoRows: false,
     );
+    // 2026-10-08: the separate cache behind the restaurant page and Home tiles.
+    final diagOk = await _sweepFolder(
+      label: 'diag images',
+      manager: perfDiagnosticCacheManager,
+      cfg: perfDiagnosticCacheConfig,
+      expectedFolder: perfDiagnosticCacheKey,
+      refuseWhenNoRows: false,
+      maxBytes: AppCacheConfig.maxDiagMegabytes * 1024 * 1024,
+    );
     // 2026-10-07: chat videos (own folder, may legitimately be empty).
     final chatVideosOk = await _sweepFolder(
       label: 'chat videos',
@@ -297,7 +307,7 @@ class ImageOrphanSweeper {
       expectedFolder: ChatVideoCacheManager.cacheKey,
       refuseWhenNoRows: false,
     );
-    return imagesOk && videosOk && storyImagesOk && chatVideosOk;
+    return imagesOk && videosOk && storyImagesOk && chatVideosOk && diagOk;
   }
 
   static Future<bool> _sweepFolder({
@@ -494,6 +504,10 @@ class AppCacheConfig {
   // folder is back under this. The file count above (2000) is only a backstop
   // for lots of tiny files. Test builds: --dart-define=IMAGE_CACHE_MAX_MB=2.
   static const int maxImageMegabytes = int.fromEnvironment('IMAGE_CACHE_MAX_MB', defaultValue: 300);
+  // 2026-10-08: size limit of the separate cache the restaurant page and the Home
+  // story circles / banners / category icons use (perf_diagnostic_file_service.dart).
+  // Test builds: --dart-define=DIAG_CACHE_MAX_MB=2.
+  static const int maxDiagMegabytes = int.fromEnvironment('DIAG_CACHE_MAX_MB', defaultValue: 100);
   // 2026-10-03: 7 -> 30 days. With the file count capped (maxImageFiles) the
   // disk is bounded either way; a longer period only stops a diner who comes
   // back after 8-30 days from downloading the whole menu again.

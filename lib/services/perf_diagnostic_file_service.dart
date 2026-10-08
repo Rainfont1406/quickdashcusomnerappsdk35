@@ -209,22 +209,15 @@ class _TimedHttpGetResponse implements FileServiceResponse {
   @override
   int? get contentLength => _buffered.bytes.length;
 
+  // 2026-10-08: treated as immutable, exactly like ImmutableFileService for the
+  // shared image cache. Every upload gets a new random name (the Vendor App
+  // deletes the old file when a photo is replaced), so the bytes behind an
+  // address never change. Bunny answers with max-age=30 days and NO ETag, so
+  // the old header-based rule meant a full re-download of an unchanged picture
+  // once the 30 days ran out. A file leaves the cache only when unused for the
+  // stale period or trimmed by the size limit (ImageOrphanSweeper).
   @override
-  DateTime get validTill {
-    var ageDuration = const Duration(days: 7);
-    final controlHeader = _header(HttpHeaders.cacheControlHeader);
-    if (controlHeader != null) {
-      for (final setting in controlHeader.split(',')) {
-        final s = setting.trim().toLowerCase();
-        if (s == 'no-cache') ageDuration = Duration.zero;
-        if (s.startsWith('max-age=')) {
-          final validSeconds = int.tryParse(s.split('=')[1]) ?? 0;
-          if (validSeconds > 0) ageDuration = Duration(seconds: validSeconds);
-        }
-      }
-    }
-    return _buffered.receivedTime.add(ageDuration);
-  }
+  DateTime get validTill => _buffered.receivedTime.add(const Duration(days: 365));
 
   @override
   String? get eTag => _header(HttpHeaders.etagHeader);
@@ -256,6 +249,17 @@ class _PerfDiagnosticCacheManager extends CacheManager with ImageCacheManager {
 
 // Separate cache key from the app's real DefaultCacheManager so this
 // diagnostic instance doesn't share/pollute the normal disk cache database.
-final CacheManager perfDiagnosticCacheManager = _PerfDiagnosticCacheManager(
-  Config('homePerfDiagCache', fileService: PerfTimedFileService()),
+// 2026-10-08: the Config is a named field with real limits (it used the library
+// defaults of 30 days / 200 files and no size limit) so ImageOrphanSweeper can
+// reach this cache's database and folder: the daily sweep deletes leftover files
+// and trims the folder to AppCacheConfig.maxDiagMegabytes, and the Remote Config
+// cache reset empties it. The key is unchanged so existing files are kept.
+const String perfDiagnosticCacheKey = 'homePerfDiagCache';
+final Config perfDiagnosticCacheConfig = Config(
+  perfDiagnosticCacheKey,
+  stalePeriod: const Duration(days: 60),
+  maxNrOfCacheObjects: 2000, // backstop only; the real limit is the size
+  fileService: PerfTimedFileService(),
 );
+final CacheManager perfDiagnosticCacheManager =
+    _PerfDiagnosticCacheManager(perfDiagnosticCacheConfig);
