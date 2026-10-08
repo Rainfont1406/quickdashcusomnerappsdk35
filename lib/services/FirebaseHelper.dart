@@ -2017,6 +2017,23 @@ class FireStoreUtils {
     }
   }
 
+  /// 2026-10-08: longest chat video, in seconds.
+  static const int maxChatVideoSeconds = 20;
+
+  /// True when the video is longer than [maxChatVideoSeconds]. If its length
+  /// cannot be read the file size limit (25 MB, also enforced on the server)
+  /// is the only check.
+  static Future<bool> isChatVideoTooLong(File video) async {
+    try {
+      final info = await VideoCompress.getMediaInfo(video.path);
+      final ms = info.duration;
+      return ms != null && ms > (maxChatVideoSeconds * 1000 + 500);
+    } catch (e) {
+      debugPrint('isChatVideoTooLong: could not read duration: $e');
+      return false;
+    }
+  }
+
   Future<ChatVideoContainer> uploadChatVideoToFireStorage(File video, BuildContext context) async {
     await showProgress("Please wait...".tr(), false);
     try {

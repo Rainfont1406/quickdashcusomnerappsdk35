@@ -16,6 +16,7 @@ import 'package:emartconsumer/services/app_cache_config.dart';
 import 'package:emartconsumer/services/chat_video_cache.dart';
 import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/services/helper.dart';
+import 'package:emartconsumer/services/show_toast_dialog.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/fullScreenImageViewer/FullScreenImageViewer.dart';
 import 'package:emartconsumer/ui/fullScreenVideoViewer/FullScreenVideoViewer.dart';
@@ -56,6 +57,22 @@ class ChatScreens extends StatefulWidget {
 }
 
 class _ChatScreensState extends State<ChatScreens> {
+  /// 2026-10-08: chat videos are limited to FireStoreUtils.maxChatVideoSeconds
+  /// (20 s). A longer video is refused before anything is compressed or sent.
+  Future<void> _sendChatVideo(File video) async {
+    try {
+      if (await FireStoreUtils.isChatVideoTooLong(video)) {
+        ShowToastDialog.showToast('Please choose a video of ${FireStoreUtils.maxChatVideoSeconds} seconds or less.');
+        return;
+      }
+      ChatVideoContainer videoContainer = await FireStoreUtils().uploadChatVideoToFireStorage(video, context);
+      _sendMessage(const Uuid().v4(), '', videoContainer.videoUrl, videoContainer.thumbnailUrl, 'video');
+    } catch (e) {
+      debugPrint('chat video not sent: $e');
+      ShowToastDialog.showToast('The video could not be sent. Please try a shorter video.');
+    }
+  }
+
   /// 2026-10-07: opens a chat video from the phone's saved copy (downloaded once
   /// from Bunny, then kept - see ChatVideoCacheManager). If the download fails
   /// the viewer streams it as before.
@@ -723,10 +740,7 @@ class _ChatScreensState extends State<ChatScreens> {
           onPressed: () async {
             Navigator.pop(context);
             XFile? galleryVideo = await _imagePicker.pickVideo(source: ImageSource.gallery);
-            if (galleryVideo != null) {
-              ChatVideoContainer videoContainer = await FireStoreUtils().uploadChatVideoToFireStorage(File(galleryVideo.path), context);
-              _sendMessage(const Uuid().v4(), '', videoContainer.videoUrl, videoContainer.thumbnailUrl, 'video');
-            }
+            if (galleryVideo != null) await _sendChatVideo(File(galleryVideo.path));
           },
         ),
         CupertinoActionSheetAction(
@@ -746,11 +760,8 @@ class _ChatScreensState extends State<ChatScreens> {
           isDestructiveAction: false,
           onPressed: () async {
             Navigator.pop(context);
-            XFile? recordedVideo = await _imagePicker.pickVideo(source: ImageSource.camera);
-            if (recordedVideo != null) {
-              ChatVideoContainer videoContainer = await FireStoreUtils().uploadChatVideoToFireStorage(File(recordedVideo.path), context);
-              _sendMessage(const Uuid().v4(), '', videoContainer.videoUrl, videoContainer.thumbnailUrl, 'video');
-            }
+            XFile? recordedVideo = await _imagePicker.pickVideo(source: ImageSource.camera, maxDuration: const Duration(seconds: FireStoreUtils.maxChatVideoSeconds));
+            if (recordedVideo != null) await _sendChatVideo(File(recordedVideo.path));
           },
         )
       ],
