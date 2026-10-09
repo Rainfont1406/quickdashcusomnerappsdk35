@@ -17,6 +17,7 @@ import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/placeOrderScreen/PlaceOrderScreen.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:emartconsumer/services/app_cache_config.dart';
 
 class CheckoutScreen extends StatefulWidget {
   final String paymentOption, paymentType, id;
@@ -1314,7 +1315,7 @@ class _ItemRow extends StatelessWidget {
         children: [
           ClipRRect(
             borderRadius: BorderRadius.circular(8),
-            child: CachedNetworkImage(
+            child: CachedNetworkImage( cacheManager: AppCacheConfig.images,
               imageUrl: getImageVAlidUrl(product.photo),
               width: 48,
               height: 48,

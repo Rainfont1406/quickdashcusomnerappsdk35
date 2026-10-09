@@ -203,7 +203,7 @@ class _ChatScreensState extends State<ChatScreens> {
                 child: CircleAvatar(
                   radius: 18,
                   backgroundColor: Colors.white.withValues(alpha: 0.3),
-                  backgroundImage: CachedNetworkImageProvider(widget.restaurantProfileImage!),
+                  backgroundImage: CachedNetworkImageProvider(widget.restaurantProfileImage!, cacheManager: AppCacheConfig.images),
                 ),
               ),
             Flexible(

@@ -17,6 +17,7 @@ import 'package:emartconsumer/widget/coming_soon_view.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_osm_plugin/flutter_osm_plugin.dart' as osmMap;
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:emartconsumer/services/app_cache_config.dart';
 
 class MapViewScreen extends StatefulWidget {
   final bool isShowAppBar;
@@ -402,7 +403,7 @@ class _MapViewScreenState extends State<MapViewScreen> {
                                 child: Center(
                                   child: ClipRRect(
                                     borderRadius: BorderRadius.circular(12),
-                                    child: CachedNetworkImage(
+                                    child: CachedNetworkImage( cacheManager: AppCacheConfig.images,
                                       imageUrl: getImageVAlidUrl(_logoUrl(vendor)),
                                       width: 72,
                                       height: 72,

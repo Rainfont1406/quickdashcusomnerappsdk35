@@ -12,6 +12,7 @@ import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/dineInScreen/dine_in_restaurant_details_screen.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:emartconsumer/services/app_cache_config.dart';
 
 // Auto-sliding card image carousel for dine-in restaurant cards.
 // photos[0] = logo, photos[1..n] = card gallery images (set via add_store).
@@ -69,7 +70,7 @@ class _DineInCardImageState extends State<_DineInCardImage> {
             height: 160,
             width: double.infinity,
             child: imgs.isEmpty
-                ? CachedNetworkImage(
+                ? CachedNetworkImage( cacheManager: AppCacheConfig.images,
                     imageUrl: fallback,
                     height: 160,
                     width: double.infinity,
@@ -85,7 +86,7 @@ class _DineInCardImageState extends State<_DineInCardImage> {
                     controller: _ctrl,
                     itemCount: imgs.length,
                     onPageChanged: (i) => setState(() => _page = i),
-                    itemBuilder: (_, i) => CachedNetworkImage(
+                    itemBuilder: (_, i) => CachedNetworkImage( cacheManager: AppCacheConfig.images,
                       imageUrl: getImageVAlidUrl(imgs[i]),
                       height: 160,
                       width: double.infinity,

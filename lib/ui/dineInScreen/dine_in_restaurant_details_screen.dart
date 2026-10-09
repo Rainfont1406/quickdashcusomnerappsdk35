@@ -22,6 +22,7 @@ import 'package:emartconsumer/ui/wallet/walletScreen.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:intl/intl.dart';
+import 'package:emartconsumer/services/app_cache_config.dart';
 
 class DineInRestaurantDetailsScreen extends StatefulWidget {
   final VendorModel vendorModel;
@@ -401,7 +402,7 @@ class _DineInRestaurantDetailsScreenState
             // Menu photo carousel (vendorMenuPhotos from AddDineIn),
             // falls back to restaurant logo if none uploaded yet.
             photos.isEmpty
-                ? CachedNetworkImage(
+                ? CachedNetworkImage( cacheManager: AppCacheConfig.images,
                     imageUrl: fallback,
                     fit: BoxFit.cover,
                     placeholder: (_, __) =>
@@ -416,7 +417,7 @@ class _DineInRestaurantDetailsScreenState
                     itemCount: photos.length,
                     onPageChanged: (i) =>
                         setState(() => _headerPage = i),
-                    itemBuilder: (_, i) => CachedNetworkImage(
+                    itemBuilder: (_, i) => CachedNetworkImage( cacheManager: AppCacheConfig.images,
                       imageUrl: getImageVAlidUrl(photos[i]),
                       fit: BoxFit.cover,
                       placeholder: (_, __) =>

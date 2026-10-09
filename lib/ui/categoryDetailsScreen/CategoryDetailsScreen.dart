@@ -13,6 +13,7 @@ import 'package:emartconsumer/ui/vendorProductsScreen/newVendorProductsScreen.da
 import 'package:emartconsumer/utils/network_image_widget.dart';
 import 'package:emartconsumer/widget/coming_soon_view.dart';
 import 'package:flutter/material.dart';
+import 'package:emartconsumer/services/app_cache_config.dart';
 
 class CategoryDetailsScreen extends StatefulWidget {
   final VendorCategoryModel category;
@@ -266,7 +267,7 @@ class _CategoryDetailsScreenState extends State<CategoryDetailsScreen>
               children: [
                 ClipRRect(
                   borderRadius: BorderRadius.circular(10),
-                  child: CachedNetworkImage(
+                  child: CachedNetworkImage( cacheManager: AppCacheConfig.images,
                     imageUrl: getImageVAlidUrl(vendorModel.photo),
                     height: 100,
                     width: 100,

@@ -11,6 +11,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../constants.dart';
+import 'package:emartconsumer/services/app_cache_config.dart';
 
 // True for up to 48 hours after an order reaches ORDER_STATUS_COMPLETED or
 // ORDER_STATUS_REJECTED (via `statusUpdatedAt`), so vendor/customer chat
@@ -114,7 +115,7 @@ pushAndRemoveUntil(BuildContext context, Widget destination) {
 }
 
 Widget displayCircleImage(String picUrl, double size, hasBorder) =>
-    CachedNetworkImage(
+    CachedNetworkImage( cacheManager: AppCacheConfig.images,
         height: size,
         width: size,
         imageBuilder: (context, imageProvider) =>

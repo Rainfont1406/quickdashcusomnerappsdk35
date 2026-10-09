@@ -21,6 +21,7 @@ import 'package:emartconsumer/widget/coming_soon_view.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:emartconsumer/services/app_cache_config.dart';
 
 // Industry-standard search normalization: trim outer whitespace, lowercase,
 // then collapse any run of internal whitespace to a single space - so
@@ -1267,7 +1268,7 @@ class SearchScreenState extends State<SearchScreen> {
                     cacheKey: 'search_vendor_${v.id}',
                     width: 100,
                     height: 100,
-                    builder: (context) => CachedNetworkImage(
+                    builder: (context) => CachedNetworkImage( cacheManager: AppCacheConfig.images,
                       imageUrl: _logoUrl(v),
                       width: 100,
                       height: 100,

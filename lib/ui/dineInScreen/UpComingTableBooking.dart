@@ -8,6 +8,7 @@ import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/dineInScreen/table_order_details_screen.dart';
 import 'package:flutter/material.dart';
+import 'package:emartconsumer/services/app_cache_config.dart';
 
 class UpComingTableBooking extends StatefulWidget {
   const UpComingTableBooking({Key? key}) : super(key: key);
@@ -128,7 +129,7 @@ class BookingCard extends StatelessWidget {
                 children: [
                   ClipRRect(
                     borderRadius: BorderRadius.circular(12),
-                    child: CachedNetworkImage(
+                    child: CachedNetworkImage( cacheManager: AppCacheConfig.images,
                       imageUrl: getImageVAlidUrl(model.vendor.photo),
                       height: 64,
                       width: 64,

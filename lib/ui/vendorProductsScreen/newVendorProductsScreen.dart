@@ -1302,73 +1302,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                                         : AppThemeData.grey900,
                                                   ),
                                                 ),
-                                                const SizedBox(height: 5),
-                                                Row(
-                                                  children: [
-                                                    Icon(
-                                                      Icons.location_on_rounded,
-                                                      size: 14,
-                                                      color: AppThemeData
-                                                          .primary500,
-                                                    ),
-                                                    const SizedBox(width: 3),
-                                                    Expanded(
-                                                      child: Text(
-                                                        () {
-                                                          final loc = widget
-                                                              .vendorModel
-                                                              .locality
-                                                              .trim();
-                                                          final lm = widget
-                                                              .vendorModel
-                                                              .landmark
-                                                              .trim();
-                                                          if (loc.isEmpty)
-                                                            return widget
-                                                                .vendorModel
-                                                                .location;
-                                                          if (lm.isEmpty)
-                                                            return loc;
-                                                          return '$loc, $lm';
-                                                        }(),
-                                                        textAlign:
-                                                            TextAlign.start,
-                                                        maxLines: 1,
-                                                        overflow: TextOverflow
-                                                            .ellipsis,
-                                                        style: TextStyle(
-                                                          fontSize: 12,
-                                                          fontFamily:
-                                                              AppThemeData
-                                                                  .medium,
-                                                          fontWeight:
-                                                              FontWeight.w500,
-                                                          color: isDarkMode(
-                                                                  context)
-                                                              ? AppThemeData
-                                                                  .grey400
-                                                              : AppThemeData
-                                                                  .grey500,
-                                                        ),
-                                                      ),
-                                                    ),
-                                                    const SizedBox(width: 8),
-                                                    // 2026-10-08: same road-distance label Home shows ("5.4 km away").
-                                                    // RoadDistanceText answers from getRoadDistanceKm's per-session
-                                                    // cache (key = your position + this restaurant's position), so a
-                                                    // restaurant already listed on Home costs no new request.
-                                                    RoadDistanceText(
-                                                      vendorLat: widget.vendorModel.latitude,
-                                                      vendorLon: widget.vendorModel.longitude,
-                                                      showAwaySuffix: true,
-                                                      style: TextStyle(
-                                                        fontSize: 12,
-                                                        fontFamily: AppThemeData.semiBold,
-                                                        color: AppThemeData.primary500,
-                                                      ),
-                                                    ),
-                                                  ],
-                                                ),
+
                                                 if (widget.vendorModel
                                                     .cuisineNames.isNotEmpty) ...[
                                                   const SizedBox(height: 6),
@@ -1463,6 +1397,76 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                           ),
                                         ],
                                       ),
+                                    
+                                      // Location: full card width, up to 2 lines (was 1 line squeezed beside the distance)
+                                      const SizedBox(height: 8),
+                                      Row(
+  crossAxisAlignment: CrossAxisAlignment.start,
+  children: [
+                                                    Icon(
+                                                      Icons.location_on_rounded,
+                                                      size: 14,
+                                                      color: AppThemeData
+                                                          .primary500,
+                                                    ),
+                                                    const SizedBox(width: 3),
+                                                    Expanded(
+                                                      child: Text(
+                                                        () {
+                                                          final loc = widget
+                                                              .vendorModel
+                                                              .locality
+                                                              .trim();
+                                                          final lm = widget
+                                                              .vendorModel
+                                                              .landmark
+                                                              .trim();
+                                                          if (loc.isEmpty)
+                                                            return widget
+                                                                .vendorModel
+                                                                .location;
+                                                          if (lm.isEmpty)
+                                                            return loc;
+                                                          return '$loc, $lm';
+                                                        }(),
+                                                        textAlign:
+                                                            TextAlign.start,
+                                                        maxLines: 2,
+                                                        overflow: TextOverflow
+                                                            .ellipsis,
+                                                        style: TextStyle(
+                                                          fontSize: 12,
+                                                          fontFamily:
+                                                              AppThemeData
+                                                                  .medium,
+                                                          fontWeight:
+                                                              FontWeight.w500,
+                                                          color: isDarkMode(
+                                                                  context)
+                                                              ? AppThemeData
+                                                                  .grey400
+                                                              : AppThemeData
+                                                                  .grey500,
+                                                        ),
+                                                      ),
+                                                    ),
+                                                    const SizedBox(width: 8),
+                                                    // 2026-10-08: same road-distance label Home shows ("5.4 km away").
+                                                    // RoadDistanceText answers from getRoadDistanceKm's per-session
+                                                    // cache (key = your position + this restaurant's position), so a
+                                                    // restaurant already listed on Home costs no new request.
+                                                    RoadDistanceText(
+                                                      vendorLat: widget.vendorModel.latitude,
+                                                      vendorLon: widget.vendorModel.longitude,
+                                                      showAwaySuffix: true,
+                                                      style: TextStyle(
+                                                        fontSize: 12,
+                                                        fontFamily: AppThemeData.semiBold,
+                                                        color: AppThemeData.primary500,
+                                                      ),
+                                                    ),
+                                                  ],
+                                                ),
                                     ],
                                   ),
                                 ),
@@ -1890,7 +1894,9 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                           // Product List View
                           _searchModeActive
                               ? _buildDishSearchArea()
-                              : productListView(),
+                              : (allProductList.isEmpty
+                                  ? _buildMenuComingSoon()
+                                  : productListView()),
                         ],
                       ),
                     ),
@@ -2681,11 +2687,11 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                   Row(
                     children: _nutritionLevels.map((level) {
                       final sel = selectedLevel == level;
-                      final levelColor = level == 'High'
-                          ? AppThemeData.error500
-                          : level == 'Medium'
-                              ? AppThemeData.accent500
-                              : AppThemeData.success400;
+                      // One neutral colour for every level. High/Medium/Low used
+                      // to be red/amber/green, which read as "High is bad" - but
+                      // someone filtering for high protein, carbs or fat WANTS
+                      // High, so the level is a choice, not a warning.
+                      final levelColor = AppThemeData.primary500;
                       return Padding(
                         padding: const EdgeInsets.only(right: 8),
                         child: GestureDetector(
@@ -3131,6 +3137,44 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
     if (ctx == null) return base;
     final scores = RecommendationEngine.computeMergedScores(ctx);
     return RecommendationEngine.reorderByScore(base, scores);
+  }
+
+  // Shown when the restaurant has no products at all (allProductList, not the
+  // filtered productList - a veg/nutrition filter that matches nothing must not
+  // look like a missing menu).
+  Widget _buildMenuComingSoon() {
+    final dark = isDarkMode(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 56),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.restaurant_menu_outlined,
+              size: 56, color: dark ? AppThemeData.grey500 : AppThemeData.grey400),
+          const SizedBox(height: 16),
+          Text(
+            'Menu coming soon'.tr(),
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 18,
+              fontFamily: AppThemeData.semiBold,
+              color: dark ? AppThemeData.grey50 : AppThemeData.grey900,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'This restaurant is still setting up its menu. Please check back soon.'
+                .tr(),
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 14,
+              fontFamily: AppThemeData.medium,
+              color: dark ? AppThemeData.grey400 : AppThemeData.grey500,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   productListView() {
