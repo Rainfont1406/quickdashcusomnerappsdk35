@@ -10,3 +10,7 @@
 -dontwarn com.stripe.android.pushProvisioning.PushProvisioningActivityStarter$Error
 -dontwarn com.stripe.android.pushProvisioning.PushProvisioningActivityStarter
 -dontwarn com.stripe.android.pushProvisioning.PushProvisioningEphemeralKeyProvider
+# SafetyNet App Check provider: excluded in build.gradle (Play Integrity is used).
+# firebase_app_check's plugin code still names the class in a branch that never runs.
+-dontwarn com.google.firebase.appcheck.safetynet.**
+-dontwarn com.google.android.gms.safetynet.**

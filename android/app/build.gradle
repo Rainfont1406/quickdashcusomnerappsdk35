@@ -121,6 +121,16 @@ flutter {
     source '../..'
 }
 
+// SafetyNet is shut down by Google and Play flags play-services-safetynet 18.0.0.
+// firebase_app_check pulls it in only for AndroidProvider.safetyNet, which this
+// app never uses (main.dart activates App Check with Play Integrity), so the
+// library is excluded. The plugin's reference to it is silenced for R8 in
+// proguard-rules.pro.
+configurations.configureEach {
+    exclude group: 'com.google.firebase', module: 'firebase-appcheck-safetynet'
+    exclude group: 'com.google.android.gms', module: 'play-services-safetynet'
+}
+
 dependencies {
     implementation platform('com.google.firebase:firebase-bom:30.5.0')
     implementation 'androidx.multidex:multidex:2.0.1'
