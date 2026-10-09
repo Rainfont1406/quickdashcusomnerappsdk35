@@ -2320,6 +2320,7 @@ class PaymentScreenState extends State<PaymentScreen> {
         scheduleTimeMillis: widget.scheduleTime?.millisecondsSinceEpoch,
         clientOrderType: widget.orderType,
         expectedTotal: _payableTotal,
+      clientOrderId: appOrderId,
       );
       if (s2sResult.success && s2sResult.intentUrl != null) {
         dismissLoadingAndClearProcessing();
@@ -2373,6 +2374,7 @@ class PaymentScreenState extends State<PaymentScreen> {
       scheduleTimeMillis: widget.scheduleTime?.millisecondsSinceEpoch,
       clientOrderType: widget.orderType,
       expectedTotal: _payableTotal,
+      clientOrderId: appOrderId,
     );
     dismissLoadingAndClearProcessing();
     if (!mounted) return;
@@ -2655,6 +2657,7 @@ class PaymentScreenState extends State<PaymentScreen> {
       scheduleTimeMillis: widget.scheduleTime?.millisecondsSinceEpoch,
       clientOrderType: widget.orderType,
       expectedTotal: _payableTotal,
+      clientOrderId: appOrderId,
     );
     dismissLoadingAndClearProcessing();
     if (!mounted) return;

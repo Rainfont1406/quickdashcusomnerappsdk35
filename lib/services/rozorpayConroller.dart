@@ -296,6 +296,10 @@ class RazorPayController {
     // silently charging a different amount (2026-09-13). Omitted by older
     // builds, for which the server simply skips that comparison.
     double? expectedTotal,
+    // The pre-generated vendor_orders id this payment is for. The server puts it in the
+    // Razorpay order notes so razorpayWebhook can promote order_drafts/{id} if the app dies
+    // after paying. Omitted by older builds (no recovery, no failure).
+    String? clientOrderId,
   }) async {
     final idToken = await _idToken();
     if (idToken == null) {
@@ -326,6 +330,7 @@ class RazorPayController {
               'scheduleTimeMillis': scheduleTimeMillis,
               'clientOrderType': clientOrderType,
               'expectedTotal': expectedTotal,
+              'clientOrderId': clientOrderId,
             }),
           )
           .timeout(const Duration(seconds: 30));
@@ -841,6 +846,10 @@ class RazorPayController {
     // silently charging a different amount (2026-09-13). Omitted by older
     // builds, for which the server simply skips that comparison.
     double? expectedTotal,
+    // The pre-generated vendor_orders id this payment is for. The server puts it in the
+    // Razorpay order notes so razorpayWebhook can promote order_drafts/{id} if the app dies
+    // after paying. Omitted by older builds (no recovery, no failure).
+    String? clientOrderId,
   }) async {
     final idToken = await _idToken();
     if (idToken == null) {
@@ -870,6 +879,7 @@ class RazorPayController {
               'scheduleTimeMillis': scheduleTimeMillis,
               'clientOrderType': clientOrderType,
               'expectedTotal': expectedTotal,
+              'clientOrderId': clientOrderId,
             }),
           )
           .timeout(const Duration(seconds: 30));

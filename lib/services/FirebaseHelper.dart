@@ -177,6 +177,20 @@ class BookingDateBlockedException implements Exception {
 
 class FireStoreUtils {
   static FirebaseMessaging firebaseMessaging = FirebaseMessaging.instance;
+
+  /// Push token, or null when push is unavailable. Never throws (2026-10-09): a phone
+  /// whose Google push service errors out used to fail login / session restore here.
+  /// null means "unknown" - callers keep the token already saved on the account
+  /// instead of overwriting it with an empty one.
+  static Future<String?> getFcmTokenSafe() async {
+    try {
+      final token = await firebaseMessaging.getToken();
+      return (token == null || token.isEmpty) ? null : token;
+    } catch (e) {
+      log('[FCM] getFcmTokenSafe failed: $e');
+      return null;
+    }
+  }
   static FirebaseFirestore firestore = FirebaseFirestore.instance;
   static Reference storage = FirebaseStorage.instance.ref();
 
@@ -4518,7 +4532,26 @@ class FireStoreUtils {
     // re-runs this exact write with the same order id if anything throws
     // after the first write already succeeded (e.g. the stock-update step
     // below), so this must not clobber server-added fields on retry.
-    await documentReference.setLogged(orderModel.toJson(), 'placeOrderWithTakeAWay:ORDERS', SetOptions(merge: true));
+    try {
+      await documentReference.setLogged(orderModel.toJson(), 'placeOrderWithTakeAWay:ORDERS', SetOptions(merge: true));
+    } on FirebaseException catch (e) {
+      // 2026-10-09: razorpayWebhook can promote this order's staged draft into
+      // vendor_orders/{id} (webhookRecovered: true) a few seconds BEFORE this
+      // write runs - the payment notes now carry the order id, so the webhook
+      // wins the race on a normal, un-crashed payment too. This merge-set then
+      // becomes an update the rules deny for customers, which surfaced as
+      // "Could Not Complete / Permission denied" on an order that was in fact
+      // placed and paid. Only that exact case is treated as success; any other
+      // permission-denied (or a different error) still throws as before.
+      if (e.code != 'permission-denied') rethrow;
+      final existing = await documentReference.get();
+      final data = existing.data() as Map<String, dynamic>?;
+      final alreadyPlacedByWebhook = existing.exists &&
+          data != null &&
+          data['webhookRecovered'] == true &&
+          data['authorID'] == orderModel.authorID;
+      if (!alreadyPlacedByWebhook) rethrow;
+    }
     _trackOrderPlacedForEngagement(orderModel);
     return orderModel;
   }
@@ -4939,7 +4972,7 @@ class FireStoreUtils {
         user = User.fromJson(documentSnapshot.data() ?? {});
         // if(  USER_ROLE_CUSTOMER ==user.role)
         // {
-        user.fcmToken = await firebaseMessaging.getToken() ?? '';
+        user.fcmToken = await getFcmTokenSafe() ?? user.fcmToken;
 
         //user.active = true;
 
@@ -4996,7 +5029,7 @@ class FireStoreUtils {
     auth.UserCredential userCredential = await auth.FirebaseAuth.instance.signInWithCredential(authCredential);
     User? user = await getCurrentUser(userCredential.user?.uid ?? '');
     if (user != null && user.role == USER_ROLE_CUSTOMER) {
-      user.fcmToken = await firebaseMessaging.getToken() ?? '';
+      user.fcmToken = await getFcmTokenSafe() ?? user.fcmToken;
       user.role = USER_ROLE_CUSTOMER;
       //user.active = true;
       await updateCurrentUser(user);
@@ -5010,7 +5043,7 @@ class FireStoreUtils {
       User user = User(
         firstName: firstName,
         lastName: lastName,
-        fcmToken: await firebaseMessaging.getToken() ?? '',
+        fcmToken: await getFcmTokenSafe() ?? '',
         phoneNumber: phoneNumber,
         profilePictureURL: profileImageUrl,
         userID: userCredential.user?.uid ?? '',
@@ -5046,7 +5079,7 @@ class FireStoreUtils {
           role: USER_ROLE_CUSTOMER,
           userID: result.user?.uid ?? '',
           lastName: lastName,
-          fcmToken: await firebaseMessaging.getToken() ?? '',
+          fcmToken: await getFcmTokenSafe() ?? '',
           createdAt: Timestamp.now(),
           profilePictureURL: profilePicUrl);
       String? errorMessage = await firebaseCreateNewUser(user, referralCode);
