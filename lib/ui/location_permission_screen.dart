@@ -99,7 +99,7 @@ class _LocationPermissionScreenState extends State<LocationPermissionScreen> {
           sectionConstantModel = firstSection;
 
           user.fcmToken =
-              await FireStoreUtils.firebaseMessaging.getToken() ?? '';
+              await FireStoreUtils.getFcmTokenSafe() ?? user.fcmToken;
 
           // The location picked on THIS screen (map, or "enter location
           // manually") was previously kept only in MyAppState.selectedPosotion

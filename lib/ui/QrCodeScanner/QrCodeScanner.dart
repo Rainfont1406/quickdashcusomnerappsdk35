@@ -277,7 +277,7 @@ class _QrCodeScannerState extends State<QrCodeScanner>
         AppThemeData.primary300 = Color(
             int.parse(sectionModel.color!.replaceFirst('#', '0xff')));
         user.fcmToken =
-            await FireStoreUtils.firebaseMessaging.getToken() ?? '';
+            await FireStoreUtils.getFcmTokenSafe() ?? user.fcmToken;
         await FireStoreUtils.updateCurrentUser(user);
         if (!mounted) return;
         Navigator.of(context).pop();

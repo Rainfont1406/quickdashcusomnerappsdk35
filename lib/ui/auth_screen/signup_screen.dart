@@ -310,7 +310,7 @@ class _SignupScreenState extends State<SignupScreen> {
   // Auth-vs-Firestore diff: 38 real accounts stuck exactly this way).
   // Deleting the account here instead means the same email/phone is
   // immediately signup-able again.
-  Future<void> _abortOrphanedSignup(BuildContext context, String message) async {
+  Future<void> _abortOrphanedSignup(BuildContext context, String message, {Object? error}) async {
     ShowToastDialog.showToast(message);
     final user = auth.FirebaseAuth.instance.currentUser;
     if (user != null) {
@@ -327,6 +327,8 @@ class _SignupScreenState extends State<SignupScreen> {
           'attemptedPhone': phoneNUmberEditingController.text.trim(),
           'countryCode': countryCodeEditingController.text,
           'reason': message,
+          // Additive (2026-10-09): the real exception behind a generic message.
+          if (error != null) 'error': error.toString().length > 400 ? error.toString().substring(0, 400) : error.toString(),
           'createdAt': FieldValue.serverTimestamp(),
           // Firestore TTL policy (configured on the collection, not in code)
           // auto-deletes this doc 30 days after it's written - admin-only
@@ -352,6 +354,11 @@ class _SignupScreenState extends State<SignupScreen> {
     // reaches it - skips finally's plain dismiss so the success checkmark
     // isn't cut off the instant it appears (2026-08-27).
     var didShowSuccess = false;
+    // True once the account document is saved. From then on nothing may roll the
+    // account back: a later hiccup (navigation, saving a preference) used to land
+    // in the abort path below, which deleted the sign-in account and showed an
+    // error for an account that had in fact been created.
+    var accountWritten = false;
     final nameParts = _splitFullName(fullNameEditingController.text.toString());
     // TEMPORARY [LOGIN-PERF] - timing instrumentation for the login/signup
     // speed investigation, matching email_login_screen.dart/otp_screen.dart.
@@ -409,6 +416,7 @@ class _SignupScreenState extends State<SignupScreen> {
         userModel.phoneNumber = phoneNUmberEditingController.text.trim();
         userModel.role = USER_ROLE_CUSTOMER;
         userModel.fcmToken = fcmToken;
+        if (fcmToken.isEmpty) NotificationService.fillTokenLater(userModel.userID);
         // Must be false (or absent) on this very first write - firestore.rules
         // rejects a self-created user doc with active: true (2026-08-18
         // hardening, to stop a client self-approving). ServiceListScreen/
@@ -430,6 +438,7 @@ class _SignupScreenState extends State<SignupScreen> {
 
         final updateUserSw = Stopwatch()..start();
         await FireStoreUtils.updateCurrentUser(userModel);
+        accountWritten = true;
         debugPrint('[LOGIN-PERF] SIGNUP(phone) updateCurrentUser — ${updateUserSw.elapsedMilliseconds}ms');
         // Persist phone user ID so the session survives app restarts
         final signupPrefs = await SharedPreferences.getInstance();
@@ -515,6 +524,7 @@ class _SignupScreenState extends State<SignupScreen> {
       userModel.phoneNumber = phoneNUmberEditingController.text.trim();
       userModel.role = USER_ROLE_CUSTOMER;
       userModel.fcmToken = fcmToken;
+      if (fcmToken.isEmpty) NotificationService.fillTokenLater(userModel.userID);
       // Must be false (or absent) on this very first write - see the
       // identical comment on the phone branch above for why.
       userModel.active = false;
@@ -532,6 +542,7 @@ class _SignupScreenState extends State<SignupScreen> {
 
       final updateUserSw = Stopwatch()..start();
       await FireStoreUtils.updateCurrentUser(userModel);
+      accountWritten = true;
       debugPrint('[LOGIN-PERF] SIGNUP(email) updateCurrentUser — ${updateUserSw.elapsedMilliseconds}ms');
 
       final emailVerifySw = Stopwatch()..start();
@@ -581,14 +592,27 @@ class _SignupScreenState extends State<SignupScreen> {
         default:
           ShowToastDialog.showToast(e.message ?? "Signup failed. Please try again.");
       }
-    } catch (_) {
+    } catch (e) {
+      if (accountWritten) {
+        // The account is already saved; only a later step failed. Keep the account
+        // and continue to the app instead of undoing it.
+        didShowSuccess = true;
+        if (mounted) pushAndRemoveUntil(context, LocationPermissionScreen());
+        return;
+      }
       // Any exception this late (e.g. the Firestore profile write failing
       // right after a successful authorize() call) means signup did not
       // actually complete - deleting the Auth account (2026-08-27, see
       // _abortOrphanedSignup) rather than just signing out means the
       // customer can immediately retry with the same email/phone instead
       // of being permanently stuck.
-      await _abortOrphanedSignup(context, "Something went wrong. Please try again.");
+      final text = e.toString();
+      final offline = text.contains('SocketException') || text.contains('TimeoutException') || text.contains('NetworkException');
+      await _abortOrphanedSignup(
+        context,
+        offline ? 'No internet connection. Please try again.' : 'Something went wrong. Please try again.',
+        error: e,
+      );
     } finally {
       // Skip the plain dismiss on the success path - showSuccess() above
       // already transitions the same overlay to a checkmark and dismisses

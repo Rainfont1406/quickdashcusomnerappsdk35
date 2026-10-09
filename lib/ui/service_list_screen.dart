@@ -126,7 +126,7 @@ class _ServiceListScreenState extends State<ServiceListScreen> {
 
           if (widget.user == null) {
             final getTokenSw = Stopwatch()..start();
-            user.fcmToken = await FireStoreUtils.firebaseMessaging.getToken() ?? '';
+            user.fcmToken = await FireStoreUtils.getFcmTokenSafe() ?? user.fcmToken;
             debugPrint('[LOGIN-PERF][SVC] firebaseMessaging.getToken (re-fetch, already have one from login) — ${getTokenSw.elapsedMilliseconds}ms');
           }
           // (2026-08-04) Was awaited here - measured 28.6s on a real device,

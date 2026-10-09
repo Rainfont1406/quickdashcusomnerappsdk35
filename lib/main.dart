@@ -236,7 +236,8 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
     notificationService.initInfo().then((value) async {
       String token = await NotificationService.getToken();
       log(":::::::TOKEN:::::: $token");
-      if (currentUser != null) {
+      // Empty = push unavailable on this phone: keep the token already saved on the account.
+      if (currentUser != null && token.isNotEmpty) {
         await FireStoreUtils.getCurrentUser(currentUser!.userID).then((value) {
           if (value != null) {
             // 2026-09-15: only write back if the FCM token actually changed.
@@ -860,7 +861,8 @@ class OnBoardingState extends State<OnBoarding> {
   // in-memory user is updated. Field kept (additive-only rule).
   static const _kLastOnlineRefresh = Duration(hours: 12);
   static bool _startupUserWriteNeeded(User serverUser, String? freshToken) {
-    if ((freshToken ?? '') != serverUser.fcmToken) return true;
+    // A null token means push is unavailable right now - not a reason to rewrite the user doc.
+    if (freshToken != null && freshToken != serverUser.fcmToken) return true;
     return DateTime.now().difference(serverUser.lastOnlineTimestamp.toDate()) > _kLastOnlineRefresh;
   }
 
@@ -869,7 +871,7 @@ class OnBoardingState extends State<OnBoarding> {
     try {
       final results = await Future.wait([
         FireStoreUtils.getCurrentUser(uid),
-        FireStoreUtils.firebaseMessaging.getToken(),
+        FireStoreUtils.getFcmTokenSafe(),
       ]);
       final user = results[0] as User?;
       final fcmToken = results[1] as String?;
@@ -878,7 +880,7 @@ class OnBoardingState extends State<OnBoarding> {
         return;
       }
       final needsWrite = _startupUserWriteNeeded(user, fcmToken);
-      user.fcmToken = fcmToken ?? '';
+      user.fcmToken = fcmToken ?? user.fcmToken;
       if (needsWrite) user.lastOnlineTimestamp = Timestamp.now();
       MyAppState.currentUser = user;
       unawaited(_cacheUserProfile(user));
@@ -967,7 +969,7 @@ class OnBoardingState extends State<OnBoarding> {
                 'getCurrentUser (auth branch) [Firestore .get() only, token already warm]',
                 () => FireStoreUtils.getCurrentUser(firebaseUser.uid)),
             _timedStep('FirebaseMessaging.getToken (auth branch)',
-                () => FireStoreUtils.firebaseMessaging.getToken()),
+                () => FireStoreUtils.getFcmTokenSafe()),
           ]);
           User? user = authBranchResults[0] as User?;
           final authBranchFcmToken = authBranchResults[1] as String?;
@@ -976,7 +978,7 @@ class OnBoardingState extends State<OnBoarding> {
               final needsWrite = _startupUserWriteNeeded(user, authBranchFcmToken);
               user.active = true;
               user.role = USER_ROLE_CUSTOMER;
-              user.fcmToken = authBranchFcmToken ?? '';
+              user.fcmToken = authBranchFcmToken ?? user.fcmToken;
               // Every prior write site for lastOnlineTimestamp only fired on
               // sign-out, so it never reflected actual usage — bump it here,
               // alongside the fcmToken refresh below (at most every 12 h -
@@ -1041,13 +1043,13 @@ class OnBoardingState extends State<OnBoarding> {
               _timedStep('getCurrentUser (msg91 branch)',
                   () => FireStoreUtils.getCurrentUser(savedPhoneUid)),
               _timedStep('FirebaseMessaging.getToken (msg91 branch)',
-                  () => FireStoreUtils.firebaseMessaging.getToken()),
+                  () => FireStoreUtils.getFcmTokenSafe()),
             ]);
             User? user = msg91BranchResults[0] as User?;
             final msg91BranchFcmToken = msg91BranchResults[1] as String?;
             if (user != null && user.role == USER_ROLE_CUSTOMER && user.active) {
               final needsWrite = _startupUserWriteNeeded(user, msg91BranchFcmToken);
-              user.fcmToken = msg91BranchFcmToken ?? '';
+              user.fcmToken = msg91BranchFcmToken ?? user.fcmToken;
               if (needsWrite) user.lastOnlineTimestamp = Timestamp.now();
               // Fire-and-forget — see the identical comment in the auth
               // branch above.

@@ -321,7 +321,9 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
           return;
         }
 
-        userModel.fcmToken = fcmToken;
+        // Never overwrite the saved token with an empty one (push unavailable on this phone).
+        if (fcmToken.isNotEmpty) userModel.fcmToken = fcmToken;
+        if (fcmToken.isEmpty) NotificationService.fillTokenLater(userModel.userID);
         // This write now succeeds: request.auth.uid == userModel.userID.
         // Fire-and-forget: navigation doesn't need to wait on this write's
         // round trip — MyAppState.currentUser below already reflects the
@@ -579,6 +581,11 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
   }) async {
     ShowToastDialog.showLoader('Creating your account...');
     var didShowSuccess = false;
+    // Which step threw, recorded in failed_signups so the real cause is visible
+    // (2026-10-09 - the toast and the record only ever said "Something went wrong").
+    var stage = 'email_check';
+    // True once the account document is saved - after that nothing may roll it back.
+    var accountWritten = false;
     try {
       // Phone uniqueness for signup is already enforced server-side
       // (OtpVerifyController::verifyAndMint rejects a duplicate phone+role
@@ -593,8 +600,10 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
         return;
       }
 
+      stage = 'fcm_token';
       final fcmToken = await NotificationService.getToken();
 
+      stage = 'device_session';
       // Registers this device as the account's authorized device the
       // moment it's created - without this, a brand-new account has no
       // device_id on file until its first subsequent login, leaving a
@@ -606,6 +615,7 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
         return;
       }
 
+      stage = 'profile_build';
       final nameParts = _splitFullName(fullName);
       userModel.firstName = nameParts['firstName']!;
       userModel.lastName = nameParts['lastName']!;
@@ -620,6 +630,7 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
       userModel.active = false;
       userModel.createdAt = Timestamp.now();
 
+      stage = 'referral';
       final referralUser = await FireStoreUtils.getReferralUserByCode(referralCode);
       await FireStoreUtils.referralAdd(ReferralModel(
         id: userModel.userID,
@@ -627,10 +638,18 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
         referralCode: getReferralCode(),
       ));
 
+      stage = 'write_user';
       await FireStoreUtils.updateCurrentUser(userModel);
+      accountWritten = true;
+      // Push token could not be fetched above: keep retrying in the background.
+      if (fcmToken is String && fcmToken.isEmpty) NotificationService.fillTokenLater(userModel.userID);
       // Persist phone user ID so the session survives app restarts
-      final signupPrefs = await SharedPreferences.getInstance();
-      await signupPrefs.setString(PHONE_AUTH_USER_ID, userModel.userID);
+      try {
+        final signupPrefs = await SharedPreferences.getInstance();
+        await signupPrefs.setString(PHONE_AUTH_USER_ID, userModel.userID);
+      } catch (_) {
+        // Best effort: the session is still valid, it just may not survive a restart.
+      }
       if (!mounted) return;
       didShowSuccess = true;
       ShowToastDialog.showSuccess('Account created!');
@@ -645,8 +664,21 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
       } else {
         pushAndRemoveUntil(context, LocationPermissionScreen());
       }
-    } catch (_) {
-      await _abortOrphanedPhoneSignup(userModel, 'Something went wrong. Please try again.');
+    } catch (e) {
+      if (accountWritten) {
+        // The account is already saved; only a later step failed. Keep it and continue.
+        didShowSuccess = true;
+        if (mounted) pushAndRemoveUntil(context, LocationPermissionScreen());
+        return;
+      }
+      final text = e.toString();
+      final offline = text.contains('SocketException') || text.contains('TimeoutException') || text.contains('NetworkException') || text.contains('unavailable');
+      await _abortOrphanedPhoneSignup(
+        userModel,
+        offline ? 'No internet connection. Please try again.' : 'Something went wrong. Please try again.',
+        error: e,
+        stage: stage,
+      );
     } finally {
       if (!didShowSuccess) ShowToastDialog.closeLoader();
     }
@@ -658,7 +690,7 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
   // it rather than leave an orphan with no Firestore profile. Logs the
   // attempt to failed_signups first, for admin visibility only - see that
   // method's own comment for the full reasoning, identical here.
-  Future<void> _abortOrphanedPhoneSignup(User userModel, String message) async {
+  Future<void> _abortOrphanedPhoneSignup(User userModel, String message, {Object? error, String? stage}) async {
     ShowToastDialog.showToast(message);
     final user = firebase_auth.FirebaseAuth.instance.currentUser;
     if (user != null) {
@@ -669,6 +701,9 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
           'attemptedPhone': userModel.phoneNumber,
           'countryCode': userModel.countryCode,
           'reason': message,
+          // Additive fields (2026-10-09): the real exception and the step it came from.
+          if (stage != null) 'stage': stage,
+          if (error != null) 'error': error.toString().length > 400 ? error.toString().substring(0, 400) : error.toString(),
           'createdAt': FieldValue.serverTimestamp(),
           'ttlAt': Timestamp.fromDate(DateTime.now().toUtc().add(const Duration(days: 30))),
         }, '_abortOrphanedPhoneSignup:failed_signups');

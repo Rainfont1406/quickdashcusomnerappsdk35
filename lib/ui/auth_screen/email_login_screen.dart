@@ -124,7 +124,9 @@ class _EmailLoginScreenState extends State<EmailLoginScreen> {
         return;
       }
 
-      userModel.fcmToken = fcmToken;
+      // Never overwrite the saved token with an empty one (push unavailable on this phone).
+      if (fcmToken.isNotEmpty) userModel.fcmToken = fcmToken;
+      if (fcmToken.isEmpty) NotificationService.fillTokenLater(userModel.userID);
       // Fire-and-forget: navigation doesn't need to wait on this write's
       // round trip — MyAppState/userModel below already reflect the update
       // in memory. Same fix as hasFinishedOnBoarding() in main.dart.

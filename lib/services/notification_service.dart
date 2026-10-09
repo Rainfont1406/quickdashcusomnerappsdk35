@@ -10,6 +10,8 @@ import 'package:emartconsumer/ui/container/ContainerScreen.dart';
 import 'package:emartconsumer/ui/dineInScreen/my_booking_screen.dart';
 import 'package:emartconsumer/ui/orderDetailsScreen/OrderDetailsScreen.dart';
 import 'package:emartconsumer/ui/billPayRequest/BillPayRequestScreen.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:emartconsumer/constants.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
@@ -190,9 +192,41 @@ class NotificationService {
     }
   }
 
+  // 2026-10-09: never throws. This used to be `return token!`, so a phone that
+  // could not get an FCM token (Google Play services missing/blocked/outdated,
+  // Firebase Installations error) threw out of signup and login and showed a
+  // generic "Something went wrong" - a customer could not create an account
+  // just because push notifications were unavailable. Callers now get an empty
+  // string instead and carry on; fillTokenLater() stores the token afterwards.
   static getToken() async {
-    String? token = await FirebaseMessaging.instance.getToken();
-    return token!;
+    try {
+      final String? token = await FirebaseMessaging.instance.getToken();
+      if (token != null && token.isNotEmpty) return token;
+      log('[FCM] getToken returned no token');
+    } catch (e) {
+      log('[FCM] getToken failed: $e');
+    }
+    return '';
+  }
+
+  // When getToken() came back empty at signup/login, retry a few times in the
+  // background and save the token on the user's document so push still works.
+  static void fillTokenLater(String userId) {
+    if (userId.isEmpty) return;
+    () async {
+      for (final delaySeconds in const [5, 20, 60]) {
+        await Future.delayed(Duration(seconds: delaySeconds));
+        final token = await getToken();
+        if (token is String && token.isNotEmpty) {
+          try {
+            await FirebaseFirestore.instance.collection(USERS).doc(userId).update({'fcmToken': token});
+          } catch (e) {
+            log('[FCM] saving late token failed: $e');
+          }
+          return;
+        }
+      }
+    }();
   }
 
   display(RemoteMessage message) async {
