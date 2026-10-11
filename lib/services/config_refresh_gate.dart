@@ -247,6 +247,11 @@ class ConfigRefreshGate {
     }
   }
 
+  /// The stored list regardless of age (null when none was ever stored), for
+  /// "show the phone's copy first, refresh in the background" callers.
+  static Future<List<Map<String, dynamic>>?> peekList(String key) =>
+      readList(key, const Duration(days: 36500));
+
   /// Stores [items] for [key] and starts its TTL window. Call only after a
   /// genuinely successful fetch. Same primitive-only constraint as [writeDoc]
   /// - callers must not rely on this for Timestamp/GeoPoint fields.

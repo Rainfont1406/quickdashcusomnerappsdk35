@@ -118,7 +118,9 @@ class _QrCodeScannerState extends State<QrCodeScanner>
       statusBarColor: Colors.transparent,
       statusBarIconBrightness: Brightness.dark,
       systemNavigationBarColor: Colors.transparent,
-      systemNavigationBarIconBrightness: Brightness.dark,
+      // Light: the app paints a black strip under the nav bar (main.dart
+      // builder), so dark icons would be invisible after leaving the scanner.
+      systemNavigationBarIconBrightness: Brightness.light,
     ));
     _controller.dispose();
     _animCtrl.dispose();

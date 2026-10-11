@@ -104,30 +104,55 @@ class _LocalOffersListScreenState extends State<LocalOffersListScreen> {
     return 0;
   }
 
+  // 2026-10-11: show the phone's copy first, then check Bunny in the
+  // background. Before, once the copy was older than its TTL the screen sat
+  // on a spinner until the network answered - up to the 8-second timeout on
+  // slow internet - even though a usable copy was already on the phone.
+  // Expired offers in an old copy are still hidden by _onlyActive (it checks
+  // the dates against the phone's clock). The first open ever (nothing
+  // stored yet) still loads the normal way.
   Future<void> _load() async {
+    final cachedCats = await FireStoreUtils.peekCachedLocalOfferCategories();
+    final cachedOffers = await FireStoreUtils.peekCachedLocalOffers();
+    if (!mounted) return;
+    if (cachedCats != null && cachedOffers != null && cachedOffers.isNotEmpty) {
+      _show(cachedCats, cachedOffers);
+      final (newCats, newOffers) = await FireStoreUtils.refreshLocalOffersIfChanged();
+      if (!mounted || (newCats == null && newOffers == null)) return;
+      _show(newCats ?? cachedCats, newOffers ?? cachedOffers);
+      return;
+    }
     final results = await Future.wait([
       FireStoreUtils.getLocalOfferCategories(),
       FireStoreUtils.getAllActiveLocalOffers(),
     ]);
     if (!mounted) return;
-    final offers = _onlyActive(results[1] as List<LocalOfferModel>)..sort(_compareOffers);
+    _show(results[0] as List<LocalOfferCategoryModel>, results[1] as List<LocalOfferModel>);
+  }
+
+  void _show(List<LocalOfferCategoryModel> cats, List<LocalOfferModel> fetched) {
+    final offers = _onlyActive(fetched)..sort(_compareOffers);
     // 2026-10-05: drop the cached pictures of offers that expired / were
     // removed / got a new banner or icon. Skipped when either list is empty
     // (a failed or offline fetch returns an empty list - that must never wipe
     // the cache).
-    final cats = results[0] as List<LocalOfferCategoryModel>;
     if (offers.isNotEmpty && cats.isNotEmpty) {
       unawaited(LocalOfferImageJanitor.sync([
         for (final o in offers) ...o.bannerImageUrls,
         for (final c in cats) c.iconUrl ?? '',
       ]));
     }
+    // A background refresh keeps the selected category, unless it is gone.
+    final selected = cats.any((c) => c.id == _selectedCategoryId) ? _selectedCategoryId : null;
     setState(() {
-      _categories = results[0] as List<LocalOfferCategoryModel>;
+      _categories = cats;
       _allOffersUnfiltered
         ..clear()
         ..addAll(offers);
-      _allOffers = offers;
+      _selectedCategoryId = selected;
+      _allOffers = selected == null
+          ? _allOffersUnfiltered
+          : _allOffersUnfiltered.where((o) => o.categoryId == selected).toList();
       _loading = false;
     });
     _applyFilters();

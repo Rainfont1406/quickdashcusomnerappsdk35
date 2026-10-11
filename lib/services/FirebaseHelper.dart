@@ -2661,6 +2661,39 @@ class FireStoreUtils {
   /// fetched. [limit] is a safety cap, not a page size - at this app's
   /// current business count this pulls the whole active set in one call;
   /// revisit with real geo-bounded pagination if that count grows large.
+  /// 2026-10-11: the copy already on the phone (memory, else the stored Bunny
+  /// response of any age) with no network call - null when there is none.
+  /// LocalOffersListScreen paints this at once, then calls
+  /// refreshLocalOffersIfChanged in the background.
+  static Future<List<LocalOfferCategoryModel>?> peekCachedLocalOfferCategories() async =>
+      _localOfferCategoriesCache ?? await peekLocalOfferCategoriesFromBunny();
+
+  static Future<List<LocalOfferModel>?> peekCachedLocalOffers() async =>
+      _localOffersCache ?? await peekLocalOffersFromBunny();
+
+  /// Asks Bunny whether the categories/offers changed since the phone's copy
+  /// (unchanged = empty 304). Returns (categories, offers), each null when
+  /// unchanged or on failure; a changed list also replaces the memory cache.
+  static Future<(List<LocalOfferCategoryModel>?, List<LocalOfferModel>?)>
+      refreshLocalOffersIfChanged() async {
+    final results = await Future.wait([
+      revalidateLocalOfferCategoriesFromBunny(),
+      revalidateLocalOffersFromBunny(),
+    ]);
+    final cats = results[0] as List<LocalOfferCategoryModel>?;
+    final offers = results[1] as List<LocalOfferModel>?;
+    final now = DateTime.now();
+    if (cats != null) {
+      _localOfferCategoriesCache = cats;
+      _localOfferCategoriesCachedAt = now;
+    }
+    if (offers != null) {
+      _localOffersCache = offers;
+      _localOffersCachedAt = now;
+    }
+    return (cats, offers);
+  }
+
   static Future<List<LocalOfferModel>> getAllActiveLocalOffers({
     String? categoryId,
     int limit = 300,
@@ -3298,7 +3331,11 @@ class FireStoreUtils {
   // sooner too.
   static const Duration _bannerPersistentTtl = Duration(hours: 24);
 
-  Future<List<BannerModel>> getHomeTopBanner() async {
+  /// 2026-10-11: past the 24 h window the phone's copy is still shown at once
+  /// and the refresh runs in the background ([onChanged] gets the new list
+  /// only when it differs) - before, an expired copy made the banner wait on
+  /// the network, up to the 8-second timeout on slow internet.
+  Future<List<BannerModel>> getHomeTopBanner({void Function(List<BannerModel>)? onChanged}) async {
     final sectionId = sectionConstantModel!.id ?? '';
     final cached = _homeTopBannerCache[sectionId];
     final now = DateTime.now();
@@ -3317,6 +3354,28 @@ class FireStoreUtils {
       return banners;
     }
 
+    final expired = await ConfigRefreshGate.peekList('topBanner_$sectionId');
+    if (expired != null) {
+      final banners = expired.map((e) => BannerModel.fromJson(e)).toList()
+        ..sort((a, b) => (a.setOrder ?? 0).compareTo(b.setOrder ?? 0));
+      _homeTopBannerCache[sectionId] = (banners, now);
+      debugPrint('[ConfigCache] top banners (${banners.length}) from EXPIRED '
+          'on-device copy - refreshing in the background');
+      // ignore: unawaited_futures
+      _fetchHomeTopBannerFresh(sectionId).then((fresh) {
+        if (onChanged != null && !_sameBanners(fresh, banners)) onChanged(fresh);
+      }).catchError((_) {});
+      return banners;
+    }
+    return _fetchHomeTopBannerFresh(sectionId);
+  }
+
+  static bool _sameBanners(List<BannerModel> a, List<BannerModel> b) =>
+      jsonEncode(a.map((x) => x.toJson()).toList()) ==
+      jsonEncode(b.map((x) => x.toJson()).toList());
+
+  Future<List<BannerModel>> _fetchHomeTopBannerFresh(String sectionId) async {
+    final now = DateTime.now();
     // Read on every app cold start by every user - same fan-out class as
     // getCuisines() above, per the 2026-09-06 billing audit. Falls back to
     // the original Firestore query below on any failure.
@@ -3356,7 +3415,8 @@ class FireStoreUtils {
   static final Map<String, (List<BannerModel>, DateTime)> _homeMiddleBannerCache = {};
   static const Duration _homeMiddleBannerCacheTtl = Duration(minutes: 10);
 
-  Future<List<BannerModel>> getHomeMiddleBanner() async {
+  /// Same 2026-10-11 "phone's copy first" rule as [getHomeTopBanner].
+  Future<List<BannerModel>> getHomeMiddleBanner({void Function(List<BannerModel>)? onChanged}) async {
     final sectionId = sectionConstantModel!.id ?? '';
     final cached = _homeMiddleBannerCache[sectionId];
     final now = DateTime.now();
@@ -3382,6 +3442,22 @@ class FireStoreUtils {
       return banners;
     }
 
+    final expired = await ConfigRefreshGate.peekList('middleBanner_$sectionId');
+    if (expired != null) {
+      final banners = expired.map((e) => BannerModel.fromJson(e)).toList()
+        ..sort((a, b) => (a.setOrder ?? 0).compareTo(b.setOrder ?? 0));
+      _homeMiddleBannerCache[sectionId] = (banners, now);
+      // ignore: unawaited_futures
+      _fetchHomeMiddleBannerFresh(sectionId).then((fresh) {
+        if (onChanged != null && !_sameBanners(fresh, banners)) onChanged(fresh);
+      }).catchError((_) {});
+      return banners;
+    }
+    return _fetchHomeMiddleBannerFresh(sectionId);
+  }
+
+  Future<List<BannerModel>> _fetchHomeMiddleBannerFresh(String sectionId) async {
+    final now = DateTime.now();
     List<BannerModel> bannerHome = [];
     QuerySnapshot<Map<String, dynamic>> bannerHomeQuery = await firestore
         .collection(MENU_ITEM)

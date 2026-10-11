@@ -1,4 +1,6 @@
-﻿import 'package:cached_network_image/cached_network_image.dart';
+﻿import 'dart:math' as math;
+
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
@@ -849,7 +851,11 @@ class _HomeScreenState extends State<HomeScreen> {
             ..addEntries(value.where((c) => (c.id ?? '').isNotEmpty).map((c) => MapEntry(c.id!, c)));
         }),
       _timedStep(
-              'getBanner -> getHomeTopBanner', () => fireStoreUtils.getHomeTopBanner())
+              'getBanner -> getHomeTopBanner',
+              () => fireStoreUtils.getHomeTopBanner(onChanged: (fresh) {
+                    // Background refresh of an expired copy found a change.
+                    if (mounted) setState(() => bannerTopHome = fresh);
+                  }))
           .then((value) {
         setState(() {
           bannerTopHome = value;
@@ -901,7 +907,9 @@ class _HomeScreenState extends State<HomeScreen> {
     // would request images the user hasn't scrolled to yet. Its own
     // NetworkImageWidget loads normally once it's actually built/visible.
     _timedStep('_loadMiddleBanner -> getHomeMiddleBanner',
-            () => fireStoreUtils.getHomeMiddleBanner())
+            () => fireStoreUtils.getHomeMiddleBanner(onChanged: (fresh) {
+                  if (mounted) setState(() => bannerMiddleHome = fresh);
+                }))
         .then((value) {
       if (!mounted) return;
       setState(() {
@@ -1784,7 +1792,12 @@ class _HomeScreenState extends State<HomeScreen> {
   // Manual sort chips for the "Restaurants Around You" feed â€” re-sorts the
   // already-loaded `vendors` list in place (_sortRestaurants), no new fetch.
   Widget _restaurantSortBar() {
-    return Row(
+    // Scrolls sideways: with a large system font the three chips are wider
+    // than the screen and the last one was cut off (seen on an Android 15
+    // emulator at font scale 1.3).
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
       children: [
         _sortChip('offer', 'Offers'.tr(), Icons.local_offer_rounded),
         const SizedBox(width: 8),
@@ -1792,6 +1805,7 @@ class _HomeScreenState extends State<HomeScreen> {
         const SizedBox(width: 8),
         _sortChip('rating', 'Rating'.tr(), Icons.star_rounded),
       ],
+      ),
     );
   }
 
@@ -3718,8 +3732,18 @@ class NewArrival extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // The text block under the image is ~40px of fixed padding/icons plus
+    // ~54px of text lines; the text part grows with the system font size, so
+    // a fixed 26%-of-screen height overflowed by 15px at font scale 1.3
+    // (Android 15 emulator, 2026-10-11). Never shorter than before.
+    final double rowHeight = math.max(
+      Responsive.height(26, context),
+      Responsive.height(14, context) +
+          40 +
+          MediaQuery.textScalerOf(context).scale(54),
+    );
     return SizedBox(
-      height: Responsive.height(26, context),
+      height: rowHeight,
       child: ListView.builder(
         physics: const ClampingScrollPhysics(),
         scrollDirection: Axis.horizontal,
@@ -3763,15 +3787,22 @@ class NewArrival extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Stack(
+                    // The photo takes whatever height the text below leaves,
+                    // so a bigger system font shrinks the photo a little
+                    // instead of cutting off the rating/distance row. A
+                    // computed text height wasn't reliable: Android 14 scales
+                    // fonts non-linearly (2026-10-11, OPPO at font 1.15).
+                    Expanded(
+                      child: LayoutBuilder(
+                        builder: (context, box) => Stack(
                       children: [
                         SizedBox(
-                          height: Responsive.height(14, context),
+                          height: box.maxHeight,
                           width: double.infinity,
                           child: isDelivery
                               ? _MenuCarousel(
                                   vendorModel: vendorModel,
-                                  height: Responsive.height(14, context),
+                                  height: box.maxHeight,
                                   borderRadius: const BorderRadius.only(
                                     topLeft: Radius.circular(16),
                                     topRight: Radius.circular(16),
@@ -3781,7 +3812,7 @@ class NewArrival extends StatelessWidget {
                                 )
                               : _RestaurantCardImage(
                                   vendorModel: vendorModel,
-                                  height: Responsive.height(14, context),
+                                  height: box.maxHeight,
                                   borderRadius: const BorderRadius.only(
                                     topLeft: Radius.circular(16),
                                     topRight: Radius.circular(16),
@@ -3828,10 +3859,13 @@ class NewArrival extends StatelessWidget {
                           ),
                       ],
                     ),
+                      ),
+                    ),
                     Padding(
                       padding: const EdgeInsets.all(10),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
                         children: [
                           Text(
                             vendorModel.title.toString(),

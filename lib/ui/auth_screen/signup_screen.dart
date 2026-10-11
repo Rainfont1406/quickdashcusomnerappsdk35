@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:country_code_picker/country_code_picker.dart';
@@ -838,7 +837,10 @@ class _SignupScreenState extends State<SignupScreen> {
   Widget _buildFooter(BuildContext context) {
     return Padding(
       padding: EdgeInsets.only(
-        bottom: Platform.isAndroid ? 16 : 32,
+        // Clear the system navigation bar: the app draws edge to edge
+        // (Android 15), so a fixed gap put the bar's back button over
+        // this text. padding.bottom drops to 0 while the keyboard is up.
+        bottom: MediaQuery.paddingOf(context).bottom + 16,
         top: 12,
       ),
       child: Center(

@@ -303,6 +303,22 @@ Future<bool> vendorListLooksComplete(String sectionId,
   }
 }
 
+/// 2026-10-11: the vendor list stored on the phone, whatever its age, with NO
+/// network call (null when none was ever stored). Home shows it at once and
+/// then checks Bunny in the background. Names/photos/hours only - open/closed
+/// is NOT in this file and keeps its own strict 5-minute check.
+Future<List<VendorModel>?> peekVendorListFromBunny(String sectionId) async {
+  try {
+    final body = await ConfigRefreshGate.peekRaw('bunny_vendorList_$sectionId');
+    return body == null ? null : _parseVendorList(body);
+  } catch (_) {
+    return null;
+  }
+}
+
+Future<bool> isVendorListCopyFresh(String sectionId) =>
+    ConfigRefreshGate.isFresh('bunny_vendorList_$sectionId', kBunnyReferenceTtl);
+
 /// 2026-09-27: the vendor list only when it changed on Bunny since the copy
 /// on the phone (e.g. a vendor's new working hours) - null when unchanged.
 /// Used on cold start and pull-to-refresh after the phone's copy is shown.
@@ -470,19 +486,72 @@ Timestamp? _timestampFromMirrorMillis(dynamic value) {
 /// query; never throws.
 Future<List<LocalOfferCategoryModel>?> fetchLocalOfferCategoriesFromBunny() async {
   try {
-    final body = await cachedBunnyGet('bunny_localOfferCategories',
-        'https://$_kBunnyCdnHost/local-offer-categories.json', kBunnyReferenceTtl);
+    final body = await cachedBunnyGet(_kLocalOfferCategoriesKey, _localOfferCategoriesUrl, kBunnyReferenceTtl);
     if (body == null) return null;
+    return _parseLocalOfferCategories(body);
+  } catch (_) {
+    return null;
+  }
+}
 
-    final decoded = jsonDecode(body) as Map<String, dynamic>;
-    final rawItems = decoded['items'] as List<dynamic>?;
-    if (rawItems == null) return null;
+const String _kLocalOfferCategoriesKey = 'bunny_localOfferCategories';
+const String _kLocalOffersKey = 'bunny_localOffers';
+String get _localOfferCategoriesUrl => 'https://$_kBunnyCdnHost/local-offer-categories.json';
+String get _localOffersUrl => 'https://$_kBunnyCdnHost/local-offers.json';
 
-    final categories = rawItems
-        .map((item) => LocalOfferCategoryModel.fromJson(Map<String, dynamic>.from(item as Map)))
-        .toList();
-    categories.sort((a, b) => (a.sortOrder ?? 0).compareTo(b.sortOrder ?? 0));
-    return categories;
+List<LocalOfferCategoryModel>? _parseLocalOfferCategories(String body) {
+  final decoded = jsonDecode(body) as Map<String, dynamic>;
+  final rawItems = decoded['items'] as List<dynamic>?;
+  if (rawItems == null) return null;
+
+  final categories = rawItems
+      .map((item) => LocalOfferCategoryModel.fromJson(Map<String, dynamic>.from(item as Map)))
+      .toList();
+  categories.sort((a, b) => (a.sortOrder ?? 0).compareTo(b.sortOrder ?? 0));
+  return categories;
+}
+
+/// 2026-10-11: "show the phone's copy first" for the Offers & Discounts
+/// screen - the stored categories/offers whatever their age, with NO network
+/// call (null when nothing was ever stored). The screen paints these at once
+/// and then calls the revalidate* functions below in the background; before
+/// this, an expired copy (or slow internet) kept the whole screen on a
+/// spinner for up to the 8-second fetch timeout.
+Future<List<LocalOfferCategoryModel>?> peekLocalOfferCategoriesFromBunny() async {
+  try {
+    final body = await ConfigRefreshGate.peekRaw(_kLocalOfferCategoriesKey);
+    return body == null ? null : _parseLocalOfferCategories(body);
+  } catch (_) {
+    return null;
+  }
+}
+
+Future<List<LocalOfferModel>?> peekLocalOffersFromBunny() async {
+  try {
+    final body = await ConfigRefreshGate.peekRaw(_kLocalOffersKey);
+    return body == null ? null : _parseLocalOffers(body);
+  } catch (_) {
+    return null;
+  }
+}
+
+/// Background check after the phone's copy is shown: the new list only when
+/// it changed on Bunny (unchanged = empty 304, ~1 KB), else null.
+Future<List<LocalOfferCategoryModel>?> revalidateLocalOfferCategoriesFromBunny() async {
+  final body = await revalidateBunnyIfChanged(_kLocalOfferCategoriesKey, _localOfferCategoriesUrl);
+  if (body == null) return null;
+  try {
+    return _parseLocalOfferCategories(body);
+  } catch (_) {
+    return null;
+  }
+}
+
+Future<List<LocalOfferModel>?> revalidateLocalOffersFromBunny() async {
+  final body = await revalidateBunnyIfChanged(_kLocalOffersKey, _localOffersUrl);
+  if (body == null) return null;
+  try {
+    return _parseLocalOffers(body);
   } catch (_) {
     return null;
   }
@@ -508,10 +577,16 @@ Future<List<LocalOfferCategoryModel>?> fetchLocalOfferCategoriesFromBunny() asyn
 /// caller falls back to the original Firestore query; never throws.
 Future<List<LocalOfferModel>?> fetchLocalOffersFromBunny() async {
   try {
-    final body = await cachedBunnyGet('bunny_localOffers',
-        'https://$_kBunnyCdnHost/local-offers.json', kBunnyPromoTtl);
+    final body = await cachedBunnyGet(_kLocalOffersKey, _localOffersUrl, kBunnyPromoTtl);
     if (body == null) return null;
+    return _parseLocalOffers(body);
+  } catch (_) {
+    return null;
+  }
+}
 
+List<LocalOfferModel>? _parseLocalOffers(String body) {
+  {
     final decoded = jsonDecode(body) as Map<String, dynamic>;
     final rawItems = decoded['items'] as List<dynamic>?;
     if (rawItems == null) return null;
@@ -549,8 +624,6 @@ Future<List<LocalOfferModel>?> fetchLocalOffersFromBunny() async {
       offers.add(LocalOfferModel.fromJson(map));
     }
     return offers;
-  } catch (_) {
-    return null;
   }
 }
 

@@ -186,8 +186,9 @@ class SharedVendorsWatcher {
     if (previousSection == sectionId) _statuses = previousStatuses;
 
     final checkList = revalidate || _checkedThisProcess.add(sectionId);
-    _loadBaseVendors(sectionId, lat, lng).then((_) {
-      if (checkList) _revalidate(sectionId, lat, lng);
+    _loadBaseVendors(sectionId, lat, lng).then((shownExpiredCopy) {
+      // 2026-10-11: an expired phone copy shown first is always re-checked.
+      if (checkList || shownExpiredCopy) _revalidate(sectionId, lat, lng);
     });
     _loadStatuses(sectionId, force: revalidate);
   }
@@ -217,6 +218,9 @@ class SharedVendorsWatcher {
     }
     _checking = true;
     try {
+      // Open/closed deliberately does NOT use "show the phone's copy first"
+      // (2026-10-11): the restaurant page and cart read reststatus from this
+      // list, so an old copy could show a just-closed restaurant as open.
       Map<String, bool>? statuses;
       if (force) statuses = await revalidateVendorStatusesFromBunny(sectionId);
       statuses ??= await fetchVendorStatusesFromBunny(sectionId, kStatusRefreshTtl);
@@ -280,10 +284,20 @@ class SharedVendorsWatcher {
     return vendors.where((v) => _distanceKm(lat, lng, v.latitude, v.longitude) <= radiusKm).toList();
   }
 
-  static Future<void> _loadBaseVendors(
+  /// Returns true when the list shown was an EXPIRED phone copy (the caller
+  /// then checks Bunny for a newer one in the background).
+  static Future<bool> _loadBaseVendors(
       String sectionId, double lat, double lng) async {
+    var shownExpiredCopy = false;
     try {
-      final mirrored = await fetchVendorListFromBunny(sectionId);
+      // 2026-10-11: the phone's copy first, whatever its age - an expired one
+      // used to wait on the network (up to the 8-second timeout).
+      var mirrored = await peekVendorListFromBunny(sectionId);
+      if (mirrored != null) {
+        shownExpiredCopy = !await isVendorListCopyFresh(sectionId);
+      } else {
+        mirrored = await fetchVendorListFromBunny(sectionId);
+      }
       List<VendorModel> vendors;
       // 2026-10-05: true when the list came from a fresh server read of the whole
       // section (the Firestore fallback below) - one of the two ways a list may
@@ -381,6 +395,7 @@ class SharedVendorsWatcher {
     } catch (e) {
       debugPrint('[SharedVendorsWatcher] base vendor load error: $e');
     }
+    return shownExpiredCopy;
   }
 
   // Standard Haversine formula - only used for the "still within radius"

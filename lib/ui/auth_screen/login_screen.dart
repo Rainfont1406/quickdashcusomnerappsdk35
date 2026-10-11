@@ -14,7 +14,6 @@ import 'package:emartconsumer/ui/auth_screen/email_login_screen.dart';
 import 'package:emartconsumer/ui/auth_screen/otp_screen.dart';
 import 'package:emartconsumer/ui/auth_screen/signup_screen.dart';
 import 'package:emartconsumer/utils/country_phone_length.dart';
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -223,10 +222,21 @@ class _LoginScreenState extends State<LoginScreen> {
   Widget _buildFooter(BuildContext context) {
     return Padding(
       padding: EdgeInsets.only(
-        bottom: Platform.isAndroid ? 16 : 32,
-        top: 12,
+        // Clear the system navigation bar: the app draws edge to edge
+        // (Android 15), so a fixed gap put the bar's back button over
+        // this text. padding.bottom drops to 0 while the keyboard is up.
+        bottom: MediaQuery.paddingOf(context).bottom + 16,
+        top: 4,
       ),
-      child: Center(
+      // The whole line is the tap target, at least 48px tall: a recognizer
+      // on the 'Create one' span alone only caught taps on the glyphs, so
+      // users near the nav bar often missed it.
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => push(context, const SignupScreen()),
+        child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 48, minWidth: double.infinity),
+        child: Center(
         child: Text.rich(
           TextSpan(
             children: [
@@ -239,8 +249,6 @@ class _LoginScreenState extends State<LoginScreen> {
                 ),
               ),
               TextSpan(
-                recognizer: TapGestureRecognizer()
-                  ..onTap = () => push(context, const SignupScreen()),
                 text: 'Create one'.tr(),
                 style: const TextStyle(
                   color: AppThemeData.primary400,
@@ -253,6 +261,8 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
             ],
           ),
+        ),
+        ),
         ),
       ),
     );

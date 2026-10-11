@@ -3532,7 +3532,13 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                     : AppThemeData.grey500,
                               ),
                             ),
-                          Row(
+                          // Wrap, not Row: with a large system font the
+                          // price + struck price + "% OFF" badge didn't fit
+                          // beside the image and overflowed by ~30px; the
+                          // badge now drops to the next line instead.
+                          Wrap(
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            runSpacing: 4,
                             children: [
                               disPrice == "" || disPrice == "0"
                                   ? Text(
@@ -3544,6 +3550,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                       ),
                                     )
                                   : Row(
+                                      mainAxisSize: MainAxisSize.min,
                                       children: [
                                         Text(
                                           amountShow(amount: disPrice),
@@ -4455,8 +4462,10 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
             // real content now: 137 (image+button) + 16 (text padding) +
             // ~19 (name) + 4 (spacer) + ~19 (price) + ~19 (badge, compact) +
             // a small buffer. Re-enabling _showOrderCountBadge later would
-            // need this raised again.
-            height: 228,
+            // need this raised again. Grows with the system font size
+            // (overflowed by up to 24px at font 1.35, 2026-10-11) - see
+            // _recoCardRowHeight.
+            height: math.max(228, _recoCardRowHeight(context)),
             child: ListView.builder(
               scrollDirection: Axis.horizontal,
               physics: const ClampingScrollPhysics(),
@@ -4702,7 +4711,14 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
               ],
             ),
           ),
-          Padding(
+          // Takes exactly the row's remaining height and clips anything
+          // beyond it: the row height is estimated (_recoCardRowHeight) and
+          // was still 1-2px short at font 1.3 on Android 16 (2026-10-11),
+          // which painted overflow stripes instead of trimming 1px of padding.
+          Expanded(
+            child: SingleChildScrollView(
+            physics: const NeverScrollableScrollPhysics(),
+            child: Padding(
             padding: const EdgeInsets.fromLTRB(9, 7, 9, 9),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -4729,9 +4745,14 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                               : AppThemeData.grey700,
                         ),
                       )
-                    : Wrap(
-                        crossAxisAlignment: WrapCrossAlignment.center,
-                        spacing: 6,
+                    // One line, shrunk to fit if needed (was a Wrap): with
+                    // a large system font the struck price wrapped to a
+                    // second line and overflowed the fixed-height row.
+                    : FittedBox(
+                        fit: BoxFit.scaleDown,
+                        alignment: Alignment.centerLeft,
+                        child: Row(
+                        mainAxisSize: MainAxisSize.min,
                         children: [
                           Text(
                             amountShow(amount: disPrice),
@@ -4741,6 +4762,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                               color: AppThemeData.primary500,
                             ),
                           ),
+                          const SizedBox(width: 6),
                           Text(
                             amountShow(amount: price),
                             style: TextStyle(
@@ -4753,6 +4775,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                             ),
                           ),
                         ],
+                        ),
                       ),
                 RecommendationConfidenceBadge(
                   confidence:
@@ -4777,6 +4800,8 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                   ),
               ],
             ),
+          ),
+          ),
           ),
         ],
       ),
@@ -5588,8 +5613,11 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
         SizedBox(
           // Was 56 for the old single-line card; the new "Save ₹X on ₹Y" +
           // "Use: CODE"/"Applied automatically" card is two lines and
-          // overflowed the old fixed height by ~11px.
-          height: 76,
+          // overflowed the old fixed height by ~11px. The two text lines
+          // grow with the system font size (76 overflowed at font 1.3 and
+          // 1.35), and Android 14 scales fonts non-linearly, so measure the
+          // real line heights instead of estimating them.
+          height: math.max(76, _offerCardHeight(context)),
           child: PageView.builder(
             controller: _offerLadderPageController,
             physics: const BouncingScrollPhysics(),
@@ -5631,6 +5659,56 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
         ],
       ],
     );
+  }
+
+  // Row height for _buildHorizontalProductSection's cards: 137 image area +
+  // 16 vertical padding + 4 gap + name and price lines + the compact
+  // confidence badge (7 padding + its 9.5px label), with text measured
+  // using the device's own scaling, +12 slack (6 was 1-2px short on
+  // Android 16 at font 1.3).
+  double _recoCardRowHeight(BuildContext context) {
+    final scaler = MediaQuery.textScalerOf(context);
+    double lineHeight(TextStyle style) => (TextPainter(
+          text: TextSpan(text: 'Ag₹', style: style),
+          textDirection: Directionality.of(context),
+          textScaler: scaler,
+          maxLines: 1,
+        )..layout())
+            .height;
+    const line14 = TextStyle(fontSize: 14, fontWeight: FontWeight.w700);
+    return 137 +
+        16 +
+        4 +
+        lineHeight(line14) * 2 +
+        7 +
+        lineHeight(const TextStyle(
+            fontSize: 9.5,
+            fontWeight: FontWeight.w600,
+            fontFamily: AppThemeData.medium)) +
+        12;
+  }
+
+  // Height of one _buildOfferLadderRungCard: 12 top margin + 2 border +
+  // 20 vertical padding + 2 gap, plus the two text lines measured with the
+  // device's own text scaling (+2 slack for rounding).
+  double _offerCardHeight(BuildContext context) {
+    final scaler = MediaQuery.textScalerOf(context);
+    double lineHeight(TextStyle style) => (TextPainter(
+          text: TextSpan(text: 'Ag₹', style: style),
+          textDirection: Directionality.of(context),
+          textScaler: scaler,
+          maxLines: 1,
+        )..layout())
+            .height;
+    return 12 +
+        2 +
+        20 +
+        2 +
+        lineHeight(const TextStyle(
+            fontSize: 13, fontFamily: AppThemeData.semiBold)) +
+        lineHeight(const TextStyle(
+            fontSize: 11, fontFamily: AppThemeData.medium)) +
+        2;
   }
 
   Widget _buildOfferLadderRungCard(

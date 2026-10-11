@@ -16,7 +16,6 @@ import 'package:emartconsumer/ui/forgot_password_screen/forgot_password_screen.d
 import 'package:emartconsumer/ui/location_permission_screen.dart';
 import 'package:emartconsumer/ui/service_list_screen.dart';
 import 'package:firebase_auth/firebase_auth.dart' as auth;
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 
@@ -262,10 +261,19 @@ class _EmailLoginScreenState extends State<EmailLoginScreen> {
   Widget _buildFooter(BuildContext context) {
     return Padding(
       padding: EdgeInsets.only(
-        bottom: Platform.isAndroid ? 16 : 32,
-        top: 12,
+        // Clear the system navigation bar: the app draws edge to edge
+        // (Android 15), so a fixed gap put the bar's back button over
+        // this text. padding.bottom drops to 0 while the keyboard is up.
+        bottom: MediaQuery.paddingOf(context).bottom + 16,
+        top: 4,
       ),
-      child: Center(
+      // Whole line is the tap target, min 48px - see login_screen.dart.
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => push(context, const SignupScreen()),
+        child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 48, minWidth: double.infinity),
+        child: Center(
         child: Text.rich(
           TextSpan(
             children: [
@@ -278,8 +286,6 @@ class _EmailLoginScreenState extends State<EmailLoginScreen> {
                 ),
               ),
               TextSpan(
-                recognizer: TapGestureRecognizer()
-                  ..onTap = () => push(context, const SignupScreen()),
                 text: 'Create one'.tr,
                 style: const TextStyle(
                   color: AppThemeData.primary400,
@@ -291,6 +297,8 @@ class _EmailLoginScreenState extends State<EmailLoginScreen> {
               ),
             ],
           ),
+        ),
+        ),
         ),
       ),
     );

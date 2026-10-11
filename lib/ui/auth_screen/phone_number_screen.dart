@@ -352,10 +352,25 @@ class _PhoneNumberScreenState extends State<PhoneNumberScreen> {
   Widget _buildFooter(BuildContext context, bool isSignup) {
     return Padding(
       padding: EdgeInsets.only(
-        bottom: Platform.isAndroid ? 16 : 32,
-        top: 12,
+        // Clear the system navigation bar: the app draws edge to edge
+        // (Android 15), so a fixed gap put the bar's back button over
+        // this text. padding.bottom drops to 0 while the keyboard is up.
+        bottom: MediaQuery.paddingOf(context).bottom + 16,
+        top: 4,
       ),
-      child: Center(
+      // Whole line is the tap target, min 48px - see login_screen.dart.
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () {
+          if (isSignup) {
+            pushAndRemoveUntil(context, const LoginScreen());
+          } else {
+            pushAndRemoveUntil(context, const SignupScreen());
+          }
+        },
+        child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 48, minWidth: double.infinity),
+        child: Center(
         child: Text.rich(
           TextSpan(
             children: [
@@ -370,14 +385,6 @@ class _PhoneNumberScreenState extends State<PhoneNumberScreen> {
                 ),
               ),
               TextSpan(
-                recognizer: TapGestureRecognizer()
-                  ..onTap = () {
-                    if (isSignup) {
-                      pushAndRemoveUntil(context, const LoginScreen());
-                    } else {
-                      pushAndRemoveUntil(context, const SignupScreen());
-                    }
-                  },
                 text: isSignup ? 'Log in'.tr() : 'Sign up'.tr(),
                 style: const TextStyle(
                   color: AppThemeData.primary400,
@@ -389,6 +396,8 @@ class _PhoneNumberScreenState extends State<PhoneNumberScreen> {
               ),
             ],
           ),
+        ),
+        ),
         ),
       ),
     );

@@ -64,6 +64,11 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Light nav-bar icons on the black strip the MaterialApp builder paints
+  // under the system navigation bar (status bar fields left untouched).
+  SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
+    systemNavigationBarIconBrightness: Brightness.light,
+  ));
   await Firebase.initializeApp(options: _activeFirebaseOptions);
 
   // On-device cache ceilings (in-memory image cache + Firestore persistence).
@@ -402,8 +407,27 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
               theme: Styles.themeData(false, context),
               darkTheme: Styles.themeData(true, context),
               themeMode: themeChangeProvider.darkTheme ? ThemeMode.dark : ThemeMode.light,
-              builder: (context, child) => ConnectivityGate(
-                  child: ForceUpdateGate(child: EasyLoading.init()(context, child))),
+              // Since targetSdk 35 (2026-07-31) Android 15+ draws every
+              // screen behind the system navigation bar, so its back/home
+              // buttons covered bottom buttons and links app-wide (e.g.
+              // "Create one" on Login). Keeping all routes, dialogs and
+              // bottom sheets above the bar here restores the pre-Android-15
+              // layout everywhere at once. Black strip = the classic nav bar
+              // (Flutter's default overlay styles use light nav icons).
+              // Text follows the phone's font size setting but is capped at
+              // 1.2x (2026-10-11): larger system fonts overflowed fixed-height
+              // cards on several screens, differently per Android version.
+              builder: (context, child) => MediaQuery.withClampedTextScaling(
+                  maxScaleFactor: 1.2,
+                  child: ColoredBox(
+                  color: Colors.black,
+                  // Left/right too (2026-10-11): Android 16 ignores the
+                  // portrait lock on tablets/foldables, so landscape side
+                  // cut-outs could cover content. Zero on portrait phones.
+                  child: SafeArea(
+                      top: false,
+                      child: ConnectivityGate(
+                          child: ForceUpdateGate(child: EasyLoading.init()(context, child)))))),
               home: const OnBoarding());
         },
       ),
