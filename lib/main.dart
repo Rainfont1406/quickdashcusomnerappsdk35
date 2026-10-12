@@ -417,10 +417,15 @@ class MyAppState extends State<MyApp> with WidgetsBindingObserver {
               // Text follows the phone's font size setting but is capped at
               // 1.2x (2026-10-11): larger system fonts overflowed fixed-height
               // cards on several screens, differently per Android version.
+              // iOS (2026-10-12): the strip under the home indicator uses the
+              // screen background (light/dark) instead of black; iOS has no
+              // nav bar for it to imitate.
               builder: (context, child) => MediaQuery.withClampedTextScaling(
                   maxScaleFactor: 1.2,
                   child: ColoredBox(
-                  color: Colors.black,
+                  color: defaultTargetPlatform == TargetPlatform.iOS
+                      ? Theme.of(context).scaffoldBackgroundColor
+                      : Colors.black,
                   // Left/right too (2026-10-11): Android 16 ignores the
                   // portrait lock on tablets/foldables, so landscape side
                   // cut-outs could cover content. Zero on portrait phones.
