@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:country_code_picker/country_code_picker.dart';
 import 'package:emartconsumer/constants.dart';
+import 'package:emartconsumer/services/user_lookup_api.dart';
 import 'package:firebase_auth/firebase_auth.dart' as auth;
 import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/User.dart';
@@ -98,25 +99,14 @@ class _SignupScreenState extends State<SignupScreen> {
   Future<String?> _checkEmailAlreadyRegistered(String email) async {
     final normalized = email.trim().toLowerCase();
     if (normalized.isEmpty || validateEmail(normalized) != null) return null;
-    final snap =
-        await FirebaseFirestore.instance.collection(USERS).where('email', isEqualTo: normalized).getLogged('_checkEmailAlreadyRegistered:USERS');
-    final conflict =
-        snap.docs.any((doc) => (doc.data()['role'] as String? ?? '') == USER_ROLE_CUSTOMER);
+    final conflict = await UserLookupApi.customerEmailTaken(normalized);
     return conflict ? 'This email is already registered.'.tr : null;
   }
 
   Future<String?> _checkPhoneAlreadyRegistered(String phoneNumber, String countryCode) async {
     final trimmed = phoneNumber.trim();
     if (trimmed.isEmpty || !_isPhoneNumberValid()) return null;
-    final snap = await FirebaseFirestore.instance
-        .collection(USERS)
-        .where('phoneNumber', isEqualTo: trimmed)
-        .getLogged('_checkPhoneAlreadyRegistered:USERS');
-    final conflict = snap.docs.any((doc) {
-      final data = doc.data();
-      return (data['role'] as String? ?? '') == USER_ROLE_CUSTOMER &&
-          (data['countryCode'] as String? ?? '') == countryCode;
-    });
+    final conflict = await UserLookupApi.customerPhoneRegistered(trimmed, countryCode);
     return conflict ? 'This number is already registered.'.tr : null;
   }
 
@@ -253,33 +243,14 @@ class _SignupScreenState extends State<SignupScreen> {
     // Dart doesn't run past this synchronous point until an await), then
     // await each only where it's needed, instead of the phone query
     // strictly following the email query's full round trip.
-    final emailFuture = normalizedEmail.isNotEmpty
-        ? FirebaseFirestore.instance
-            .collection(USERS)
-            .where('email', isEqualTo: normalizedEmail)
-            .getLogged('_findExistingCustomerConflict:USERS')
-        : null;
-    final phoneFuture = FirebaseFirestore.instance
-        .collection(USERS)
-        .where('phoneNumber', isEqualTo: phoneNumber.trim())
-        .getLogged('_findExistingCustomerConflict:USERS');
+    final emailFuture = normalizedEmail.isNotEmpty ? UserLookupApi.customerEmailTaken(normalizedEmail) : null;
+    final phoneFuture = UserLookupApi.customerPhoneRegistered(phoneNumber.trim(), countryCode);
 
-    if (emailFuture != null) {
-      final emailSnap = await emailFuture;
-      final emailConflict = emailSnap.docs.any((doc) =>
-          (doc.data()['role'] as String? ?? '') == USER_ROLE_CUSTOMER);
-      if (emailConflict) {
-        return 'This email is already registered. Please log in to continue.';
-      }
+    if (emailFuture != null && await emailFuture) {
+      return 'This email is already registered. Please log in to continue.';
     }
 
-    final phoneSnap = await phoneFuture;
-    final phoneConflict = phoneSnap.docs.any((doc) {
-      final data = doc.data();
-      return (data['role'] as String? ?? '') == USER_ROLE_CUSTOMER &&
-          (data['countryCode'] as String? ?? '') == countryCode;
-    });
-    if (phoneConflict) {
+    if (await phoneFuture) {
       return 'This number is already registered. Please log in to continue.';
     }
 

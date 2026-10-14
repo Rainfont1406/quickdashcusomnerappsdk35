@@ -1,10 +1,8 @@
 import 'dart:io';
 
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:country_code_picker/country_code_picker.dart';
 import 'package:easy_localization/easy_localization.dart';
-import 'package:emartconsumer/constants.dart';
-import 'package:emartconsumer/services/firestore_instrumentation.dart';
+import 'package:emartconsumer/services/user_lookup_api.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/msg91_service.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
@@ -74,13 +72,8 @@ class _LoginScreenState extends State<LoginScreen> {
     ShowToastDialog.showLoader('Checking your account...'.tr());
     bool isNewUser;
     try {
-      final snap = await FirebaseFirestore.instance
-          .collection(USERS)
-          .where('phoneNumber', isEqualTo: phone)
-          .where('countryCode', isEqualTo: _countryCode)
-          .where('role', isEqualTo: USER_ROLE_CUSTOMER)
-          .getLogged('_sendOtp:USERS');
-      isNewUser = snap.docs.isEmpty;
+      // Server-side yes/no lookup (the users list query is being closed in firestore.rules).
+      isNewUser = !(await UserLookupApi.customerPhoneRegistered(phone, _countryCode));
     } catch (_) {
       ShowToastDialog.closeLoader();
       if (mounted) setState(() => _isSending = false);

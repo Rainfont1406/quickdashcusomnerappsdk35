@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
+import 'package:emartconsumer/services/user_lookup_api.dart';
 import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/User.dart';
 import 'package:emartconsumer/model/referral_model.dart';
@@ -253,7 +254,9 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
         // Explicit <dynamic> because NotificationService.getToken() has no
         // declared return type.
         final userLookupSw = Stopwatch()..start();
-        final existingUserId = widget.existingUserId;
+        // The phone check no longer returns the account id (it is a server-side yes/no now), so use the
+        // signed-in user's own uid: users/{uid} is keyed by the Firebase Auth uid.
+        final existingUserId = widget.existingUserId ?? firebase_auth.FirebaseAuth.instance.currentUser?.uid;
         final userLookupFuture = existingUserId != null
             ? FirebaseFirestore.instance.collection(USERS).doc(existingUserId).getLogged('_verifyOtp:USERS')
             : FirebaseFirestore.instance
@@ -277,6 +280,17 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
         } else {
           final snap = loginResults[0] as QuerySnapshot<Map<String, dynamic>>;
           userData = snap.docs.isNotEmpty ? snap.docs.first.data() : null;
+        }
+        if (userData == null && widget.existingUserId == null && UserLookupApi.allowDirectQueryFallback) {
+          // An older account whose document id is not its auth uid: look it up by phone the old way.
+          // This stops working (on purpose) once firestore.rules closes `list` on users (Phase 2).
+          final legacy = await FirebaseFirestore.instance
+              .collection(USERS)
+              .where('phoneNumber', isEqualTo: phoneNumber)
+              .where('countryCode', isEqualTo: countryCode)
+              .where('role', isEqualTo: USER_ROLE_CUSTOMER)
+              .get();
+          userData = legacy.docs.isNotEmpty ? legacy.docs.first.data() : null;
         }
 
         if (!mounted) return;
@@ -556,10 +570,7 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
   Future<String?> _checkEmailAlreadyRegistered(String email) async {
     final normalized = email.trim().toLowerCase();
     if (normalized.isEmpty) return null;
-    final snap =
-        await FirebaseFirestore.instance.collection(USERS).where('email', isEqualTo: normalized).getLogged('_checkEmailAlreadyRegistered:USERS');
-    final conflict =
-        snap.docs.any((doc) => (doc.data()['role'] as String? ?? '') == USER_ROLE_CUSTOMER);
+    final conflict = await UserLookupApi.customerEmailTaken(normalized);
     return conflict ? 'This email is already registered.'.tr() : null;
   }
 
