@@ -8,9 +8,10 @@ import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_osm_plugin/flutter_osm_plugin.dart';
 import 'package:fluttertoast/fluttertoast.dart';
+import 'package:geocoding/geocoding.dart' as geo;
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
-import 'package:location/location.dart';
+import 'package:location/location.dart' show Location;
 import 'package:osm_nominatim/osm_nominatim.dart';
 import 'package:provider/provider.dart';
 import 'package:emartconsumer/utils/DarkThemeProvider.dart';
@@ -62,6 +63,13 @@ class _LocationPickerState extends State<LocationPicker> {
   // True while GPS is programmatically animating the map so the center
   // tracker doesn't misread GPS movement as a user pan.
   bool _gpsMoving = false;
+  // True once the user has panned the map themselves, so a late GPS refinement
+  // never yanks the pin away from where they put it.
+  bool _userPanned = false;
+  // Last point whose address was resolved. The map-center tracker skips a
+  // second lookup for a centre within a few metres of it (GPS animation drift),
+  // which used to hold Confirm disabled for another full round trip.
+  GeoPoint? _resolvedPoint;
 
   // ── Inline search state ─────────────────────────────────────────────────
   List<_PlaceSuggestion> _searchResults = [];
@@ -124,9 +132,21 @@ class _LocationPickerState extends State<LocationPicker> {
           // poll (which is always the default SF position) AND GPS is not
           // the one animating the map programmatically.
           if (!_gpsMoving && !wasFirstPoll && mounted) {
+            _userPanned = true;
             setState(() => _userPickedLocation = true);
           }
           _debounceTimer?.cancel();
+          final resolved = _resolvedPoint;
+          if (resolved != null &&
+              place != null &&
+              Geolocator.distanceBetween(resolved.latitude, resolved.longitude,
+                      centerPoint.latitude, centerPoint.longitude) <
+                  25) {
+            if (mounted && isLoadingAddress) {
+              setState(() => isLoadingAddress = false);
+            }
+            return;
+          }
           if (mounted) setState(() => isLoadingAddress = true);
           _debounceTimer = Timer(const Duration(milliseconds: 1200), () async {
             if (!mounted) return;
@@ -174,6 +194,12 @@ class _LocationPickerState extends State<LocationPicker> {
     if (mounted) setState(() => isLoadingAddress = true);
 
     try {
+      // Nominatim names the locality more accurately than the phone's
+      // geocoder (on a device test it matched the nearby store's area while
+      // the geocoder gave a different locality and pincode), so it stays the
+      // primary - but with a short limit instead of 15s + 15s. The phone's
+      // geocoder runs in parallel and is the fast fallback.
+      final deviceAddressFuture = _deviceAddress(position);
       String fetchedAddress = '';
       try {
         final url = Uri.parse(
@@ -182,7 +208,7 @@ class _LocationPickerState extends State<LocationPicker> {
         final response = await http.get(url, headers: {
           'User-Agent': 'QuickDash/1.0',
           'Accept': 'application/json',
-        }).timeout(const Duration(seconds: 15));
+        }).timeout(const Duration(seconds: 4));
 
         if (response.statusCode == 200) {
           final data = json.decode(response.body);
@@ -198,17 +224,11 @@ class _LocationPickerState extends State<LocationPicker> {
             if (parts.isNotEmpty) fetchedAddress = parts.join(', ');
           }
         }
-      } catch (httpError) {
-        try {
-          final fetchedPlace = await Nominatim.reverseSearch(
-            lat: position.latitude,
-            lon: position.longitude,
-            addressDetails: true,
-          ).timeout(const Duration(seconds: 15));
-          if (fetchedPlace.displayName.isNotEmpty) {
-            fetchedAddress = fetchedPlace.displayName;
-          }
-        } catch (_) {}
+      } catch (_) {
+        // Slow or unreachable: fall through to the phone's geocoder below.
+      }
+      if (fetchedAddress.isEmpty) {
+        fetchedAddress = await deviceAddressFuture ?? '';
       }
 
       if (currentRequestId != _addressRequestCounter || !mounted) return;
@@ -229,6 +249,7 @@ class _LocationPickerState extends State<LocationPicker> {
           boundingBox: ['0', '0', '0', '0'],
         );
         isLoadingAddress = false;
+        _resolvedPoint = position;
       });
     } catch (e) {
       if (currentRequestId == _addressRequestCounter && mounted) {
@@ -257,24 +278,86 @@ class _LocationPickerState extends State<LocationPicker> {
     }
   }
 
+  // ── Address from the phone's geocoder ───────────────────────────────────
+
+  Future<String?> _deviceAddress(GeoPoint p) async {
+    try {
+      final marks = await geo
+          .placemarkFromCoordinates(p.latitude, p.longitude)
+          .timeout(const Duration(seconds: 6));
+      if (marks.isEmpty) return null;
+      final m = marks.first;
+      final parts = <String>[];
+      for (final s in [
+        m.name,
+        m.street,
+        m.subLocality,
+        m.locality,
+        m.administrativeArea,
+        m.postalCode,
+        m.country,
+      ]) {
+        final v = (s ?? '').trim();
+        if (v.isNotEmpty && !parts.contains(v)) parts.add(v);
+      }
+      return parts.isEmpty ? null : parts.join(', ');
+    } catch (_) {
+      return null;
+    }
+  }
+
   // ── GPS current location ─────────────────────────────────────────────────
 
+  // Pin the map on a position and resolve its address. The address lookup
+  // runs while the map animates instead of after it.
+  Future<void> _showPosition(Position pos) async {
+    selectedLocation =
+        GeoPoint(latitude: pos.latitude, longitude: pos.longitude);
+    final address = _fetchAddressForLocation(selectedLocation!);
+    _gpsMoving = true;
+    await mapController.moveTo(selectedLocation!, animate: true);
+    _gpsMoving = false;
+    await address;
+    if (mounted) setState(() => _userPickedLocation = true);
+  }
+
+  // Two stages so the map never waits on a GPS lock: the last known position
+  // is shown immediately (if the phone has one), then a bounded fresh fix
+  // refines it. Both used to be unbounded getCurrentPosition() calls.
   Future<void> _setUserLocation() async {
     if (_isLocating) return;
     if (mounted) setState(() => _isLocating = true);
     try {
-      final locationData = await _getCurrentLocation();
-      if (locationData != null && mounted) {
-        selectedLocation = GeoPoint(
-            latitude: locationData.latitude, longitude: locationData.longitude);
-        _gpsMoving = true;
-        await mapController.moveTo(selectedLocation!, animate: true);
-        _gpsMoving = false;
-        await _fetchAddressForLocation(selectedLocation!);
-        if (mounted) setState(() => _userPickedLocation = true);
-      } else if (mounted) {
-        _showToast("Could not get your location. Please try again.".tr(),
-            isError: true);
+      if (!await _locationReady()) {
+        if (mounted) {
+          _showToast("Could not get your location. Please try again.".tr(),
+              isError: true);
+        }
+        return;
+      }
+      Position? last;
+      try {
+        last = await Geolocator.getLastKnownPosition();
+      } catch (_) {}
+      if (last != null && mounted) await _showPosition(last);
+
+      try {
+        final fresh = await Geolocator.getCurrentPosition(
+          desiredAccuracy: LocationAccuracy.medium,
+          timeLimit: const Duration(seconds: 8),
+        );
+        final moved = last == null ||
+            Geolocator.distanceBetween(last.latitude, last.longitude,
+                    fresh.latitude, fresh.longitude) >
+                50;
+        if (moved && mounted && !_userPanned) await _showPosition(fresh);
+      } on TimeoutException {
+        if (last == null && mounted) {
+          _showToast(
+              "Could not get your location. Pan the map to pick manually."
+                  .tr(),
+              isError: true);
+        }
       }
     } catch (e) {
       if (mounted) _showToast("Error getting location".tr(), isError: true);
@@ -283,21 +366,21 @@ class _LocationPickerState extends State<LocationPicker> {
     }
   }
 
-  static Future<Position?> _getCurrentLocation() async {
+  static Future<bool> _locationReady() async {
     bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
     if (!serviceEnabled) {
       await Location().requestService();
-      return null;
+      return false;
     }
     LocationPermission permission = await Geolocator.checkPermission();
     if (permission == LocationPermission.denied) {
       permission = await Geolocator.requestPermission();
-      if (permission == LocationPermission.denied) return null;
+      if (permission == LocationPermission.denied) return false;
     }
     if (permission == LocationPermission.deniedForever) {
       return Future.error('Location permissions permanently denied');
     }
-    return await Geolocator.getCurrentPosition();
+    return true;
   }
 
   // ── Inline search (Zomato / Swiggy style) ──────────────────────────────

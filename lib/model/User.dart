@@ -72,6 +72,22 @@ class User with ChangeNotifier {
   // Stored as ISO date string "yyyy-MM-dd"; null when not set.
   String? dob;
 
+  // True when no usable delivery/home location has been saved yet (no address,
+  // or the default address has a null location). Login/startup routing sends
+  // such a user to LocationPermissionScreen before anything else.
+  bool get needsLocation {
+    final addresses = shippingAddress;
+    if (addresses == null || addresses.isEmpty) return true;
+    final defaults = addresses.where((e) => e.isDefault == true);
+    final address = defaults.isNotEmpty ? defaults.first : addresses.first;
+    return address.location == null;
+  }
+
+  // active == false AND no location yet means the signup never got past the
+  // location step (the only thing that flips active to true), not that an
+  // admin restricted the account. Login must resume it, not block it.
+  bool get isUnfinishedSignup => !active && (shippingAddress == null || shippingAddress!.isEmpty);
+
   User(
       {this.email = '',
       this.userID = '',

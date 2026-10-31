@@ -15,6 +15,7 @@ import 'package:emartconsumer/services/notification_service.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/auth_screen/auth_widgets.dart';
+import 'package:emartconsumer/ui/auth_screen/email_code_dialog.dart';
 import 'package:emartconsumer/ui/auth_screen/phone_number_screen.dart';
 import 'package:emartconsumer/ui/location_permission_screen.dart';
 import 'package:emartconsumer/ui/service_list_screen.dart';
@@ -286,6 +287,88 @@ class _SignupScreenState extends State<SignupScreen> {
     return null;
   }
 
+  // Email already has a Firebase login. If it is a vendor/driver account and the
+  // typed password is its password (proof of ownership), switch to the separate
+  // customer uid the server issues. Returns that user, or null after showing why
+  // it cannot continue (the session is signed out in every null case).
+  Future<auth.User?> _linkCustomerToExistingEmail() async {
+    const wrongPassword =
+        'This email already has a QuickDash Vendor/Driver account. Enter that account\'s password to add a customer account, or use Forgot Password.';
+    try {
+      final cred = await auth.FirebaseAuth.instance.signInWithEmailAndPassword(
+        email: emailEditingController.text.trim(),
+        password: passwordEditingController.text.trim(),
+      );
+      final existing = await FireStoreUtils.getUserProfile(cred.user!.uid);
+      if (existing == null || existing.role == USER_ROLE_CUSTOMER) {
+        await auth.FirebaseAuth.instance.signOut();
+        ShowToastDialog.showToast('This email is already registered. Please log in to continue.');
+        return null;
+      }
+      final linked = await FireStoreUtils.linkCustomerRole();
+      if (linked == null) {
+        await auth.FirebaseAuth.instance.signOut();
+        ShowToastDialog.showToast('Could not add a customer account right now. Please try again.');
+        return null;
+      }
+      if (await FireStoreUtils.getUserProfile(linked.uid) != null) {
+        await auth.FirebaseAuth.instance.signOut();
+        ShowToastDialog.showToast('You already have a customer account. Please log in to continue.');
+        return null;
+      }
+      return linked;
+    } on auth.FirebaseAuthException catch (e) {
+      if (e.code == 'wrong-password' || e.code == 'invalid-credential') {
+        // A different password than the existing account's: give the customer
+        // its own password after proving the email with an emailed code.
+        return _signUpWithEmailCode(wrongPassword);
+      } else {
+        ShowToastDialog.showToast(e.message ?? 'Signup failed. Please try again.');
+      }
+      return null;
+    }
+  }
+
+  // 2026-10-30: the email already has a vendor/driver login and the customer
+  // chose a DIFFERENT password. The server emails a code; once it is entered
+  // the customer password is stored separately and we sign in as the customer.
+  Future<auth.User?> _signUpWithEmailCode(String fallbackMessage) async {
+    final email = emailEditingController.text.trim();
+    final password = passwordEditingController.text.trim();
+    ShowToastDialog.closeLoader();
+    final init = await FireStoreUtils.requestRoleCode(email, 'signup');
+    if (init is RoleAuthError) {
+      ShowToastDialog.showToast(init.message);
+      return null;
+    }
+    final sentTo = (init as Map)['sent_to'] ?? email;
+    String? err;
+    while (true) {
+      if (!mounted) return null;
+      final entered = await showEmailCodeDialog(
+        context: context,
+        title: 'Verify your email'.tr,
+        message: '${'We emailed a verification code to'.tr} $sentTo.',
+        errorText: err,
+        onResend: () async {
+          final again = await FireStoreUtils.requestRoleCode(email, 'signup');
+          return again is RoleAuthError ? again.message : null;
+        },
+      );
+      if (entered == null) return null;
+      ShowToastDialog.showLoader('Please wait'.tr);
+      final result = await FireStoreUtils.roleSignup(email, password, entered.code);
+      ShowToastDialog.closeLoader();
+      if (result is auth.User) return result;
+      final failure = result as RoleAuthError;
+      if (!failure.wrongCode) {
+        ShowToastDialog.showToast(failure.message);
+        return null;
+      }
+      err = failure.message;
+    }
+  }
+
   signUpWithEmailAndPassword(BuildContext context) async {
     if (_isBusy) return;
     if (referralCodeEditingController.text.trim().isNotEmpty) {
@@ -438,7 +521,8 @@ class _SignupScreenState extends State<SignupScreen> {
         final updateUserSw = Stopwatch()..start();
         await FireStoreUtils.updateCurrentUser(userModel);
         accountWritten = true;
-        debugPrint('[LOGIN-PERF] SIGNUP(phone) updateCurrentUser — ${updateUserSw.elapsedMilliseconds}ms');
+        await FireStoreUtils.activateNewSignup(userModel);
+        debugPrint('[LOGIN-PERF] SIGNUP(phone) updateCurrentUser —${updateUserSw.elapsedMilliseconds}ms');
         // Persist phone user ID so the session survives app restarts
         final signupPrefs = await SharedPreferences.getInstance();
         await signupPrefs.setString(PHONE_AUTH_USER_ID, userModel.userID);
@@ -485,13 +569,25 @@ class _SignupScreenState extends State<SignupScreen> {
       }
 
       final createUserSw = Stopwatch()..start();
-      final credential =
-          await auth.FirebaseAuth.instance.createUserWithEmailAndPassword(
-        email: emailEditingController.text.trim(),
-        password: passwordEditingController.text.trim(),
-      );
+      auth.User? firebaseUser;
+      var linkedFromOtherRole = false;
+      try {
+        final credential =
+            await auth.FirebaseAuth.instance.createUserWithEmailAndPassword(
+          email: emailEditingController.text.trim(),
+          password: passwordEditingController.text.trim(),
+        );
+        firebaseUser = credential.user;
+      } on auth.FirebaseAuthException catch (e) {
+        if (e.code != 'email-already-in-use') rethrow;
+        // The email already has a login (a vendor/driver account). Let the
+        // owner add a customer account to it instead of dead-ending.
+        firebaseUser = await _linkCustomerToExistingEmail();
+        if (firebaseUser == null) return;
+        linkedFromOtherRole = true;
+      }
       debugPrint('[LOGIN-PERF] SIGNUP(email) createUserWithEmailAndPassword — ${createUserSw.elapsedMilliseconds}ms');
-      if (credential.user == null) {
+      if (firebaseUser == null) {
         await _abortOrphanedSignup(context, "Signup failed. Please try again.");
         return;
       }
@@ -512,11 +608,13 @@ class _SignupScreenState extends State<SignupScreen> {
       // Also independent of everything else here — start both the moment
       // the account exists instead of waiting until right before each is
       // needed.
-      final emailVerificationFuture = credential.user!.sendEmailVerification();
+      // A linked customer uid has no email on the Auth user to verify.
+      final emailVerificationFuture =
+          linkedFromOtherRole ? Future<void>.value() : firebaseUser.sendEmailVerification();
       final referralFuture = FireStoreUtils.getReferralUserByCode(
           referralCodeEditingController.text);
 
-      userModel.userID = credential.user!.uid;
+      userModel.userID = firebaseUser.uid;
       userModel.firstName = nameParts['firstName']!;
       userModel.lastName = nameParts['lastName']!;
       userModel.email = emailEditingController.text.trim().toLowerCase();
@@ -542,7 +640,8 @@ class _SignupScreenState extends State<SignupScreen> {
       final updateUserSw = Stopwatch()..start();
       await FireStoreUtils.updateCurrentUser(userModel);
       accountWritten = true;
-      debugPrint('[LOGIN-PERF] SIGNUP(email) updateCurrentUser — ${updateUserSw.elapsedMilliseconds}ms');
+      await FireStoreUtils.activateNewSignup(userModel);
+      debugPrint('[LOGIN-PERF] SIGNUP(email) updateCurrentUser —${updateUserSw.elapsedMilliseconds}ms');
 
       final emailVerifySw = Stopwatch()..start();
       try {

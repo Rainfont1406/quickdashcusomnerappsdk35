@@ -161,9 +161,10 @@ class _LocationPermissionScreenState extends State<LocationPermissionScreen> {
       await showProgress("Please wait...".tr(), false);
       AddressModel addressModel = AddressModel();
       try {
+        // Permission only. The map screen fetches its own position; waiting
+        // for a high-accuracy fix here (no time limit, result unused) held
+        // "Please wait..." for as long as the GPS took to lock.
         await Geolocator.requestPermission();
-        await Geolocator.getCurrentPosition(
-            desiredAccuracy: LocationAccuracy.high);
         await hideProgress();
         if (selectedMapType == 'osm') {
           Navigator.of(context)

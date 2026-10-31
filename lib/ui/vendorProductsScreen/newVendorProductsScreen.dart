@@ -30,6 +30,7 @@ import 'package:emartconsumer/utils/network_image_widget.dart';
 import 'package:emartconsumer/widget/coming_soon_view.dart';
 import 'package:emartconsumer/widget/shimmer_box.dart';
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -577,9 +578,182 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
     productList = List.from(allProductList);
   }
 
+  // Full store info: every cuisine, the whole description and the complete
+  // address. The header shows these truncated (one cuisine line, two address
+  // lines), which hides most of it when a vendor has picked several cuisines.
+  // All of it comes from the vendors/{id} doc: cuisineNames, description,
+  // locality, landmark and location (the full address string).
+  void _showStoreInfoSheet() {
+    final v = widget.vendorModel;
+    final dark = isDarkMode(context);
+    final titleColor = dark ? AppThemeData.grey50 : AppThemeData.grey900;
+    final bodyColor = dark ? AppThemeData.grey400 : AppThemeData.grey700;
+    // `location` is already the full address and usually repeats locality and
+    // landmark, so only add those when the address string doesn't contain them.
+    final fullAddress = v.location.trim();
+    final addressParts = <String>[
+      if (fullAddress.isNotEmpty) fullAddress,
+      for (final extra in [v.locality.trim(), v.landmark.trim()])
+        if (extra.isNotEmpty && !fullAddress.toLowerCase().contains(extra.toLowerCase())) extra,
+    ];
+    final description = v.description?.trim() ?? '';
+    final hasCoordinates = v.latitude.abs() > 0.5 &&
+        v.longitude.abs() > 0.5 &&
+        v.latitude.abs() <= 90 &&
+        v.longitude.abs() <= 180;
+
+    Widget heading(String text) => Padding(
+          padding: const EdgeInsets.only(top: 18, bottom: 6),
+          child: Text(
+            text,
+            style: TextStyle(
+              fontSize: 15,
+              fontFamily: AppThemeData.semiBold,
+              color: titleColor,
+            ),
+          ),
+        );
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: dark ? AppThemeData.grey900 : Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (sheetContext) => SafeArea(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.of(sheetContext).size.height * 0.8,
+          ),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  v.title,
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                    fontFamily: AppThemeData.bold,
+                    color: titleColor,
+                  ),
+                ),
+                if (v.cuisineNames.isNotEmpty) ...[
+                  heading('Cuisines'.tr()),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: v.cuisineNames
+                        .map((c) => Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 10, vertical: 5),
+                              decoration: BoxDecoration(
+                                color: AppThemeData.primary500.withOpacity(0.10),
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                              child: Text(
+                                c,
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  fontFamily: AppThemeData.medium,
+                                  color: AppThemeData.primary500,
+                                ),
+                              ),
+                            ))
+                        .toList(),
+                  ),
+                ],
+                if (description.isNotEmpty) ...[
+                  heading('About'.tr()),
+                  Text(
+                    description,
+                    style: TextStyle(
+                      fontSize: 14,
+                      height: 1.5,
+                      fontFamily: AppThemeData.regular,
+                      color: bodyColor,
+                    ),
+                  ),
+                ],
+                if (addressParts.isNotEmpty) ...[
+                  heading('Location'.tr()),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Padding(
+                        padding: EdgeInsets.only(top: 2),
+                        child: Icon(Icons.location_on,
+                            size: 16, color: AppThemeData.primary500),
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          addressParts.join(', '),
+                          style: TextStyle(
+                            fontSize: 14,
+                            height: 1.4,
+                            fontFamily: AppThemeData.regular,
+                            color: bodyColor,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Wrap(
+                    spacing: 10,
+                    runSpacing: 8,
+                    children: [
+                      OutlinedButton.icon(
+                        onPressed: () {
+                          Navigator.pop(sheetContext);
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => VendorLocationScreen(vendorModel: v),
+                            ),
+                          );
+                        },
+                        icon: const Icon(Icons.map_rounded, size: 18),
+                        label: Text('View on map'.tr()),
+                      ),
+                      // Opens Google Maps (app, or browser fallback) outside this
+                      // app: directions without any OpenStreetMap tile traffic.
+                      // Hidden when the vendor has no real coordinates (the model
+                      // defaults to 0.1/0.1).
+                      if (hasCoordinates)
+                        OutlinedButton.icon(
+                          onPressed: () async {
+                            final uri = Uri.parse(
+                                'https://www.google.com/maps/search/?api=1&query=${v.latitude},${v.longitude}');
+                            try {
+                              final opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
+                              if (!opened) ShowToastDialog.showToast('Could not open Google Maps'.tr());
+                            } catch (_) {
+                              ShowToastDialog.showToast('Could not open Google Maps'.tr());
+                            }
+                          },
+                          icon: const Icon(Icons.directions_rounded, size: 18),
+                          label: Text('Open in Google Maps'.tr()),
+                        ),
+                    ],
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Future<void> getFoodType() async {
     SharedPreferences sp = await SharedPreferences.getInstance();
-    foodType = sp.getString("foodType") ?? "Delivery".tr();
+    // Same default as Home (2026-10-12): Dineaway.
+    foodType = sp.getString("foodType") ?? "Dineaway".tr();
 
     print("------->${foodType}");
     if (_isDineAwayMode) {
@@ -1306,20 +1480,53 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                                 if (widget.vendorModel
                                                     .cuisineNames.isNotEmpty) ...[
                                                   const SizedBox(height: 6),
-                                                  Text(
-                                                    widget.vendorModel
-                                                        .cuisineNames
-                                                        .join(' · '),
-                                                    maxLines: 1,
-                                                    overflow:
-                                                        TextOverflow.ellipsis,
-                                                    style: TextStyle(
-                                                      fontSize: 12,
-                                                      fontFamily:
-                                                          AppThemeData.medium,
-                                                      color: isDarkMode(context)
-                                                          ? AppThemeData.grey400
-                                                          : AppThemeData.grey500,
+                                                  // Tap opens the full store info sheet (all
+                                                  // cuisines, description, address).
+                                                  InkWell(
+                                                    onTap: _showStoreInfoSheet,
+                                                    child: Row(
+                                                      children: [
+                                                        Flexible(
+                                                          child: Text(
+                                                            widget.vendorModel
+                                                                .cuisineNames
+                                                                .join(' · '),
+                                                            maxLines: 1,
+                                                            overflow: TextOverflow
+                                                                .ellipsis,
+                                                            style: TextStyle(
+                                                              fontSize: 12,
+                                                              fontFamily:
+                                                                  AppThemeData
+                                                                      .medium,
+                                                              color: isDarkMode(
+                                                                      context)
+                                                                  ? AppThemeData
+                                                                      .grey400
+                                                                  : AppThemeData
+                                                                      .grey500,
+                                                            ),
+                                                          ),
+                                                        ),
+                                                        const SizedBox(width: 4),
+                                                        Text(
+                                                          'More info'.tr(),
+                                                          style: const TextStyle(
+                                                            fontSize: 12,
+                                                            fontFamily:
+                                                                AppThemeData
+                                                                    .semiBold,
+                                                            color: AppThemeData
+                                                                .primary500,
+                                                          ),
+                                                        ),
+                                                        const Icon(
+                                                            Icons
+                                                                .chevron_right_rounded,
+                                                            size: 16,
+                                                            color: AppThemeData
+                                                                .primary500),
+                                                      ],
                                                     ),
                                                   ),
                                                 ],
@@ -4950,17 +5157,41 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                   if (widget.vendorModel.cuisineNames
                                       .isNotEmpty) ...[
                                     const SizedBox(height: 6),
-                                    Text(
-                                      widget.vendorModel.cuisineNames
-                                          .join(' · '),
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(
-                                        fontSize: 12,
-                                        fontFamily: AppThemeData.medium,
-                                        color: isDarkMode(context)
-                                            ? AppThemeData.grey400
-                                            : AppThemeData.grey600,
+                                    // Tap opens the full store info sheet: with several
+                                    // cuisines the single line below is cut off, so the
+                                    // sheet lists them all plus description and address.
+                                    InkWell(
+                                      onTap: _showStoreInfoSheet,
+                                      child: Row(
+                                        children: [
+                                          Flexible(
+                                            child: Text(
+                                              widget.vendorModel.cuisineNames
+                                                  .join(' · '),
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: TextStyle(
+                                                fontSize: 12,
+                                                fontFamily: AppThemeData.medium,
+                                                color: isDarkMode(context)
+                                                    ? AppThemeData.grey400
+                                                    : AppThemeData.grey600,
+                                              ),
+                                            ),
+                                          ),
+                                          const SizedBox(width: 4),
+                                          Text(
+                                            'More info'.tr(),
+                                            style: const TextStyle(
+                                              fontSize: 12,
+                                              fontFamily: AppThemeData.semiBold,
+                                              color: AppThemeData.primary500,
+                                            ),
+                                          ),
+                                          const Icon(Icons.chevron_right_rounded,
+                                              size: 16,
+                                              color: AppThemeData.primary500),
+                                        ],
                                       ),
                                     ),
                                   ],

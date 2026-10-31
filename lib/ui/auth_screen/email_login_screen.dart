@@ -63,10 +63,20 @@ class _EmailLoginScreenState extends State<EmailLoginScreen> {
     final totalSw = Stopwatch()..start();
     try {
       final signInSw = Stopwatch()..start();
-      final credential = await auth.FirebaseAuth.instance
-          .signInWithEmailAndPassword(email: email, password: password);
+      // 2026-10-30: a customer with its OWN password (different from the same
+      // email's vendor password) is decided by that password alone.
+      final roleResult = await FireStoreUtils.roleLogin(email, password);
+      if (roleResult is RoleAuthError) {
+        ShowToastDialog.showToast(roleResult.message);
+        return;
+      }
+      final auth.User? fbUser = roleResult is auth.User
+          ? roleResult
+          : (await auth.FirebaseAuth.instance
+                  .signInWithEmailAndPassword(email: email, password: password))
+              .user;
       debugPrint('[LOGIN-PERF] signInWithEmailAndPassword — ${signInSw.elapsedMilliseconds}ms');
-      if (credential.user == null) {
+      if (fbUser == null) {
         ShowToastDialog.showToast('Login failed. Please try again.');
         return;
       }
@@ -82,7 +92,7 @@ class _EmailLoginScreenState extends State<EmailLoginScreen> {
       // visible instead of only the combined parallel total.
       final profileSw = Stopwatch()..start();
       final profileFuture =
-          FireStoreUtils.getUserProfile(credential.user!.uid).then((r) {
+          FireStoreUtils.getUserProfile(fbUser.uid).then((r) {
         debugPrint('[LOGIN-PERF] getUserProfile — ${profileSw.elapsedMilliseconds}ms');
         return r;
       });
@@ -102,11 +112,22 @@ class _EmailLoginScreenState extends State<EmailLoginScreen> {
       }
 
       if (userModel.role != USER_ROLE_CUSTOMER) {
-        ShowToastDialog.showToast(
-            'This account is not registered as a customer. Please use the correct QuickDash app.');
-        await auth.FirebaseAuth.instance.signOut();
-        return;
+        // A vendor/driver login may also own a customer account (separate uid,
+        // issued by the server) - switch to it if it exists.
+        final linked = await FireStoreUtils.linkCustomerRole();
+        final linkedProfile = linked == null ? null : await FireStoreUtils.getUserProfile(linked.uid);
+        if (linkedProfile == null || linkedProfile.role != USER_ROLE_CUSTOMER) {
+          ShowToastDialog.showToast(linked == null
+              ? 'This account is not registered as a customer. Please use the correct QuickDash app.'
+              : 'No customer account for this email yet. Tap "Create one" to add it.');
+          await auth.FirebaseAuth.instance.signOut();
+          return;
+        }
+        userModel = linkedProfile;
       }
+
+      // Never-finished signup (inactive, no location yet): resume, don't block.
+      if (userModel.isUnfinishedSignup) userModel.active = true;
 
       if (userModel.active != true) {
         ShowToastDialog.showToast(
@@ -134,7 +155,7 @@ class _EmailLoginScreenState extends State<EmailLoginScreen> {
       didShowSuccess = true;
       ShowToastDialog.showSuccess('Login successful!');
       debugPrint('[LOGIN-PERF] TOTAL (tap to navigate) — ${totalSw.elapsedMilliseconds}ms');
-      if (userModel.shippingAddress != null && userModel.shippingAddress!.isNotEmpty) {
+      if (!userModel.needsLocation) {
         if (userModel.shippingAddress!.where((e) => e.isDefault == true).isNotEmpty) {
           MyAppState.selectedPosotion =
               userModel.shippingAddress!.where((e) => e.isDefault == true).single;

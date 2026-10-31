@@ -273,7 +273,8 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
     setState(() {
       selectedOrderType =
           sp.getString("foodType") == "" || sp.getString("foodType") == null
-              ? "Delivery".tr()
+              // Same default as Home (2026-10-12).
+              ? "Dineaway".tr()
               : sp.getString("foodType");
     });
   }

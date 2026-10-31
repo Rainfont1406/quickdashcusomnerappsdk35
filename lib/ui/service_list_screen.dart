@@ -8,6 +8,7 @@ import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
 import 'package:emartconsumer/ui/auth_screen/login_screen.dart';
 import 'package:emartconsumer/ui/container/ContainerScreen.dart';
+import 'package:emartconsumer/ui/location_permission_screen.dart';
 import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/model/SectionModel.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
@@ -119,7 +120,12 @@ class _ServiceListScreenState extends State<ServiceListScreen> {
           debugPrint('[LOGIN-PERF][SVC] getCurrentUser — ${getCurrentUserSw.elapsedMilliseconds}ms');
         }
 
-        if (user != null && user.role == USER_ROLE_CUSTOMER) {
+        if (user != null && user.role == USER_ROLE_CUSTOMER && user.needsLocation) {
+          // Last-line guard: whatever route led here, a customer with no saved
+          // location must set one before reaching Home.
+          ShowToastDialog.closeLoader();
+          pushAndRemoveUntil(context, LocationPermissionScreen());
+        } else if (user != null && user.role == USER_ROLE_CUSTOMER) {
           user.active = true;
           user.role = USER_ROLE_CUSTOMER;
           sectionConstantModel = firstSection;

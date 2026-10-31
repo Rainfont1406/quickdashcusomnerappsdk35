@@ -26,6 +26,7 @@ import 'package:emartconsumer/services/shared_orders_watcher.dart';
 import 'package:emartconsumer/services/booking_history_watcher.dart';
 import 'package:emartconsumer/services/shared_vendors_watcher.dart';
 import 'package:emartconsumer/services/wallet_history_cache.dart';
+import 'package:emartconsumer/services/show_toast_dialog.dart';
 import 'package:emartconsumer/ui/container/ContainerScreen.dart';
 import 'package:emartconsumer/ui/home/HomeScreen.dart';
 import 'package:emartconsumer/ui/service_list_screen.dart';
@@ -798,7 +799,7 @@ class OnBoardingState extends State<OnBoarding> {
   // duplicated almost verbatim between the auth and msg91 branches.
   Future<void> _navigateWithUser(User user) async {
     MyAppState.currentUser = user;
-    if (user.shippingAddress != null && user.shippingAddress!.isNotEmpty) {
+    if (!user.needsLocation) {
       if (user.shippingAddress!.where((element) => element.isDefault == true).isNotEmpty) {
         MyAppState.selectedPosotion =
             user.shippingAddress!.where((element) => element.isDefault == true).single;
@@ -1003,8 +1004,11 @@ class OnBoardingState extends State<OnBoarding> {
           User? user = authBranchResults[0] as User?;
           final authBranchFcmToken = authBranchResults[1] as String?;
           if (user != null && user.role == USER_ROLE_CUSTOMER) {
+            // Never-finished signup (inactive, no location yet): resume, don't sign out.
+            final resumedSignup = user.isUnfinishedSignup;
+            if (resumedSignup) user.active = true;
             if (user.active) {
-              final needsWrite = _startupUserWriteNeeded(user, authBranchFcmToken);
+              final needsWrite = resumedSignup || _startupUserWriteNeeded(user, authBranchFcmToken);
               user.active = true;
               user.role = USER_ROLE_CUSTOMER;
               user.fcmToken = authBranchFcmToken ?? user.fcmToken;
@@ -1033,6 +1037,8 @@ class OnBoardingState extends State<OnBoarding> {
               await auth.FirebaseAuth.instance.signOut();
               unawaited(_clearCachedUserProfile(user.userID));
               MyAppState.currentUser = null;
+              ShowToastDialog.showToast(
+                  'Your account is temporarily restricted. Please contact support.');
               _safeNavigate(
                   () => pushReplacement(context, const LoginScreen()));
             }

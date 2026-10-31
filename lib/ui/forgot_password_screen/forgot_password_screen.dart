@@ -143,7 +143,7 @@ class ForgotPasswordScreen extends StatelessWidget {
                     height: 54,
                     child: ElevatedButton(
                       onPressed: () async {
-                        final success = await controller.forgotPassword();
+                        final success = await controller.forgotPassword(context);
                         if (success && context.mounted) Navigator.pop(context);
                       },
                       style: ElevatedButton.styleFrom(

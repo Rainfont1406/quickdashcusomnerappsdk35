@@ -135,6 +135,7 @@ class _AddAddressScreenState extends State<AddAddressScreen> {
       return;
     }
     ShowToastDialog.showLoader('Please wait'.tr());
+    final backup = List.of(_shippingAddress);
     if (widget.index != null) {
       _addressModel
         ..location = _userLocation
@@ -155,7 +156,20 @@ class _AddAddressScreenState extends State<AddAddressScreen> {
     setState(() {});
     if (MyAppState.currentUser != null) {
       MyAppState.currentUser!.shippingAddress = _shippingAddress;
-      await FireStoreUtils.updateCurrentUser(MyAppState.currentUser!);
+      try {
+        await FireStoreUtils.updateCurrentUser(MyAppState.currentUser!);
+      } catch (_) {
+        // A failed write (offline, permission) used to throw out of here with
+        // the loader still showing, leaving "Please wait" on screen forever.
+        _shippingAddress
+          ..clear()
+          ..addAll(backup);
+        ShowToastDialog.closeLoader();
+        ShowToastDialog.showToast(
+            'Could not save the address. Please check your connection and try again.'.tr());
+        if (mounted) setState(() {});
+        return;
+      }
     }
     ShowToastDialog.closeLoader();
     if (mounted) Navigator.pop(context, true);

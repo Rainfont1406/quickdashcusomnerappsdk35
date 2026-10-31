@@ -510,7 +510,8 @@ class _CartScreenState extends State<CartScreen> {
       setState(() {
         selctedOrderTypeValue =
             sp.getString("foodType") == "" || sp.getString("foodType") == null
-                ? "Delivery"
+                // Same default as Home (2026-10-12): Dineaway, since Delivery is off.
+                ? "Dineaway".tr()
                 : sp.getString("foodType");
       });
     }

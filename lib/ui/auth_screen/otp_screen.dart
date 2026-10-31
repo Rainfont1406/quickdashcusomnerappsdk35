@@ -301,6 +301,12 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
           return;
         }
 
+        // A never-finished signup (inactive, no location yet) is resumed, not
+        // blocked: the write below activates it and routing sends it to the
+        // location screen. Only an account that already had a location can be
+        // genuinely restricted.
+        if (userModel.isUnfinishedSignup) userModel.active = true;
+
         if (!userModel.active) {
           ShowToastDialog.closeLoader();
           if (mounted) setState(() => _isVerifying = false);
@@ -343,7 +349,7 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
         debugPrint('[LOGIN-PERF] TOTAL (tap to navigate) — ${totalSw.elapsedMilliseconds}ms');
 
         final addresses = userModel.shippingAddress;
-        if (addresses != null && addresses.isNotEmpty) {
+        if (!userModel.needsLocation && addresses != null && addresses.isNotEmpty) {
           final defaultAddr = addresses.firstWhere(
             (e) => e.isDefault == true,
             orElse: () => addresses.first,
@@ -641,6 +647,7 @@ class _OtpScreenState extends State<OtpScreen> with CodeAutoFill {
       stage = 'write_user';
       await FireStoreUtils.updateCurrentUser(userModel);
       accountWritten = true;
+      await FireStoreUtils.activateNewSignup(userModel);
       // Push token could not be fetched above: keep retrying in the background.
       if (fcmToken is String && fcmToken.isEmpty) NotificationService.fillTokenLater(userModel.userID);
       // Persist phone user ID so the session survives app restarts

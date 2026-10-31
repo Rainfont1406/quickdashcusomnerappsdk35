@@ -96,6 +96,13 @@ import 'story_cache.dart';
 // Base URL of the QuickDash admin/API server.
 const _kApiBase = 'https://admin.quickdash.co.in';
 
+/// An error from the role-specific password endpoints (2026-10-30).
+class RoleAuthError {
+  final String message;
+  final bool wrongCode;
+  RoleAuthError(this.message, {this.wrongCode = false});
+}
+
 // Both windows come from ONE Firestore read of dailyProductSales (see
 // _fetchRollingSalesWindow) - last7Days is a subset bucketed by date, not a
 // second query. Stays local to this file (never imported by
@@ -1853,6 +1860,147 @@ class FireStoreUtils {
       _userCache[user.userID] = user;
       return user;
     });
+  }
+
+  // New accounts must be created with active:false (firestore.rules), so flip
+  // the flag with a second small update right after creation. Without this the
+  // account depended on the user reaching a later screen, and quitting early
+  // left it inactive and blocked at the next login. Best effort: failure here
+  // is handled by the isUnfinishedSignup resume path at login.
+  static Future<void> activateNewSignup(User user) async {
+    try {
+      await firestore.collection(USERS).doc(user.userID).updateLogged({'active': true}, 'activateNewSignup:USERS');
+      user.active = true;
+    } catch (e) {
+      debugPrint('[SIGNUP] activateNewSignup failed: $e');
+    }
+  }
+
+  // An email/password login can belong to a vendor/driver while the same
+  // person also wants a customer account. Firebase allows one account per
+  // email, so the server hands out a token for a separate customer uid
+  // (cust_<uid>) after the caller has signed in with that email + password.
+  // Switches the current session to that customer uid. Returns it, or null
+  // if the server refused (the caller then keeps/handles the original session).
+  static Future<auth.User?> linkCustomerRole() async {
+    try {
+      final idToken = await auth.FirebaseAuth.instance.currentUser?.getIdToken();
+      if (idToken == null) return null;
+      final resp = await http
+          .post(
+            Uri.parse('$_kApiBase/api/auth/customer-link'),
+            headers: {'Authorization': 'Bearer $idToken', 'Accept': 'application/json'},
+          )
+          .timeout(const Duration(seconds: 15));
+      if (resp.statusCode != 200) return null;
+      final token = (jsonDecode(resp.body) as Map<String, dynamic>)['firebase_token'] as String?;
+      if (token == null || token.isEmpty) return null;
+      final cred = await auth.FirebaseAuth.instance.signInWithCustomToken(token);
+      return cred.user;
+    } catch (e) {
+      debugPrint('[LINK] linkCustomerRole failed: $e');
+      return null;
+    }
+  }
+
+  // ── Role-specific email password (2026-10-30) ──────────────────────────
+  // The same email can hold a customer password that differs from its vendor
+  // password. The server keeps the customer one (hashed) and signs us in with
+  // a custom token. See RoleAuthController on the admin server.
+
+  /// Emails a one-time code. [purpose] is 'signup' or 'reset'. Returns the
+  /// response map ({'method': 'code'|'firebase', 'sent_to': ...}) or a
+  /// RoleAuthError.
+  static Future<Object> requestRoleCode(String email, String purpose) async {
+    try {
+      final resp = await http
+          .post(
+            Uri.parse('$_kApiBase/api/role-auth/code'),
+            headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+            body: jsonEncode({'email': email, 'role': 'customer', 'purpose': purpose}),
+          )
+          .timeout(const Duration(seconds: 30));
+      final body = jsonDecode(resp.body) as Map<String, dynamic>;
+      if (resp.statusCode != 200) {
+        return RoleAuthError((body['error'] as String?) ?? 'Something went wrong. Please try again.');
+      }
+      return body;
+    } catch (e) {
+      debugPrint('[ROLE-AUTH] requestRoleCode failed: $e');
+      return RoleAuthError('Something went wrong. Please try again.');
+    }
+  }
+
+  /// Verifies the emailed code, stores [password] for the customer role and
+  /// signs in as the customer profile. Returns the signed-in user or a
+  /// RoleAuthError (wrongCode = the code was wrong/expired: ask again).
+  static Future<Object> roleSignup(String email, String password, String code) async {
+    try {
+      final resp = await http
+          .post(
+            Uri.parse('$_kApiBase/api/role-auth/signup'),
+            headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+            body: jsonEncode({'email': email, 'password': password, 'code': code}),
+          )
+          .timeout(const Duration(seconds: 30));
+      final body = jsonDecode(resp.body) as Map<String, dynamic>;
+      if (resp.statusCode != 200) {
+        return RoleAuthError((body['error'] as String?) ?? 'Something went wrong. Please try again.',
+            wrongCode: body['code'] == 'EMAIL_CODE_INVALID');
+      }
+      final cred = await auth.FirebaseAuth.instance
+          .signInWithCustomToken(body['firebase_token'] as String);
+      return cred.user ?? RoleAuthError('Sign-in failed. Please try again.');
+    } catch (e) {
+      debugPrint('[ROLE-AUTH] roleSignup failed: $e');
+      return RoleAuthError('Something went wrong. Please try again.');
+    }
+  }
+
+  /// Login with a customer password that is separate from the Firebase one.
+  /// null = this email has no such password (continue with Firebase sign-in),
+  /// a User = signed in, a RoleAuthError = wrong password / locked.
+  static Future<Object?> roleLogin(String email, String password) async {
+    try {
+      final resp = await http
+          .post(
+            Uri.parse('$_kApiBase/api/role-auth/login'),
+            headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+            body: jsonEncode({'email': email, 'password': password, 'role': 'customer'}),
+          )
+          .timeout(const Duration(seconds: 20));
+      final body = jsonDecode(resp.body) as Map<String, dynamic>;
+      if (resp.statusCode == 404 && body['code'] == 'NO_CREDENTIAL') return null;
+      if (resp.statusCode != 200) {
+        return RoleAuthError((body['error'] as String?) ?? 'Incorrect email or password.');
+      }
+      final cred = await auth.FirebaseAuth.instance
+          .signInWithCustomToken(body['firebase_token'] as String);
+      return cred.user;
+    } catch (e) {
+      // Unreachable server: let the normal Firebase sign-in decide.
+      debugPrint('[ROLE-AUTH] roleLogin failed: $e');
+      return null;
+    }
+  }
+
+  /// Sets a new customer password with the emailed code. null = success.
+  static Future<String?> resetRolePassword(String email, String code, String newPassword) async {
+    try {
+      final resp = await http
+          .post(
+            Uri.parse('$_kApiBase/api/role-auth/reset'),
+            headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+            body: jsonEncode({'email': email, 'role': 'customer', 'code': code, 'new_password': newPassword}),
+          )
+          .timeout(const Duration(seconds: 30));
+      if (resp.statusCode == 200) return null;
+      final body = jsonDecode(resp.body) as Map<String, dynamic>;
+      return (body['error'] as String?) ?? 'Something went wrong. Please try again.';
+    } catch (e) {
+      debugPrint('[ROLE-AUTH] resetRolePassword failed: $e');
+      return 'Something went wrong. Please try again.';
+    }
   }
 
   static Future<void> updateCurrentUserAddress(AddressModel userAddress) async {
