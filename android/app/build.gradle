@@ -77,7 +77,11 @@ android {
         }
         staging {
             dimension "env"
-            applicationIdSuffix ".staging"
+            // Must equal the Android app registered in quickdash-staging
+            // (google-services.json + firebase_options_staging.dart). A suffix
+            // stopped matching when the base applicationId changed to
+            // com.quickdash.hadeveloper (2026-08-13), which broke staging builds.
+            applicationId "com.quickdash.customer.staging"
             versionNameSuffix "-staging"
             // App name override lives in android/app/src/staging/res/values/strings.xml
             // (a resValue here collides with the existing app_name string resource).
