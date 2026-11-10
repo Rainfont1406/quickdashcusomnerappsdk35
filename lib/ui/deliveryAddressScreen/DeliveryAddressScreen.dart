@@ -1,8 +1,8 @@
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/AddressModel.dart';
-import 'package:emartconsumer/model/User.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/delivery_location_helper.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/ui/auth_screen/login_screen.dart';
@@ -19,6 +19,36 @@ class DeliveryAddressScreen extends StatefulWidget {
 
 class _DeliveryAddressScreenState extends State<DeliveryAddressScreen> {
   List<AddressModel> shippingAddress = [];
+  bool _locating = false;
+
+  // One tap: GPS -> address -> straight back to checkout (2026-11-10).
+  // Previously a customer with no saved address saw an empty screen and had
+  // to go New Address -> map -> pick -> Save -> back -> tap it (6 steps).
+  Future<void> _useCurrentLocation() async {
+    if (_locating) return;
+    setState(() => _locating = true);
+    final r = await currentLocationAddress();
+    if (!mounted) return;
+    setState(() => _locating = false);
+    if (r.address != null) {
+      Navigator.pop(context, r.address);
+    } else {
+      _snack(r.error ?? 'Could not get your location.');
+    }
+  }
+
+  Future<void> _pickOnMap() async {
+    final picked = await pickLocationOnMap(context);
+    if (picked != null && mounted) Navigator.pop(context, picked);
+  }
+
+  void _snack(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(msg.tr()),
+      behavior: SnackBarBehavior.floating,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+    ));
+  }
 
   @override
   void initState() {
@@ -88,10 +118,15 @@ class _DeliveryAddressScreenState extends State<DeliveryAddressScreen> {
                 borderRadius: BorderRadius.circular(12),
                 onTap: () async {
                   if (MyAppState.currentUser != null) {
-                    await Navigator.of(context)
-                        .push(MaterialPageRoute(
-                            builder: (_) => const AddAddressScreen()))
-                        .then((_) => getListAddress());
+                    final before = shippingAddress.length;
+                    final saved = await Navigator.of(context).push(
+                        MaterialPageRoute(builder: (_) => const AddAddressScreen()));
+                    getListAddress();
+                    // A newly saved address is what the customer wants to
+                    // use - return it instead of making them tap it again.
+                    if (saved == true && mounted && shippingAddress.length > before) {
+                      Navigator.pop(context, shippingAddress.last);
+                    }
                   } else {
                     Navigator.pop(context);
                     push(context, LoginScreen());
@@ -154,6 +189,49 @@ class _DeliveryAddressScreenState extends State<DeliveryAddressScreen> {
         padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
         physics: const BouncingScrollPhysics(),
         children: [
+          // ── Quick options ────────────────────────────────────────────────
+          _QuickOption(
+            dark: dark,
+            icon: Icons.my_location_rounded,
+            title: 'Use my current location'.tr(),
+            subtitle: 'Deliver to where you are now'.tr(),
+            loading: _locating,
+            highlight: true,
+            onTap: _useCurrentLocation,
+          ),
+          const SizedBox(height: 10),
+          _QuickOption(
+            dark: dark,
+            icon: Icons.map_rounded,
+            title: 'Search or pick on map'.tr(),
+            subtitle: 'Move the pin to your exact door'.tr(),
+            onTap: _pickOnMap,
+          ),
+          const SizedBox(height: 22),
+
+          if (shippingAddress.isEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Row(
+                children: [
+                  Icon(Icons.bookmark_border_rounded,
+                      size: 16,
+                      color: dark ? AppThemeData.darkTextTertiary : AppThemeData.neutral400),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'No saved addresses yet. Tap "New Address" to save Home or Work for next time.'.tr(),
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        height: 1.4,
+                        color: dark ? AppThemeData.darkTextTertiary : AppThemeData.neutral500,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
           // ── Saved addresses ───────────────────────────────────────────────
           if (shippingAddress.isNotEmpty) ...[
             Padding(
@@ -218,6 +296,99 @@ class _DeliveryAddressScreenState extends State<DeliveryAddressScreen> {
           isDefaultAction: true,
           onPressed: () => Navigator.pop(ctx, 'Cancel'),
           child: Text('Cancel'.tr()),
+        ),
+      ),
+    );
+  }
+}
+
+// ── Quick option tile (current location / map) ──────────────────────────────
+class _QuickOption extends StatelessWidget {
+  final bool dark;
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final bool loading;
+  final bool highlight;
+  final VoidCallback onTap;
+
+  const _QuickOption({
+    required this.dark,
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.onTap,
+    this.loading = false,
+    this.highlight = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = AppThemeData.primary500;
+    return Material(
+      color: highlight
+          ? accent.withValues(alpha: dark ? 0.16 : 0.07)
+          : (dark ? AppThemeData.darkBgSecondary : Colors.white),
+      borderRadius: BorderRadius.circular(16),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: loading ? null : onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: highlight
+                  ? accent.withValues(alpha: 0.45)
+                  : (dark ? AppThemeData.darkBorderPrimary : AppThemeData.neutral200),
+            ),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  color: accent.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: loading
+                    ? Padding(
+                        padding: const EdgeInsets.all(11),
+                        child: CircularProgressIndicator(strokeWidth: 2.2, color: accent),
+                      )
+                    : Icon(icon, color: accent, size: 22),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      loading ? 'Finding your location...'.tr() : title,
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontFamily: AppThemeData.semiBold,
+                        color: highlight
+                            ? accent
+                            : (dark ? AppThemeData.darkTextPrimary : AppThemeData.neutral900),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitle,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: dark ? AppThemeData.darkTextTertiary : AppThemeData.neutral500,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Icon(Icons.chevron_right_rounded,
+                  color: dark ? AppThemeData.darkTextTertiary : AppThemeData.neutral400),
+            ],
+          ),
         ),
       ),
     );

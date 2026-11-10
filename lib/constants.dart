@@ -15,6 +15,7 @@ import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/widget/permission_dialog.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show appFlavor;
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
@@ -209,7 +210,14 @@ const GlobalURL = "https://admin.quickdash.co.in/";
 // us-central1 and asia-south1 first (functions/index.js, same day) -
 // us-central1 keeps serving any older installed build that hasn't updated
 // yet, unaffected.
-const CloudFunctionsBaseURL = "https://asia-south1-quick-dash-84f6a.cloudfunctions.net";
+// 2026-11-10: follows the build flavor. A `--flavor staging` build signs in
+// to quickdash-staging, so its payment calls must go to the staging
+// functions too (they were always sent to production before, so staging
+// payments could never be tested). The production value is unchanged.
+final String _functionsProject =
+    appFlavor == 'staging' ? 'quickdash-staging' : 'quick-dash-84f6a';
+final String CloudFunctionsBaseURL =
+    "https://asia-south1-$_functionsProject.cloudfunctions.net";
 
 // createVerifiedCodOrder was DIFFERENT until 2026-10-04: it existed ONLY in
 // us-central1 (its source was lost when the other payment functions moved to
@@ -222,7 +230,7 @@ const CloudFunctionsBaseURL = "https://asia-south1-quick-dash-84f6a.cloudfunctio
 // before a build with this URL reaches users, or every COD order 404s.
 // The asia-south1 copy was deployed 2026-10-04 (admin 09e5258) and exists, so this
 // build calls it. The us-central1 copy stays deployed for older installed builds.
-const CodOrderFunctionURL = "https://asia-south1-quick-dash-84f6a.cloudfunctions.net/createVerifiedCodOrder";
+final String CodOrderFunctionURL = "$CloudFunctionsBaseURL/createVerifiedCodOrder";
 const Currency = 'currencies';
 const STORAGE_ROOT = 'emart';
 

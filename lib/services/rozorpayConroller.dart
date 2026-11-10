@@ -300,6 +300,10 @@ class RazorPayController {
     // Razorpay order notes so razorpayWebhook can promote order_drafts/{id} if the app dies
     // after paying. Omitted by older builds (no recovery, no failure).
     String? clientOrderId,
+    // Delivery orders only: the customer's delivery pin, so the server can
+    // compute the delivery fee itself (settings/DeliveryFee.serverFeeMode).
+    // Null for Dining / Takeaway / Bill Pay - see deliveryLocationPayload().
+    Map<String, double>? deliveryLocation,
   }) async {
     final idToken = await _idToken();
     if (idToken == null) {
@@ -329,6 +333,7 @@ class RazorPayController {
               'expectedBillVersion': expectedBillVersion,
               'scheduleTimeMillis': scheduleTimeMillis,
               'clientOrderType': clientOrderType,
+              if (deliveryLocation != null) 'deliveryLocation': deliveryLocation,
               'expectedTotal': expectedTotal,
               'clientOrderId': clientOrderId,
             }),
@@ -415,6 +420,10 @@ class RazorPayController {
     // silently charging a different amount (2026-09-13). Omitted by older
     // builds, for which the server simply skips that comparison.
     double? expectedTotal,
+    // Delivery orders only: the customer's delivery pin, so the server can
+    // compute the delivery fee itself (settings/DeliveryFee.serverFeeMode).
+    // Null for Dining / Takeaway / Bill Pay - see deliveryLocationPayload().
+    Map<String, double>? deliveryLocation,
   }) async {
     final idToken = await _idToken();
     if (idToken == null) {
@@ -444,6 +453,7 @@ class RazorPayController {
               'expectedBillVersion': expectedBillVersion,
               'scheduleTimeMillis': scheduleTimeMillis,
               'clientOrderType': clientOrderType,
+              if (deliveryLocation != null) 'deliveryLocation': deliveryLocation,
               'expectedTotal': expectedTotal,
             }),
           )
@@ -542,6 +552,10 @@ class RazorPayController {
     int? scheduleTimeMillis,
     String? clientOrderType,
     double? expectedTotal,
+    // Delivery orders only: the customer's delivery pin, so the server can
+    // compute the delivery fee itself (settings/DeliveryFee.serverFeeMode).
+    // Null for Dining / Takeaway / Bill Pay - see deliveryLocationPayload().
+    Map<String, double>? deliveryLocation,
   }) async {
     final idToken = await _idToken();
     if (idToken == null) {
@@ -573,6 +587,7 @@ class RazorPayController {
               'expectedBillVersion': expectedBillVersion,
               'scheduleTimeMillis': scheduleTimeMillis,
               'clientOrderType': clientOrderType,
+              if (deliveryLocation != null) 'deliveryLocation': deliveryLocation,
               'expectedTotal': expectedTotal,
             }),
           )
@@ -850,6 +865,10 @@ class RazorPayController {
     // Razorpay order notes so razorpayWebhook can promote order_drafts/{id} if the app dies
     // after paying. Omitted by older builds (no recovery, no failure).
     String? clientOrderId,
+    // Delivery orders only: the customer's delivery pin, so the server can
+    // compute the delivery fee itself (settings/DeliveryFee.serverFeeMode).
+    // Null for Dining / Takeaway / Bill Pay - see deliveryLocationPayload().
+    Map<String, double>? deliveryLocation,
   }) async {
     final idToken = await _idToken();
     if (idToken == null) {
@@ -878,6 +897,7 @@ class RazorPayController {
               'expectedBillVersion': expectedBillVersion,
               'scheduleTimeMillis': scheduleTimeMillis,
               'clientOrderType': clientOrderType,
+              if (deliveryLocation != null) 'deliveryLocation': deliveryLocation,
               'expectedTotal': expectedTotal,
               'clientOrderId': clientOrderId,
             }),

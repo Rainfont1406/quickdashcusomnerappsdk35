@@ -1,19 +1,13 @@
-import 'dart:developer';
-
 import 'package:easy_localization/easy_localization.dart';
-import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/AddressModel.dart';
 import 'package:emartconsumer/model/User.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
+import 'package:emartconsumer/services/delivery_location_helper.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
-import 'package:emartconsumer/widget/place_picker_osm.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_google_maps_webservices/places.dart' show Component;
-import 'package:google_maps_flutter/google_maps_flutter.dart';
-import 'package:google_maps_place_picker_mb/google_maps_place_picker.dart';
 import 'package:uuid/uuid.dart';
 
 class AddAddressScreen extends StatefulWidget {
@@ -66,50 +60,36 @@ class _AddAddressScreenState extends State<AddAddressScreen> {
     setState(() {});
   }
 
-  void _pickLocation() {
-    if (selectedMapType == 'osm') {
-      Navigator.of(context)
-          .push(MaterialPageRoute(builder: (_) => LocationPicker()))
-          .then((value) {
-        if (value != null) {
-          setState(() {
-            _locality.text = value.displayName.toString();
-            _userLocation =
-                UserLocation(latitude: value.lat, longitude: value.lon);
-          });
-        }
+  // Shared picker (2026-11-10): opens on the address being edited / the
+  // current location instead of a hardcoded Sydney position.
+  Future<void> _pickLocation() async {
+    final picked = await pickLocationOnMap(context, start: _userLocation);
+    if (picked != null && mounted) {
+      setState(() {
+        _locality.text = picked.locality ?? '';
+        _userLocation = picked.location;
       });
-    } else {
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => PlacePicker(
-            apiKey: GOOGLE_API_KEY,
-            onPlacePicked: (result) {
-              setState(() {
-                _locality.text = result.formattedAddress.toString();
-                _userLocation = UserLocation(
-                  latitude: result.geometry!.location.lat,
-                  longitude: result.geometry!.location.lng,
-                );
-              });
-              log(result.toString());
-              Navigator.of(context).pop();
-            },
-            initialPosition: const LatLng(-33.8567844, 151.213108),
-            useCurrentLocation: true,
-            selectInitialPosition: true,
-            usePinPointingSearch: true,
-            usePlaceDetailSearch: true,
-            zoomGesturesEnabled: true,
-            zoomControlsEnabled: true,
-            initialMapType: MapType.terrain,
-            resizeToAvoidBottomInset: false,
-            // Hard filter: only Indian results are returned at all.
-            autocompleteComponents: [Component(Component.country, 'in')],
-          ),
-        ),
-      );
+    }
+  }
+
+  bool _locating = false;
+  Future<void> _useCurrentLocation() async {
+    if (_locating) return;
+    setState(() => _locating = true);
+    final r = await currentLocationAddress();
+    if (!mounted) return;
+    setState(() {
+      _locating = false;
+      if (r.address != null) {
+        _locality.text = r.address!.locality ?? '';
+        _userLocation = r.address!.location;
+      }
+    });
+    if (r.address == null) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text((r.error ?? 'Could not get your location.').tr()),
+        behavior: SnackBarBehavior.floating,
+      ));
     }
   }
 
@@ -226,7 +206,22 @@ class _AddAddressScreenState extends State<AddAddressScreen> {
             _sectionLabel('Location'.tr(), dark),
             const SizedBox(height: 8),
             _locationPickerCard(dark),
-            const SizedBox(height: 20),
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: _locating ? null : _useCurrentLocation,
+                icon: _locating
+                    ? const SizedBox(
+                        width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                    : Icon(Icons.my_location_rounded, size: 18, color: AppThemeData.primary500),
+                label: Text(
+                  _locating ? 'Finding your location...'.tr() : 'Use my current location'.tr(),
+                  style: TextStyle(color: AppThemeData.primary500, fontFamily: AppThemeData.semiBold),
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
 
             // Save as labels
             _sectionLabel('Save Address As'.tr(), dark),

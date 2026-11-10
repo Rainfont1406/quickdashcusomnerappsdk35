@@ -9,6 +9,7 @@ import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/AddressModel.dart';
+import 'package:emartconsumer/services/delivery_location_helper.dart';
 import 'package:emartconsumer/model/CodModel.dart';
 import 'package:emartconsumer/model/FlutterWaveSettingDataModel.dart';
 import 'package:emartconsumer/model/PayFastSettingData.dart';
@@ -161,6 +162,17 @@ class PaymentScreen extends StatefulWidget {
 class PaymentScreenState extends State<PaymentScreen> {
   final fireStoreUtils = FireStoreUtils();
   late Future<bool> hasNativePay;
+
+  // Sent to the payment functions so the server can compute the delivery fee
+  // itself (2026-11-10). Delivery orders only: Dining / Takeaway (orderType
+  // set or take_away) and Bill Pay never send a location, so DineAway is
+  // completely unaffected.
+  Map<String, double>? get _deliveryLocationForServer => deliveryLocationPayload(
+        isDelivery: (widget.orderType ?? '').isEmpty &&
+            !(widget.take_away ?? false) &&
+            widget.billPayRequestId == null,
+        address: widget.addressModel,
+      );
 
   // Modified to ensure unique order ID by checking against database
   // Generates a unique-enough order ID without hitting the network.
@@ -1929,6 +1941,7 @@ class PaymentScreenState extends State<PaymentScreen> {
           expectedBillVersion: widget.expectedBillVersion,
           scheduleTimeMillis: widget.scheduleTime?.millisecondsSinceEpoch,
           clientOrderType: widget.orderType,
+          deliveryLocation: _deliveryLocationForServer,
           expectedTotal: _payableTotal,
         );
         debugPrint('[ORDER-PERF] createVerifiedWalletOrder — ${verifySw.elapsedMilliseconds}ms '
@@ -1997,6 +2010,7 @@ class PaymentScreenState extends State<PaymentScreen> {
         expectedBillVersion: widget.expectedBillVersion,
         scheduleTimeMillis: widget.scheduleTime?.millisecondsSinceEpoch,
         clientOrderType: widget.orderType,
+        deliveryLocation: _deliveryLocationForServer,
         expectedTotal: _payableTotal,
       );
       debugPrint('[ORDER-PERF] createVerifiedCodOrder — ${verifySw.elapsedMilliseconds}ms '
@@ -2319,6 +2333,7 @@ class PaymentScreenState extends State<PaymentScreen> {
         expectedBillVersion: widget.expectedBillVersion,
         scheduleTimeMillis: widget.scheduleTime?.millisecondsSinceEpoch,
         clientOrderType: widget.orderType,
+        deliveryLocation: _deliveryLocationForServer,
         expectedTotal: _payableTotal,
       clientOrderId: appOrderId,
       );
@@ -2373,6 +2388,7 @@ class PaymentScreenState extends State<PaymentScreen> {
       expectedBillVersion: widget.expectedBillVersion,
       scheduleTimeMillis: widget.scheduleTime?.millisecondsSinceEpoch,
       clientOrderType: widget.orderType,
+      deliveryLocation: _deliveryLocationForServer,
       expectedTotal: _payableTotal,
       clientOrderId: appOrderId,
     );
@@ -2656,6 +2672,7 @@ class PaymentScreenState extends State<PaymentScreen> {
       expectedBillVersion: widget.expectedBillVersion,
       scheduleTimeMillis: widget.scheduleTime?.millisecondsSinceEpoch,
       clientOrderType: widget.orderType,
+      deliveryLocation: _deliveryLocationForServer,
       expectedTotal: _payableTotal,
       clientOrderId: appOrderId,
     );
@@ -2794,6 +2811,7 @@ class PaymentScreenState extends State<PaymentScreen> {
       // the chosen slot was inside their hours.
       scheduleTimeMillis: widget.scheduleTime?.millisecondsSinceEpoch,
       clientOrderType: widget.orderType,
+      deliveryLocation: _deliveryLocationForServer,
       expectedTotal: _payableTotal,
     );
     dismissLoadingAndClearProcessing();
@@ -2846,6 +2864,7 @@ class PaymentScreenState extends State<PaymentScreen> {
       expectedBillVersion: widget.expectedBillVersion,
       scheduleTimeMillis: widget.scheduleTime?.millisecondsSinceEpoch,
       clientOrderType: widget.orderType,
+      deliveryLocation: _deliveryLocationForServer,
       expectedTotal: _payableTotal,
     );
     dismissLoadingAndClearProcessing();

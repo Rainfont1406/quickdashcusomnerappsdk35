@@ -29,6 +29,7 @@ import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
+import 'package:emartconsumer/services/delivery_location_helper.dart';
 import 'package:emartconsumer/ui/deliveryAddressScreen/DeliveryAddressScreen.dart';
 import 'package:emartconsumer/widget/coming_soon_view.dart';
 import 'package:emartconsumer/widget/delivery_type_selector.dart';
@@ -138,10 +139,19 @@ class _CartScreenState extends State<CartScreen> {
   final TextEditingController _houseCtrl = TextEditingController();
   final TextEditingController _landmarkCtrl = TextEditingController();
   bool _houseFieldError = false;
+  // Road distance restaurant -> delivery pin, shown under the address
+  // (null until computed / not a delivery order).
+  double? _deliveryKm;
+
+  // A real map pin is required too (2026-11-10): the delivery fee and the
+  // driver both need coordinates, and old saved addresses can carry
+  // placeholder 0.01/0.1 coordinates.
+  bool get _hasDeliveryPin =>
+      (addressModel.locality?.isNotEmpty ?? false) &&
+      isRealLocation(addressModel.location);
 
   bool get _deliveryAddressComplete =>
-      (addressModel.locality?.isNotEmpty ?? false) &&
-      (addressModel.address?.isNotEmpty ?? false);
+      _hasDeliveryPin && (addressModel.address?.isNotEmpty ?? false);
 
   List<TaxModel>? taxList = []; // Initialize as empty list
 
@@ -1043,7 +1053,9 @@ class _CartScreenState extends State<CartScreen> {
             UserLocation(
                 latitude: vendorModel!.latitude,
                 longitude: vendorModel!.longitude));
-        getDeliveryCharges(num.parse(kmStr));
+        final km = num.parse(kmStr);
+        if (mounted) setState(() => _deliveryKm = km.toDouble());
+        getDeliveryCharges(km);
       }
 
       await _validateCart();
@@ -1936,7 +1948,7 @@ class _CartScreenState extends State<CartScreen> {
                       if (selctedOrderTypeValue == "Delivery" && !_deliveryAddressComplete) {
                         setState(() => _houseFieldError = true);
                         _showTopNotification(
-                          message: (addressModel.locality?.isEmpty ?? true)
+                          message: !_hasDeliveryPin
                               ? "Please pick your delivery location.".tr()
                               : "Please enter your house / flat details.".tr(),
                           color: AppThemeData.error500,
@@ -2231,16 +2243,26 @@ class _CartScreenState extends State<CartScreen> {
       );
       if (result != null && mounted) {
         // A new location means the old house/flat + landmark no longer
-        // apply — clear both so the user re-enters them for this address.
-        result.address = '';
-        result.landmark = '';
-        _houseCtrl.clear();
-        _landmarkCtrl.clear();
+        // apply. A saved address that already carries them keeps them
+        // (2026-11-10) so the customer doesn't retype them every order.
+        result.address = (result.address ?? '').trim();
+        result.landmark = (result.landmark ?? '').trim();
+        _houseCtrl.text = result.address!;
+        _landmarkCtrl.text = result.landmark!;
         clearRoadDistanceCache();
         setState(() {
           addressModel = result;
           MyAppState.selectedPosotion = result;
+          _deliveryKm = null;
+          _houseFieldError = false;
         });
+        if (!isRealLocation(result.location)) {
+          _showTopNotification(
+            message: "This saved address has no map pin. Please pick it again on the map.".tr(),
+            color: AppThemeData.error500,
+            icon: Icons.warning_amber_rounded,
+          );
+        }
         getDeliveyData();
       }
     }
@@ -2252,9 +2274,10 @@ class _CartScreenState extends State<CartScreen> {
           ListTile(
             contentPadding:
                 const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+            onTap: pickAddress,
             leading: _iconBadge(Icons.location_on_rounded),
             title: Text(
-              'Select Location'.tr(),
+              (hasArea ? 'Delivering to' : 'Select Location').tr(),
               style: AppTypography.labelLarge.copyWith(
                 fontWeight: FontWeight.w700,
                 letterSpacing: -0.1,
@@ -2263,15 +2286,36 @@ class _CartScreenState extends State<CartScreen> {
                     : AppThemeData.neutral900,
               ),
             ),
-            subtitle: Text(
-              areaText.length > 50
-                  ? '${areaText.substring(0, 50)}...'
-                  : areaText,
-              style: AppTypography.bodySmall.copyWith(
-                color: dark
-                    ? AppThemeData.darkTextSecondary
-                    : AppThemeData.neutral600,
-              ),
+            subtitle: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  areaText,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: AppTypography.bodySmall.copyWith(
+                    color: dark
+                        ? AppThemeData.darkTextSecondary
+                        : AppThemeData.neutral600,
+                  ),
+                ),
+                if (hasArea && _deliveryKm != null) ...[
+                  const SizedBox(height: 3),
+                  Row(
+                    children: [
+                      Icon(Icons.route_rounded, size: 13, color: AppThemeData.primary500),
+                      const SizedBox(width: 4),
+                      Text(
+                        '${_deliveryKm!.toStringAsFixed(1)} km ${'from the restaurant'.tr()}',
+                        style: AppTypography.caption.copyWith(
+                          color: AppThemeData.primary500,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ],
             ),
             trailing: GestureDetector(
               onTap: pickAddress,
