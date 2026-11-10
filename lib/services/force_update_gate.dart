@@ -105,9 +105,15 @@ class _ForceUpdateGateState extends State<ForceUpdateGate> with WidgetsBindingOb
   // Numeric dot-separated comparison ("1.0.13" vs "1.0.9") - a plain string
   // compare would wrongly rank "1.10.0" below "1.9.0". Missing trailing
   // segments treated as 0 (e.g. "1.1" == "1.1.0").
+  // Each segment uses only its leading digits, so a flavor suffix doesn't
+  // zero it out: "1.0.18-staging" is 1.0.18 (it read as 1.0.0 and blocked
+  // every staging build behind min_supported_version, 2026-11-10).
+  static int _segment(String s) =>
+      int.tryParse(RegExp(r'^\d+').stringMatch(s.trim()) ?? '') ?? 0;
+
   int _compareVersions(String a, String b) {
-    final partsA = a.split('.').map((s) => int.tryParse(s) ?? 0).toList();
-    final partsB = b.split('.').map((s) => int.tryParse(s) ?? 0).toList();
+    final partsA = a.split('+').first.split('.').map(_segment).toList();
+    final partsB = b.split('+').first.split('.').map(_segment).toList();
     final len = partsA.length > partsB.length ? partsA.length : partsB.length;
     for (var i = 0; i < len; i++) {
       final pa = i < partsA.length ? partsA[i] : 0;
