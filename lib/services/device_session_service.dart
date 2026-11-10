@@ -1,3 +1,4 @@
+import 'package:emartconsumer/constants.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:developer';
@@ -16,7 +17,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
-const _kApiBase = 'https://admin.quickdash.co.in';
+final String _kApiBase = AdminBaseURL;
 const _kDeviceIdPrefKey = 'device_session_device_id';
 
 /// See DeviceSessionService._checkActiveDetailed's doc comment.

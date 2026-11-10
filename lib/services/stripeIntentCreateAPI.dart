@@ -10,7 +10,7 @@ class StripeCreateIntent {
     required amount,
     required stripesecret,
   }) async {
-    const url = "${GlobalURL}payments/stripepaymentintent";
+    final url = "${GlobalURL}payments/stripepaymentintent";
 
     final response = await http.post(
       Uri.parse(url),

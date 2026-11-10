@@ -982,7 +982,7 @@ class RazorPayController {
       );
     }
 
-    const url = "${GlobalURL}payments/razorpay/createorder";
+    final url = "${GlobalURL}payments/razorpay/createorder";
 
     // This endpoint now requires a signed-in caller (verify.firebase
     // middleware) — previously open/unauthenticated. Still used by gift-card

@@ -1,3 +1,4 @@
+import 'package:emartconsumer/constants.dart';
 import 'dart:convert';
 import 'dart:developer';
 
@@ -32,7 +33,7 @@ import 'package:http/http.dart' as http;
 class GlobalAnalyticsApi {
   GlobalAnalyticsApi._();
 
-  static const _kApiBase = 'https://admin.quickdash.co.in';
+  static final String _kApiBase = AdminBaseURL;
 
   /// Sends one pre-aggregated batch of banner/restaurant-pairing deltas.
   /// Returns true only on a confirmed 2xx - any other outcome (network

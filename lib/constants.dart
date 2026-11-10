@@ -191,7 +191,13 @@ const COD = 'CODSettings';
 const TermsAndConditions = 'terms_and_condition';
 const GIFT_CARDS = 'gift_cards';
 const GIFT_PURCHASES = 'gift_purchases';
-const GlobalURL = "https://admin.quickdash.co.in/";
+// 2026-11-10: the Laravel admin API follows the build flavor too, so a
+// `--flavor staging` build (signed in to quickdash-staging) talks to the
+// staging admin server. Production value unchanged.
+final String AdminBaseURL = appFlavor == 'staging'
+    ? 'https://staging-admin.quickdash.co.in'
+    : 'https://admin.quickdash.co.in';
+final String GlobalURL = "$AdminBaseURL/";
 // !! 2026-08-22: Firestore moved to asia-south1 (Mumbai) and the 6 payment
 // functions this URL calls are PREPARED (not yet deployed) to move there
 // too - see the matching commented-out deploy in the Admin Panel's

@@ -94,7 +94,7 @@ import 'firestore_instrumentation.dart';
 import 'story_cache.dart';
 
 // Base URL of the QuickDash admin/API server.
-const _kApiBase = 'https://admin.quickdash.co.in';
+final String _kApiBase = AdminBaseURL;
 
 /// An error from the role-specific password endpoints (2026-10-30).
 class RoleAuthError {

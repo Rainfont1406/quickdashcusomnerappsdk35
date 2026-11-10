@@ -28,7 +28,7 @@ import 'package:sms_autofill/sms_autofill.dart';
 import 'package:uuid/uuid.dart';
 
 // Base URL of the QuickDash admin/API server.
-const _kApiBase = 'https://admin.quickdash.co.in';
+final String _kApiBase = AdminBaseURL;
 
 class OtpScreen extends StatefulWidget {
   final String? countryCode;

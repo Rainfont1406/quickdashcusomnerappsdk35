@@ -1,3 +1,4 @@
+import 'package:emartconsumer/constants.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
@@ -11,7 +12,7 @@ class Msg91Response {
 }
 
 class Msg91Service {
-  static const _base = 'https://admin.quickdash.co.in/api/msg91';
+  static final String _base = '$AdminBaseURL/api/msg91';
   static const _timeout = Duration(seconds: 25);
 
   // Cached from /api/msg91/config

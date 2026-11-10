@@ -1,10 +1,11 @@
+import 'package:emartconsumer/constants.dart';
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:firebase_auth/firebase_auth.dart' as auth;
 import 'package:http/http.dart' as http;
 
-const _kBunnyApiBase = 'https://admin.quickdash.co.in';
+final String _kBunnyApiBase = AdminBaseURL;
 
 /// Uploads [image] to Bunny Storage via the server proxy.
 /// [folder] must be one of the allowed folders configured on the server:
