@@ -1454,13 +1454,6 @@ class _HomeScreenState extends State<HomeScreen> {
                               storyList: storyList,
                               vendors: vendors,
                               offerBadges: _offerBadgeByVendorId,
-                              viewedIds: _viewedTodayIds,
-                              onViewRecorded: (id) {
-                                if (!mounted) return;
-                                setState(() { _viewedTodayIds = {..._viewedTodayIds, id}; });
-                                _saveViewedId(id);
-                                _filterStories();
-                              },
                             )
                           else
                           StoryView(

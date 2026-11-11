@@ -1,7 +1,12 @@
-// Delivery-only story section (2026-11-11, staging): Zomato-style image
-// grid instead of the round logo circles. One card per restaurant with
-// its story photo, the restaurant's offer badge, rating, name and an
-// estimated delivery time. Tapping opens the normal story viewer.
+// Delivery-only story section (2026-11-11, staging): Zomato-style
+// restaurant promo grid instead of the round logo circles.
+//
+// One card per restaurant: a landscape (rectangle) photo from its story,
+// the restaurant's offer on a dark strip over the photo, rating, name and
+// an estimated delivery time. Tapping a card opens the RESTAURANT PAGE
+// (not the story viewer): in Delivery the story is the vendor's ad for an
+// instant order, so the customer goes straight to the menu.
+//
 // Dineaway keeps the original StoryView circles - this widget is never
 // used there.
 
@@ -9,11 +14,12 @@ import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/model/story_model.dart';
+import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
 import 'package:emartconsumer/services/delivery_location_helper.dart';
 import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/perf_diagnostic_file_service.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
-import 'package:emartconsumer/ui/home/story_view.dart';
+import 'package:emartconsumer/ui/vendorProductsScreen/newVendorProductsScreen.dart';
 import 'package:emartconsumer/utils/network_image_widget.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
@@ -22,16 +28,12 @@ class DeliveryStoryGrid extends StatefulWidget {
   final List<StoryModel> storyList;
   final List<VendorModel> vendors;
   final Map<String, String> offerBadges;
-  final Set<String> viewedIds;
-  final void Function(String storyID)? onViewRecorded;
 
   const DeliveryStoryGrid({
     super.key,
     required this.storyList,
     required this.vendors,
     this.offerBadges = const {},
-    this.viewedIds = const {},
-    this.onViewRecorded,
   });
 
   @override
@@ -40,6 +42,7 @@ class DeliveryStoryGrid extends StatefulWidget {
 
 class _DeliveryStoryGridState extends State<DeliveryStoryGrid> {
   static const int _collapsed = 6; // two rows of three
+  static const double _imageRatio = 1.2; // width : height, landscape like Zomato
   bool _expanded = false;
 
   /// Rough delivery time: 20 min kitchen + 3 min per km, rounded to 5 min,
@@ -53,6 +56,18 @@ class _DeliveryStoryGridState extends State<DeliveryStoryGrid> {
     if (km > 30) return null; // too far for a meaningful delivery time
     final low = ((20 + km * 3) / 5).round() * 5;
     return '$low-${low + 5} ${'mins'.tr()}';
+  }
+
+  /// Green for good ratings, lighter green for average, orange below 3.
+  static Color _ratingColor(double r) => r >= 4
+      ? const Color(0xFF1E7B34)
+      : r >= 3
+          ? const Color(0xFF3F9142)
+          : const Color(0xFFDB7C38);
+
+  void _openRestaurant(VendorModel v) {
+    BehaviorTracker.setNextEntrySource('Home');
+    push(context, NewVendorProductsScreen(vendorModel: v));
   }
 
   @override
@@ -70,61 +85,64 @@ class _DeliveryStoryGridState extends State<DeliveryStoryGrid> {
 
     final shown = _expanded ? stories.length : stories.length.clamp(0, _collapsed);
     final dark = isDarkMode(context);
+    final textScale = MediaQuery.textScalerOf(context).scale(1);
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
-      child: Column(
-        children: [
-          GridView.builder(
-            shrinkWrap: true,
-            padding: EdgeInsets.zero,
-            physics: const NeverScrollableScrollPhysics(),
-            itemCount: shown,
-            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: 3,
-              crossAxisSpacing: 10,
-              mainAxisSpacing: 14,
-              childAspectRatio: 0.66,
-            ),
-            itemBuilder: (_, i) => _card(stories, i, byId[stories[i].vendorID.toString()]!, dark),
-          ),
-          if (stories.length > _collapsed)
-            TextButton.icon(
-              onPressed: () => setState(() => _expanded = !_expanded),
-              icon: Icon(_expanded ? Icons.expand_less_rounded : Icons.expand_more_rounded,
-                  color: AppThemeData.primary500),
-              label: Text(
-                (_expanded ? 'Show less' : 'See all ${stories.length}').tr(),
-                style: const TextStyle(fontFamily: AppThemeData.semiBold, color: AppThemeData.primary500),
+      child: LayoutBuilder(builder: (context, box) {
+        const gap = 10.0;
+        final cardW = (box.maxWidth - gap * 2) / 3;
+        final imageH = cardW / _imageRatio;
+        // image + name + time lines (grows with the phone's text size).
+        final extent = imageH + 8 + 44 * textScale;
+        return Column(
+          children: [
+            GridView.builder(
+              shrinkWrap: true,
+              padding: EdgeInsets.zero,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: shown,
+              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 3,
+                crossAxisSpacing: gap,
+                mainAxisSpacing: 14,
+                mainAxisExtent: extent,
               ),
+              itemBuilder: (_, i) =>
+                  _card(stories[i], byId[stories[i].vendorID.toString()]!, imageH, dark),
             ),
-        ],
-      ),
+            if (stories.length > _collapsed)
+              TextButton.icon(
+                onPressed: () => setState(() => _expanded = !_expanded),
+                icon: Icon(_expanded ? Icons.expand_less_rounded : Icons.expand_more_rounded,
+                    color: AppThemeData.primary500),
+                label: Text(
+                  _expanded ? 'Show less'.tr() : '${'See all'.tr()} (${stories.length})',
+                  style: const TextStyle(fontFamily: AppThemeData.semiBold, color: AppThemeData.primary500),
+                ),
+              ),
+          ],
+        );
+      }),
     );
   }
 
-  Widget _card(List<StoryModel> stories, int index, VendorModel v, bool dark) {
-    final story = stories[index];
+  Widget _card(StoryModel story, VendorModel v, double imageH, bool dark) {
     final url = story.imageUrl.first.toString();
-    final badge = widget.offerBadges[v.id];
+    final offer = widget.offerBadges[v.id];
     final rating = v.reviewsCount > 0 ? v.reviewsSum / v.reviewsCount : 0.0;
     final eta = _eta(v);
-    final viewed = widget.viewedIds.contains(story.storyID ?? '');
     final open = v.isAcceptingOrders;
 
     return GestureDetector(
-      onTap: () => Navigator.of(context).push(MaterialPageRoute(
-        builder: (_) => MoreStories(
-          storyList: stories,
-          index: index,
-          orderType: 'Delivery',
-          onViewRecorded: widget.onViewRecorded,
-        ),
-      )),
+      behavior: HitTestBehavior.opaque,
+      onTap: () => _openRestaurant(v),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Expanded(
+          SizedBox(
+            height: imageH,
+            width: double.infinity,
             child: ClipRRect(
               borderRadius: BorderRadius.circular(12),
               child: Stack(
@@ -149,94 +167,72 @@ class _DeliveryStoryGridState extends State<DeliveryStoryGrid> {
                       cacheManager: perfDiagnosticCacheManager,
                     ),
                   ),
-                  // Soft top shade so the white offer text stays readable.
-                  if (badge != null)
-                    const Positioned(
+                  // Offer strip, top-left over the photo (Zomato style).
+                  if (offer != null)
+                    Positioned(
                       left: 0,
-                      right: 0,
                       top: 0,
-                      height: 48,
-                      child: DecoratedBox(
+                      right: 14,
+                      child: Container(
+                        padding: const EdgeInsets.fromLTRB(6, 4, 6, 4),
                         decoration: BoxDecoration(
-                          gradient: LinearGradient(
-                            begin: Alignment.topCenter,
-                            end: Alignment.bottomCenter,
-                            colors: [Color(0x99000000), Colors.transparent],
+                          color: Colors.black.withValues(alpha: 0.72),
+                          borderRadius: const BorderRadius.only(
+                            bottomRight: Radius.circular(8),
                           ),
                         ),
-                      ),
-                    ),
-                  if (badge != null)
-                    Positioned(
-                      left: 6,
-                      top: 6,
-                      right: 6,
-                      child: Text(
-                        badge.toUpperCase(),
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 10,
-                          height: 1.2,
-                          fontFamily: AppThemeData.bold,
+                        child: Text(
+                          offer.toUpperCase(),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 9.5,
+                            height: 1.2,
+                            fontFamily: AppThemeData.bold,
+                          ),
                         ),
                       ),
                     ),
                   if (!open)
-                    Positioned(
-                      left: 6,
-                      right: 6,
-                      bottom: 30,
-                      child: Center(
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: Colors.black.withValues(alpha: 0.65),
-                            borderRadius: BorderRadius.circular(4),
-                          ),
-                          child: Text('Closed now'.tr(),
-                              style: const TextStyle(color: Colors.white, fontSize: 9.5, fontFamily: AppThemeData.semiBold)),
+                    Center(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: 0.65),
+                          borderRadius: BorderRadius.circular(4),
                         ),
+                        child: Text('Closed now'.tr(),
+                            style: const TextStyle(
+                                color: Colors.white, fontSize: 9.5, fontFamily: AppThemeData.semiBold)),
                       ),
                     ),
-                  if (rating > 0)
-                    Positioned(
-                      left: 6,
-                      bottom: 6,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF1E7B34),
-                          borderRadius: BorderRadius.circular(5),
-                          border: Border.all(color: Colors.white, width: 1),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
+                  // Rating badge, bottom-left (Zomato style). A restaurant
+                  // with no reviews yet shows "NEW" instead of a fake 0.0.
+                  Positioned(
+                    left: 5,
+                    bottom: 5,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: rating > 0 ? _ratingColor(rating) : Colors.black.withValues(alpha: 0.72),
+                        borderRadius: BorderRadius.circular(5),
+                        border: Border.all(color: Colors.white, width: 1),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (rating > 0) ...[
                             const Icon(Icons.star_rounded, color: Colors.white, size: 11),
                             const SizedBox(width: 2),
-                            Text(rating.toStringAsFixed(1),
-                                style: const TextStyle(color: Colors.white, fontSize: 10.5, fontFamily: AppThemeData.bold)),
                           ],
-                        ),
+                          Text(rating > 0 ? rating.toStringAsFixed(1) : 'NEW'.tr(),
+                              style: const TextStyle(
+                                  color: Colors.white, fontSize: 10.5, fontFamily: AppThemeData.bold)),
+                        ],
                       ),
                     ),
-                  // Unseen story: small dot like a notification.
-                  if (!viewed)
-                    Positioned(
-                      right: 6,
-                      bottom: 6,
-                      child: Container(
-                        width: 9,
-                        height: 9,
-                        decoration: BoxDecoration(
-                          color: AppThemeData.primary500,
-                          shape: BoxShape.circle,
-                          border: Border.all(color: Colors.white, width: 1.5),
-                        ),
-                      ),
-                    ),
+                  ),
                 ],
               ),
             ),

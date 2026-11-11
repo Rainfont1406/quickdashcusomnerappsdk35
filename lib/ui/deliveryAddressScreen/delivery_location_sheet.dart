@@ -618,11 +618,15 @@ class _CompleteAddressSheetState extends State<_CompleteAddressSheet> {
                   style: TextStyle(fontSize: 13, fontFamily: AppThemeData.semiBold, color: c.sub)),
               const SizedBox(height: 10),
               Wrap(
-                spacing: 10,
-                runSpacing: 10,
+                spacing: 6,
+                runSpacing: 8,
                 children: [
                   for (final l in _labels)
                     ChoiceChip(
+                      visualDensity: VisualDensity.compact,
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      labelPadding: const EdgeInsets.only(left: 2, right: 4),
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
                       selected: _label == l,
                       onSelected: (_) => setState(() => _label = l),
                       showCheckmark: false,
