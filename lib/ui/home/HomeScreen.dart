@@ -3659,6 +3659,9 @@ class _AllStoreState extends State<AllStore> {
                                     ),
                                   ),
                                   const Spacer(),
+                                  // 2026-11-11: no "★ 0" badge for a
+                                  // restaurant nobody has rated yet.
+                                  if (vendorModel.reviewsCount > 0)
                                   Container(
                                     padding: const EdgeInsets.symmetric(
                                         horizontal: 9, vertical: 4),
@@ -3924,6 +3927,8 @@ class NewArrival extends StatelessWidget {
                           const SizedBox(height: 6),
                           Row(
                             children: [
+                              // 2026-11-11: no "★ 0 (0)" for unrated.
+                              if (vendorModel.reviewsCount > 0)
                               Container(
                                 padding: const EdgeInsets.symmetric(
                                     horizontal: 6, vertical: 3),
@@ -4873,6 +4878,7 @@ class _RecommendForYouViewState
                         ),
                       ),
                     ),
+                  if (vendorModel.reviewsCount > 0) // 2026-11-11: hide ★ 0.0
                   Positioned(
                     right: 7,
                     bottom: 7,

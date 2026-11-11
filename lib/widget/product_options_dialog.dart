@@ -474,6 +474,9 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
         disPrice != "0" &&
         double.tryParse(disPrice) != null &&
         double.parse(disPrice) > 0;
+    // 2026-11-11: a discount price equal to (or above) the normal price is
+    // no saving - show only the charged price, no struck price, no "0% OFF".
+    final showSaving = hasDiscount && _discountPercent(product) != '0';
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -538,7 +541,7 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
                       ),
                     ),
                   ),
-                  if (hasDiscount) ...[
+                  if (showSaving) ...[
                     const SizedBox(width: 6),
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
@@ -600,7 +603,7 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
                       fontSize: 18, fontWeight: FontWeight.bold, color: AppThemeData.primary500,
                     ),
                   ),
-                  if (hasDiscount) ...[
+                  if (showSaving) ...[
                     const SizedBox(width: 8),
                     Padding(
                       padding: const EdgeInsets.only(bottom: 2),
@@ -639,7 +642,8 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
     final price = double.tryParse(product.price) ?? 0;
     final disPrice = double.tryParse(product.disPrice ?? '0') ?? 0;
     if (price <= 0 || disPrice <= 0 || disPrice >= price) return '0';
-    return (((price - disPrice) / price) * 100).round().toString();
+    final pct = (((price - disPrice) / price) * 100).round();
+    return pct < 1 ? '0' : pct.toString();
   }
 
   // Lets a user forward this item to someone else "for reference" - just the

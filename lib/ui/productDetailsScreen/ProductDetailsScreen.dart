@@ -734,7 +734,11 @@ memCacheWidth: imagePixelWidth(context, MediaQuery.of(context).size.width),
                                         ),
                                         if (widget.productModel.disPrice != null &&
                                             widget.productModel.disPrice != "" &&
-                                            widget.productModel.disPrice != "0") ...[
+                                            widget.productModel.disPrice != "0" &&
+                                            // 2026-11-11: no struck price when the
+                                            // "discount" saves nothing.
+                                            (double.tryParse(widget.productModel.disPrice!) ?? 0) <
+                                                (double.tryParse(widget.productModel.price) ?? 0)) ...[
                                           const SizedBox(width: 8),
                                           Text(
                                             amountShow(amount: productCommissionPrice(widget.productModel.price)),
