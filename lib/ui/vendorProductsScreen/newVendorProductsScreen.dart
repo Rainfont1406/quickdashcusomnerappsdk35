@@ -3444,8 +3444,16 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                   Theme.of(context).copyWith(dividerColor: Colors.transparent),
               child: ExpansionTile(
                 key: _categoryTileKey(categoryId),
-                onExpansionChanged: (_) =>
-                    _manuallyToggledCategoryIds.add(categoryId),
+                // 2026-11-11: also record the new open/closed state. The
+                // product list below is gated on _isCategoryExpanded, so a
+                // tap that only marked the category "manual" left a
+                // window-collapsed category open-looking but EMPTY (seen on
+                // production Avaya: Noodles / Fried Rice showed no items).
+                onExpansionChanged: (expanded) {
+                  _manuallyToggledCategoryIds.add(categoryId);
+                  setState(() =>
+                      _categoryExpandedAtGeneration[categoryId] = expanded);
+                },
                 childrenPadding: EdgeInsets.zero,
                 tilePadding:
                     const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
