@@ -30,7 +30,7 @@ import 'package:emartconsumer/services/helper.dart';
 import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:emartconsumer/services/delivery_location_helper.dart';
-import 'package:emartconsumer/ui/deliveryAddressScreen/DeliveryAddressScreen.dart';
+import 'package:emartconsumer/ui/deliveryAddressScreen/delivery_location_sheet.dart';
 import 'package:emartconsumer/widget/coming_soon_view.dart';
 import 'package:emartconsumer/widget/delivery_type_selector.dart';
 import 'package:emartconsumer/widget/place_picker_osm.dart';
@@ -132,12 +132,25 @@ class _CartScreenState extends State<CartScreen> {
   Timestamp? scheduleTime;
   bool specialDiscountEnable = false;
   bool _isBillExpanded = false;
-  AddressModel addressModel = AddressModel();
+  // Two addresses (2026-11-11): Dineaway keeps using the app's current area
+  // (MyAppState.selectedPosotion, unchanged behaviour), Delivery has its own
+  // full address (house/flat, landmark, Home/Work). Picking a delivery
+  // address never moves the Home/Dining location. `addressModel` returns
+  // whichever one the selected order type uses.
+  AddressModel _areaAddress = AddressModel();
+  AddressModel _deliveryAddress = AddressModel();
+  bool get _isDeliveryType => selctedOrderTypeValue == 'Delivery';
+  AddressModel get addressModel => _isDeliveryType ? _deliveryAddress : _areaAddress;
+  set addressModel(AddressModel a) {
+    if (_isDeliveryType) {
+      _deliveryAddress = a;
+    } else {
+      _areaAddress = a;
+    }
+  }
 
-  // Delivery house/flat + landmark — inline fields in the address card,
-  // mutated directly into addressModel as the user types.
-  final TextEditingController _houseCtrl = TextEditingController();
-  final TextEditingController _landmarkCtrl = TextEditingController();
+  // Highlights the address card when Place Order is tapped without a
+  // complete delivery address.
   bool _houseFieldError = false;
   // Road distance restaurant -> delivery pin, shown under the address
   // (null until computed / not a delivery order).
@@ -292,9 +305,8 @@ class _CartScreenState extends State<CartScreen> {
     // individual read-log lines can get silently dropped by logcat, so this
     // survives as one summary line with exact per-fetch doc counts.
     scheduleFirestoreReadDump('CartScreen', isStillActive: () => mounted);
-    addressModel = MyAppState.selectedPosotion;
-    _houseCtrl.text = addressModel.address ?? '';
-    _landmarkCtrl.text = addressModel.landmark ?? '';
+    _areaAddress = MyAppState.selectedPosotion;
+    _deliveryAddress = initialDeliveryAddress();
     _reOrderPending = widget.reOrderModel != null;
     _billPayPending = _isBillPayMode;
 
@@ -337,8 +349,6 @@ class _CartScreenState extends State<CartScreen> {
   void dispose() {
     _notificationOverlay?.remove();
     _notificationOverlay = null;
-    _houseCtrl.dispose();
-    _landmarkCtrl.dispose();
     super.dispose();
   }
 
@@ -1947,13 +1957,12 @@ class _CartScreenState extends State<CartScreen> {
                       }
                       if (selctedOrderTypeValue == "Delivery" && !_deliveryAddressComplete) {
                         setState(() => _houseFieldError = true);
-                        _showTopNotification(
-                          message: !_hasDeliveryPin
-                              ? "Please pick your delivery location.".tr()
-                              : "Please enter your house / flat details.".tr(),
-                          color: AppThemeData.error500,
-                          icon: Icons.warning_amber_rounded,
-                        );
+                        // Open the sheet that fixes it instead of only warning.
+                        if (!_hasDeliveryPin) {
+                          _changeDeliveryAddress();
+                        } else {
+                          _completeDeliveryAddress();
+                        }
                         return;
                       }
                       if (couponId.isEmpty) txt.text = "";
@@ -2228,228 +2237,207 @@ class _CartScreenState extends State<CartScreen> {
     );
   }
 
-  // Delivery location section — locality picker + inline house/flat + landmark
+  // ── Delivery address (Zomato-style, 2026-11-11) ──────────────────────────
+  // Compact card; Change opens the "Select delivery location" sheet, a
+  // missing house/flat number opens the "Complete your address" sheet.
+  // Delivery only - Dining/Takeaway use _dineawayLocationSection().
+  void _applyDeliveryAddress(AddressModel result) {
+    result.address = (result.address ?? '').trim();
+    result.landmark = (result.landmark ?? '').trim();
+    clearRoadDistanceCache();
+    // Delivery only: the Home/Dining area (MyAppState.selectedPosotion) is
+    // deliberately left alone.
+    rememberDeliveryAddress(result);
+    setState(() {
+      _deliveryAddress = result;
+      _deliveryKm = null;
+      _houseFieldError = false;
+    });
+    if (!isRealLocation(result.location)) {
+      _showTopNotification(
+        message: "This saved address has no map pin. Please pick it again on the map.".tr(),
+        color: AppThemeData.error500,
+        icon: Icons.warning_amber_rounded,
+      );
+    }
+    getDeliveyData();
+  }
+
+  Future<void> _changeDeliveryAddress() async {
+    final result = await showDeliveryLocationSheet(context,
+        vendor: vendorModel, current: addressModel);
+    if (result != null && mounted) _applyDeliveryAddress(result);
+  }
+
+  Future<void> _completeDeliveryAddress() async {
+    if (!_hasDeliveryPin) return _changeDeliveryAddress();
+    final result =
+        await showCompleteAddressSheet(context, addressModel, vendor: vendorModel);
+    if (result != null && mounted) _applyDeliveryAddress(result);
+  }
+
   Widget _modernAddressSection() {
     final dark = isDarkMode(context);
-    final hasArea = addressModel.locality != null &&
-        addressModel.locality!.isNotEmpty;
-    final areaText = hasArea
-        ? addressModel.locality!
-        : 'Tap to pick your location'.tr();
+    final textMain = dark ? AppThemeData.darkTextPrimary : AppThemeData.neutral900;
+    final textSub = dark ? AppThemeData.darkTextSecondary : AppThemeData.neutral600;
 
-    Future<void> pickAddress() async {
-      final result = await Navigator.of(context).push<AddressModel>(
-        MaterialPageRoute(builder: (_) => const DeliveryAddressScreen()),
+    if (!_hasDeliveryPin) {
+      return _sectionCard(
+        child: InkWell(
+          borderRadius: BorderRadius.circular(20),
+          onTap: _changeDeliveryAddress,
+          child: Container(
+            padding: const EdgeInsets.all(16),
+            decoration: _houseFieldError
+                ? BoxDecoration(
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: AppThemeData.error500, width: 1.2))
+                : null,
+            child: Row(
+              children: [
+                _iconBadge(Icons.add_location_alt_rounded),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Where should we deliver?'.tr(),
+                          style: AppTypography.labelLarge.copyWith(
+                              fontWeight: FontWeight.w700, color: textMain)),
+                      const SizedBox(height: 2),
+                      Text('Add your delivery location'.tr(),
+                          style: AppTypography.bodySmall.copyWith(color: textSub)),
+                    ],
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: AppThemeData.primary500,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Text('Add'.tr(),
+                      style: AppTypography.labelSmall.copyWith(
+                          fontWeight: FontWeight.bold, color: Colors.white)),
+                ),
+              ],
+            ),
+          ),
+        ),
       );
-      if (result != null && mounted) {
-        // A new location means the old house/flat + landmark no longer
-        // apply. A saved address that already carries them keeps them
-        // (2026-11-10) so the customer doesn't retype them every order.
-        result.address = (result.address ?? '').trim();
-        result.landmark = (result.landmark ?? '').trim();
-        _houseCtrl.text = result.address!;
-        _landmarkCtrl.text = result.landmark!;
-        clearRoadDistanceCache();
-        setState(() {
-          addressModel = result;
-          MyAppState.selectedPosotion = result;
-          _deliveryKm = null;
-          _houseFieldError = false;
-        });
-        if (!isRealLocation(result.location)) {
-          _showTopNotification(
-            message: "This saved address has no map pin. Please pick it again on the map.".tr(),
-            color: AppThemeData.error500,
-            icon: Icons.warning_amber_rounded,
-          );
-        }
-        getDeliveyData();
-      }
     }
+
+    final house = (addressModel.address ?? '').trim();
+    final label = (addressModel.addressAs ?? '').trim();
+    final title = label.isNotEmpty && label != 'Other'
+        ? '${'Delivery at'.tr()} ${label.tr()}'
+        : '${'Delivery at'.tr()} ${shortPlaceName(addressModel.locality)}';
+    final line = [if (house.isNotEmpty) house, (addressModel.locality ?? '').trim()]
+        .where((s) => s.isNotEmpty)
+        .join(', ');
+    final warnColor = _houseFieldError ? AppThemeData.error500 : kAddressWarning;
 
     return _sectionCard(
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          ListTile(
-            contentPadding:
-                const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-            onTap: pickAddress,
-            leading: _iconBadge(Icons.location_on_rounded),
-            title: Text(
-              (hasArea ? 'Delivering to' : 'Select Location').tr(),
-              style: AppTypography.labelLarge.copyWith(
-                fontWeight: FontWeight.w700,
-                letterSpacing: -0.1,
-                color: dark
-                    ? AppThemeData.darkTextPrimary
-                    : AppThemeData.neutral900,
-              ),
-            ),
-            subtitle: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  areaText,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: AppTypography.bodySmall.copyWith(
-                    color: dark
-                        ? AppThemeData.darkTextSecondary
-                        : AppThemeData.neutral600,
+          InkWell(
+            borderRadius: BorderRadius.circular(20),
+            onTap: _changeDeliveryAddress,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 12, 14),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _iconBadge(deliveryLabelIcon(label)),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: AppTypography.labelLarge.copyWith(
+                                fontWeight: FontWeight.w700, color: textMain)),
+                        const SizedBox(height: 2),
+                        Text(line,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: AppTypography.bodySmall.copyWith(color: textSub)),
+                        if (_deliveryKm != null) ...[
+                          const SizedBox(height: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                            decoration: BoxDecoration(
+                              color: AppThemeData.primary500.withValues(alpha: 0.10),
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(Icons.route_rounded,
+                                    size: 12, color: AppThemeData.primary500),
+                                const SizedBox(width: 4),
+                                Text(
+                                  '${_deliveryKm!.toStringAsFixed(1)} km ${'from the restaurant'.tr()}',
+                                  style: AppTypography.caption.copyWith(
+                                    color: AppThemeData.primary500,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
                   ),
-                ),
-                if (hasArea && _deliveryKm != null) ...[
-                  const SizedBox(height: 3),
-                  Row(
-                    children: [
-                      Icon(Icons.route_rounded, size: 13, color: AppThemeData.primary500),
-                      const SizedBox(width: 4),
-                      Text(
-                        '${_deliveryKm!.toStringAsFixed(1)} km ${'from the restaurant'.tr()}',
-                        style: AppTypography.caption.copyWith(
-                          color: AppThemeData.primary500,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ],
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text('Change'.tr(),
+                            style: AppTypography.labelSmall.copyWith(
+                                fontWeight: FontWeight.bold,
+                                color: AppThemeData.primary500)),
+                        const Icon(Icons.chevron_right_rounded,
+                            size: 18, color: AppThemeData.primary500),
+                      ],
+                    ),
                   ),
                 ],
-              ],
-            ),
-            trailing: GestureDetector(
-              onTap: pickAddress,
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  color: AppThemeData.primary500.withValues(alpha: 0.10),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Text(
-                  hasArea ? 'Change'.tr() : 'Pick'.tr(),
-                  style: AppTypography.labelSmall.copyWith(
-                    fontWeight: FontWeight.bold,
-                    color: AppThemeData.primary500,
-                  ),
-                ),
               ),
             ),
           ),
-          if (hasArea) ...[
-            const SizedBox(height: 4),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
-              child: TextField(
-                controller: _houseCtrl,
-                textCapitalization: TextCapitalization.words,
-                maxLength: 250,
-                buildCounter: (context, {required currentLength, required isFocused, maxLength}) => null,
-                style: TextStyle(
-                  color: dark ? AppThemeData.darkTextPrimary : AppThemeData.neutral900,
-                  fontSize: 14,
+          if (house.isEmpty)
+            InkWell(
+              onTap: _completeDeliveryAddress,
+              borderRadius: const BorderRadius.vertical(bottom: Radius.circular(20)),
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
+                decoration: BoxDecoration(
+                  color: warnColor.withValues(alpha: 0.10),
+                  borderRadius:
+                      const BorderRadius.vertical(bottom: Radius.circular(20)),
                 ),
-                onChanged: (value) {
-                  addressModel.address = value.trim();
-                  if (_houseFieldError && value.trim().isNotEmpty) {
-                    setState(() => _houseFieldError = false);
-                  }
-                },
-                decoration: InputDecoration(
-                  hintText: 'House / Flat / Floor / Building (required)'.tr(),
-                  hintStyle: TextStyle(
-                    color: dark ? AppThemeData.darkTextTertiary : AppThemeData.neutral400,
-                    fontSize: 13,
-                  ),
-                  prefixIcon: Icon(Icons.home_work_rounded, size: 18, color: AppThemeData.primary500),
-                  filled: true,
-                  fillColor: dark ? AppThemeData.darkBgTertiary : AppThemeData.neutral50,
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide(
-                      color: _houseFieldError
-                          ? AppThemeData.error500
-                          : (dark ? AppThemeData.darkBorderSecondary : AppThemeData.neutral200),
-                    ),
-                  ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide(
-                      color: _houseFieldError
-                          ? AppThemeData.error500
-                          : (dark ? AppThemeData.darkBorderSecondary : AppThemeData.neutral200),
-                    ),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide(
-                      color: _houseFieldError ? AppThemeData.error500 : AppThemeData.primary500,
-                      width: 1.5,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-              child: TextField(
-                controller: _landmarkCtrl,
-                textCapitalization: TextCapitalization.words,
-                maxLength: 250,
-                buildCounter: (context, {required currentLength, required isFocused, maxLength}) => null,
-                style: TextStyle(
-                  color: dark ? AppThemeData.darkTextPrimary : AppThemeData.neutral900,
-                  fontSize: 14,
-                ),
-                onChanged: (value) => addressModel.landmark = value.trim(),
-                decoration: InputDecoration(
-                  hintText: 'Landmark (optional)'.tr(),
-                  hintStyle: TextStyle(
-                    color: dark ? AppThemeData.darkTextTertiary : AppThemeData.neutral400,
-                    fontSize: 13,
-                  ),
-                  prefixIcon: Icon(Icons.place_rounded, size: 18, color: AppThemeData.neutral400),
-                  filled: true,
-                  fillColor: dark ? AppThemeData.darkBgTertiary : AppThemeData.neutral50,
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide(color: dark ? AppThemeData.darkBorderSecondary : AppThemeData.neutral200),
-                  ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide(color: dark ? AppThemeData.darkBorderSecondary : AppThemeData.neutral200),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide(color: AppThemeData.primary500, width: 1.5),
-                  ),
-                ),
-              ),
-            ),
-          ] else
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-              child: Row(
-                children: [
-                  Icon(Icons.info_outline_rounded,
-                      size: 13,
-                      color: dark
-                          ? AppThemeData.darkTextTertiary
-                          : AppThemeData.neutral400),
-                  const SizedBox(width: 6),
-                  Expanded(
-                    child: Text(
-                      'Pick your location first to enter house / flat details'.tr(),
-                      style: AppTypography.caption.copyWith(
-                        color: dark
-                            ? AppThemeData.darkTextTertiary
-                            : AppThemeData.neutral400,
+                child: Row(
+                  children: [
+                    Icon(Icons.edit_location_alt_rounded, size: 16, color: warnColor),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Add house / flat no. so the rider can find you'.tr(),
+                        style: AppTypography.caption.copyWith(
+                          fontWeight: FontWeight.w600,
+                          color: warnColor,
+                        ),
                       ),
                     ),
-                  ),
-                ],
+                    Icon(Icons.chevron_right_rounded, size: 18, color: warnColor),
+                  ],
+                ),
               ),
             ),
         ],

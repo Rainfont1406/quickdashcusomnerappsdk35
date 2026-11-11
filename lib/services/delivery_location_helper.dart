@@ -132,7 +132,12 @@ Future<AddressModel?> pickLocationOnMap(BuildContext context, {UserLocation? sta
       : (isRealLocation(MyAppState.selectedPosotion.location) ? MyAppState.selectedPosotion.location : null);
 
   if (selectedMapType == 'osm') {
-    final value = await Navigator.of(context).push(MaterialPageRoute(builder: (_) => LocationPicker()));
+    final value = await Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => LocationPicker(
+              initialLat: from?.latitude,
+              initialLng: from?.longitude,
+              deliveryMode: true,
+            )));
     if (value == null) return null;
     final double lat = value.lat, lng = value.lon;
     return _newAddress(lat, lng, value.displayName.toString());

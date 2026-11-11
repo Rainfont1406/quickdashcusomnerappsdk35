@@ -17,7 +17,16 @@ import 'package:provider/provider.dart';
 import 'package:emartconsumer/utils/DarkThemeProvider.dart';
 
 class LocationPicker extends StatefulWidget {
-  const LocationPicker({super.key});
+  /// Optional start point (2026-11-11). When given, the map opens there and
+  /// does not jump to GPS by itself (the locate button still does).
+  final double? initialLat;
+  final double? initialLng;
+
+  /// Delivery address picking: shows "Order will be delivered here" over the
+  /// pin. Home / location-permission callers leave it off (unchanged).
+  final bool deliveryMode;
+
+  const LocationPicker({super.key, this.initialLat, this.initialLng, this.deliveryMode = false});
 
   @override
   State<LocationPicker> createState() => _LocationPickerState();
@@ -78,11 +87,16 @@ class _LocationPickerState extends State<LocationPicker> {
   Timer? _searchDebounce;
   int _searchRequestId = 0;
 
+  GeoPoint? get _initialPoint =>
+      widget.initialLat != null && widget.initialLng != null
+          ? GeoPoint(latitude: widget.initialLat!, longitude: widget.initialLng!)
+          : null;
+
   @override
   void initState() {
     super.initState();
     mapController = MapController(
-      initPosition: GeoPoint(latitude: 26.8467, longitude: 80.9462),
+      initPosition: _initialPoint ?? GeoPoint(latitude: 26.8467, longitude: 80.9462),
     );
     searchController.addListener(_onSearchChanged);
   }
@@ -578,7 +592,15 @@ class _LocationPickerState extends State<LocationPicker> {
             onMapIsReady: (active) async {
               if (active) {
                 setState(() => isMapReady = true);
-                _setUserLocation();
+                final start = _initialPoint;
+                if (start != null) {
+                  // Re-editing a pin: stay on it instead of jumping to GPS.
+                  selectedLocation = start;
+                  setState(() => _userPickedLocation = true);
+                  _fetchAddressForLocation(start);
+                } else {
+                  _setUserLocation();
+                }
                 _startMapCenterTracking();
               }
             },
@@ -594,6 +616,40 @@ class _LocationPickerState extends State<LocationPicker> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  if (widget.deliveryMode) ...[
+                    Container(
+                      height: 52,
+                      padding: const EdgeInsets.symmetric(horizontal: 14),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1F1F2B),
+                        borderRadius: BorderRadius.circular(10),
+                        boxShadow: [
+                          BoxShadow(
+                              color: Colors.black.withValues(alpha: 0.25),
+                              blurRadius: 8,
+                              offset: const Offset(0, 3)),
+                        ],
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text('Order will be delivered here'.tr(),
+                              style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 13,
+                                  fontFamily: AppThemeData.semiBold)),
+                          const SizedBox(height: 2),
+                          Text('Move the map to set your exact spot'.tr(),
+                              style: TextStyle(
+                                  color: Colors.white.withValues(alpha: 0.75),
+                                  fontSize: 11,
+                                  fontFamily: AppThemeData.regular)),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                  ],
                   Container(
                     width: 44,
                     height: 44,
@@ -627,6 +683,9 @@ class _LocationPickerState extends State<LocationPicker> {
                     ),
                   ),
                   const SizedBox(height: 20),
+                  // Same height as the tooltip above, so the pin tip stays
+                  // exactly on the map centre that gets picked.
+                  if (widget.deliveryMode) const SizedBox(height: 60),
                 ],
               ),
             ),
@@ -963,7 +1022,7 @@ class _LocationPickerState extends State<LocationPicker> {
                               Row(
                                 children: [
                                   Text(
-                                    'Selected Location'.tr(),
+                                    (widget.deliveryMode ? 'DELIVERING TO' : 'Selected Location').tr(),
                                     style: TextStyle(
                                       fontSize: 12,
                                       fontFamily: AppThemeData.semiBold,
