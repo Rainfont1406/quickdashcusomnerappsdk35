@@ -2366,19 +2366,17 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
           child: Stack(
             fit: StackFit.expand,
             children: [
-              p.photo.isNotEmpty
-                  ? NetworkImageWidget(
-                      imageUrl: getImageVAlidUrl(p.photo),
-                      fit: BoxFit.cover,
-                      width: double.infinity,
-                      height: double.infinity,
-                    )
-                  : Container(
-                      color:
-                          isDark ? AppThemeData.grey800 : AppThemeData.grey100,
-                      child: Icon(Icons.restaurant_menu,
-                          color: AppThemeData.grey400, size: 28),
-                    ),
+              if (!_hasDishPhoto(p.photo))
+                // 2026-11-11 (owner): no photo -> dish name on a soft tint
+                // instead of a grey placeholder icon (and no dark overlay).
+                _noPhotoNamePanel(p, isDark: isDark)
+              else ...[
+              NetworkImageWidget(
+                imageUrl: getImageVAlidUrl(p.photo),
+                fit: BoxFit.cover,
+                width: double.infinity,
+                height: double.infinity,
+              ),
               Positioned(
                 left: 0,
                 right: 0,
@@ -2415,8 +2413,37 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                   ),
                 ),
               ),
+              ],
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  /// Stand-in for a dish photo when the item has none (2026-11-11): the
+  /// dish name in bold on a soft brand tint, with the veg/non-veg dot - real
+  /// information, not a fake image. Used where the layout needs a box of a
+  /// fixed size (recommendation rows, dish grid).
+  Widget _noPhotoNamePanel(ProductModel p, {double? height, required bool isDark}) {
+    return Container(
+      height: height,
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(10, 30, 10, 12),
+      color: isDark
+          ? AppThemeData.primary500.withValues(alpha: 0.18)
+          : AppThemeData.primary500.withValues(alpha: 0.07),
+      alignment: Alignment.bottomLeft,
+      child: Text(
+        p.name,
+        maxLines: 3,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontSize: 15,
+          height: 1.2,
+          fontWeight: FontWeight.w700,
+          fontFamily: AppThemeData.semiBold,
+          color: isDark ? Colors.white : AppThemeData.grey900,
         ),
       ),
     );
@@ -4892,12 +4919,18 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                   // VisibilityDetector-gated widget the main menu list
                   // already uses (see _LazyDishImage's doc comment) so only
                   // photos actually scrolled into view fire a request.
-                  child: _LazyDishImage(
-                    cacheKey: 'reco_${productModel.id}',
-                    imageUrl: getImageVAlidUrl(productModel.photo),
-                    height: 109,
-                    width: double.infinity,
-                  ),
+                  child: _hasDishPhoto(productModel.photo)
+                      ? _LazyDishImage(
+                          cacheKey: 'reco_${productModel.id}',
+                          imageUrl: getImageVAlidUrl(productModel.photo),
+                          height: 109,
+                          width: double.infinity,
+                        )
+                      // 2026-11-11 (owner): no photo -> no placeholder
+                      // image. The card keeps its size (it sits in a
+                      // fixed-height row) but shows the dish NAME on a soft
+                      // tint instead; the name isn't repeated below.
+                      : _noPhotoNamePanel(productModel, height: 109, isDark: isDark),
                 ),
                 Positioned(
                   left: 9,
@@ -4989,17 +5022,20 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  productModel.name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                    color: isDark ? Colors.white : AppThemeData.grey900,
+                // Name already shown on the panel when there's no photo.
+                if (_hasDishPhoto(productModel.photo)) ...[
+                  Text(
+                    productModel.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: isDark ? Colors.white : AppThemeData.grey900,
+                    ),
                   ),
-                ),
-                const SizedBox(height: 4),
+                  const SizedBox(height: 4),
+                ],
                 (disPrice == "" || disPrice == "0")
                     ? Text(
                         amountShow(amount: price),

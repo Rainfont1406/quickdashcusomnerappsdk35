@@ -69,7 +69,34 @@ class CartScreen extends StatefulWidget {
   _CartScreenState createState() => _CartScreenState();
 }
 
-class _CartScreenState extends State<CartScreen> {
+class _CartScreenState extends State<CartScreen> with WidgetsBindingObserver {
+  // 2026-11-11 (owner): cart left open, phone locked at the office, app
+  // reopened at home - the picked delivery address may be wrong now, so it
+  // is cleared after this long in the background and must be picked again.
+  static const Duration _deliveryAddressStaleAfter = Duration(minutes: 5);
+  DateTime? _pausedAt;
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused) {
+      _pausedAt = DateTime.now();
+    } else if (state == AppLifecycleState.resumed) {
+      final pausedAt = _pausedAt;
+      _pausedAt = null;
+      if (pausedAt != null &&
+          DateTime.now().difference(pausedAt) >= _deliveryAddressStaleAfter &&
+          _isDeliveryType &&
+          _hasDeliveryPin &&
+          mounted) {
+        setState(() {
+          _deliveryAddress = AddressModel();
+          _deliveryKm = null;
+          deliveryCharges = '0.0';
+        });
+      }
+    }
+  }
+
   late Future<List<CartProduct>> cartFuture;
   late List<CartProduct> cartProducts = [];
   TextEditingController noteController = TextEditingController(text: '');
@@ -299,6 +326,7 @@ class _CartScreenState extends State<CartScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     final initSw = Stopwatch()..start();
     debugPrint('[CART-PERF] CartScreen.initState START at ${DateTime.now().toIso8601String()}');
     // 2026-09-15: see HomeScreen.dart's identical call for why - a burst of
@@ -347,6 +375,7 @@ class _CartScreenState extends State<CartScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _notificationOverlay?.remove();
     _notificationOverlay = null;
     super.dispose();
@@ -2253,7 +2282,6 @@ class _CartScreenState extends State<CartScreen> {
     clearRoadDistanceCache();
     // Delivery only: the Home/Dining area (MyAppState.selectedPosotion) is
     // deliberately left alone.
-    rememberDeliveryAddress(result);
     setState(() {
       _deliveryAddress = result;
       _deliveryKm = null;

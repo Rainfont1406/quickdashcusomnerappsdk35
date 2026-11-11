@@ -16,7 +16,6 @@ import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/services/FirebaseHelper.dart';
 import 'package:emartconsumer/services/delivery_location_helper.dart';
 import 'package:emartconsumer/services/helper.dart';
-import 'package:emartconsumer/services/localDatabase.dart';
 import 'package:emartconsumer/services/show_toast_dialog.dart';
 import 'package:emartconsumer/theme/app_them_data.dart';
 import 'package:flutter/material.dart';
@@ -41,29 +40,13 @@ IconData deliveryLabelIcon(String? label) {
   }
 }
 
-// Delivery address the customer picked for the CURRENT cart. Kept apart from
-// MyAppState.selectedPosotion (the Home / Dining browsing area).
-AddressModel? _lastDeliveryAddress;
-int _lastDeliveryEpoch = -1;
-
-void rememberDeliveryAddress(AddressModel a) {
-  _lastDeliveryAddress = a;
-  _lastDeliveryEpoch = CartDatabase.cartEpoch;
-}
-
-/// 2026-11-11 (owner, Zomato-style): the Delivery cart never pre-fills a
-/// saved or default address. Customers order from offices, hotels and
-/// friends' places, so a silent default sends food to the wrong place
-/// (cancelled orders, wasted rides). The customer must pick the address for
-/// every order; the pick is kept only while the same cart is open (leaving
-/// the cart to add an item doesn't ask again) and is forgotten once the cart
-/// is emptied - i.e. after the order is placed.
-/// Returns an empty address (no pin) when nothing was picked for this cart.
-AddressModel initialDeliveryAddress() {
-  final last = _lastDeliveryAddress;
-  if (last != null && _lastDeliveryEpoch == CartDatabase.cartEpoch) return last;
-  return AddressModel();
-}
+/// 2026-11-11 (owner, Zomato-style): the Delivery cart never pre-fills an
+/// address - not a saved/default one and not the one picked last time.
+/// Customers add items at the office and open the cart later at home, or
+/// order from hotels and friends' places, so any remembered address can send
+/// food to the wrong place (cancelled orders, wasted rides). Every time the
+/// cart opens the address starts empty and must be picked again.
+AddressModel initialDeliveryAddress() => AddressModel();
 
 /// Straight-line km from the restaurant, or null when either point is unknown.
 double? kmFromVendor(VendorModel? vendor, AddressModel? a) {

@@ -76,6 +76,13 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
   // Only used when widget.showProductInfo is true.
   int _quantity = 1;
 
+  /// True when the product has a usable photo URL (not empty / "null").
+  /// Same rule as the menu card (newVendorProductsScreen._hasDishPhoto).
+  bool get _hasPhoto {
+    final u = widget.productModel.photo.toString().trim();
+    return u.isNotEmpty && u != 'null' && u.startsWith('http');
+  }
+
   // ── Validation error ──────────────────────────────────────────────────────
   String? _msError;
 
@@ -475,6 +482,8 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
         // than the previous edge-to-edge crop flush with the sheet's own
         // rounded top corners - explicit request. Rounded on all 4 corners
         // now that it no longer needs to match the sheet's top-only radius.
+        // 2026-11-11 (owner): no photo -> no placeholder box at all.
+        if (_hasPhoto)
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
           child: ClipRRect(
@@ -497,7 +506,9 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
           ),
         ),
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
+          // A bit more top room without a photo, so the floating close
+          // button above the sheet doesn't crowd the first row.
+          padding: EdgeInsets.fromLTRB(16, _hasPhoto ? 14 : 28, 16, 0),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -749,14 +760,17 @@ class _ProductOptionsDialogState extends State<ProductOptionsDialog> {
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(10),
-                    child: NetworkImageWidget(
-                      imageUrl: widget.productModel.photo.toString(),
-                      fit: BoxFit.cover, height: 60, width: 60,
+                  // No photo -> no empty grey thumbnail (2026-11-11).
+                  if (_hasPhoto) ...[
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(10),
+                      child: NetworkImageWidget(
+                        imageUrl: widget.productModel.photo.toString(),
+                        fit: BoxFit.cover, height: 60, width: 60,
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: 12),
+                    const SizedBox(width: 12),
+                  ],
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
