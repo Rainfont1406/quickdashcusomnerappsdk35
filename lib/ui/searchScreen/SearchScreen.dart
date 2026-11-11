@@ -1336,6 +1336,9 @@ class SearchScreenState extends State<SearchScreen> {
                     // Rating · reviews · distance
                     Row(
                       children: [
+                        // 2026-11-11: unrated restaurants show no
+                        // "★ 0 · 0 reviews", just the distance.
+                        if (v.reviewsCount > 0) ...[
                         const Icon(Icons.star_rounded,
                             color: Color(0xFFFBBC05), size: 13),
                         const SizedBox(width: 3),
@@ -1359,9 +1362,10 @@ class SearchScreenState extends State<SearchScreen> {
                                 : AppThemeData.grey400,
                           ),
                         ),
+                        ],
                         if (dist.isNotEmpty) ...[
                           Text(
-                            ' · $dist',
+                            v.reviewsCount > 0 ? ' · $dist' : dist,
                             style: TextStyle(
                               fontSize: 12,
                               fontFamily: AppThemeData.regular,

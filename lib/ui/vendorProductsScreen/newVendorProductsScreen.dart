@@ -3590,6 +3590,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
           ? "0"
           : productCommissionPrice(productModel.disPrice.toString());
     }
+    (price, disPrice) = _realDiscount(price, disPrice);
 
     final bool _pHasRestrictions = productModel.deliveryOption ||
         productModel.takeaway ||
@@ -4086,6 +4087,18 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
   }
 
   // Helper method to calculate discount percentage
+  /// 2026-11-11: a discount price that saves nothing (equal to or above the
+  /// normal price, or under 1%) used to show "0% OFF" plus the same price
+  /// struck through. Returns (price to show, "0" = no discount); the shown
+  /// price is still the one the cart charges (disPrice when it is set).
+  static (String, String) _realDiscount(String price, String disPrice) {
+    final p = double.tryParse(price) ?? 0;
+    final d = double.tryParse(disPrice) ?? 0;
+    if (d <= 0) return (price, disPrice);
+    if (p <= 0 || ((p - d) / p * 100).round() < 1) return (disPrice, "0");
+    return (price, disPrice);
+  }
+
   String calculateDiscount(String originalPrice, String discountedPrice) {
     double original = double.tryParse(originalPrice) ?? 0;
     double discounted = double.tryParse(discountedPrice) ?? 0;
@@ -4856,6 +4869,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
           ? "0"
           : productCommissionPrice(productModel.disPrice.toString());
     }
+    (price, disPrice) = _realDiscount(price, disPrice);
 
     // No card box (2026-07-18, was a white/grey800 rounded Container behind
     // the whole thing) - per explicit reference comparison, product entries

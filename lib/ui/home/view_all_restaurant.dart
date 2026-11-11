@@ -456,20 +456,20 @@ class _ViewAllRestaurantState extends State<ViewAllRestaurant>
                       const SizedBox(height: 4),
                       Row(
                         children: [
+                          // 2026-11-11: no "★ 0" for unrated restaurants.
+                          if (vendorModel.reviewsCount > 0) ...[
                           Icon(Icons.star_rounded,
                               size: 16, color: AppThemeData.primary500),
                           const SizedBox(width: 2),
                           Text(
-                            vendorModel.reviewsCount != 0
-                                ? (vendorModel.reviewsSum /
-                                        vendorModel.reviewsCount)
-                                    .toStringAsFixed(1)
-                                : '0',
+                            (vendorModel.reviewsSum / vendorModel.reviewsCount)
+                                .toStringAsFixed(1),
                             style: TextStyle(
                               fontSize: 13,
                               color: isDark ? Colors.white : Colors.black,
                             ),
                           ),
+                          ],
                           if (vendorModel.reviewsCount > 0) ...[
                             const SizedBox(width: 2),
                             Text(
