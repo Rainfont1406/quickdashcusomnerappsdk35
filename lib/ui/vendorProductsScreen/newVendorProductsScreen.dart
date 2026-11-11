@@ -3834,6 +3834,59 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                   ),
                 ),
                 const SizedBox(width: 12),
+                // ── RIGHT (no photo): ADD only ──
+                // 2026-11-11 (owner, Zomato-style): an item without a photo
+                // shows no empty/placeholder image box - just the ADD button
+                // (or stepper), with "customisable" under it when the item
+                // has options. All order types (Delivery, Dining, Takeaway).
+                if (!_hasDishPhoto(productModel.photo))
+                  SizedBox(
+                    width: 120,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (showAddButton &&
+                            (isOpen ||
+                                sectionConstantModel!.serviceTypeFlag ==
+                                    "ecommerce-service") &&
+                            (MyAppState.currentUser != null ||
+                                sectionConstantModel!.serviceTypeFlag ==
+                                    "ecommerce-service")) ...[
+                          AnimatedSwitcher(
+                            duration: const Duration(milliseconds: 200),
+                            transitionBuilder: (child, animation) =>
+                                ScaleTransition(scale: animation, child: child),
+                            child: cartProduct == null ||
+                                    cartProduct.quantity == 0
+                                ? _AnimatedAddButton(
+                                    key: ValueKey('add_${productModel.id}'),
+                                    hasOptions: hasVariants ||
+                                        hasAddOns ||
+                                        hasProductAttr,
+                                    onTap: () => _handleAddToCart(productModel),
+                                  )
+                                : _buildHorizontalQuantityPill(
+                                    context, cartProduct),
+                          ),
+                          if (hasVariants || hasAddOns || hasProductAttr)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 6),
+                              child: Text(
+                                'customisable'.tr(),
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: isDarkMode(context)
+                                      ? AppThemeData.grey400
+                                      : AppThemeData.grey500,
+                                  fontFamily: AppThemeData.regular,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ],
+                    ),
+                  )
+                else
                 // ── RIGHT: Image + ADD ─────────────────
                 SizedBox(
                   width: 150,
@@ -3997,6 +4050,12 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
         ],
       ),
     );
+  }
+
+  /// True when the product has a usable photo URL (not empty / "null").
+  static bool _hasDishPhoto(String? url) {
+    final u = (url ?? '').trim();
+    return u.isNotEmpty && u != 'null' && u.startsWith('http');
   }
 
   // Helper method to calculate discount percentage
