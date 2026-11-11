@@ -40,6 +40,7 @@ const _kBunnyCdnHost = 'cdn.quickdash.co.in';
 /// where a stale copy is still correct. Empty map when nothing is cached.
 Future<Map<String, ProductModel>> onDeviceProductsById({String? sectionId, String? vendorId}) async {
   final out = <String, ProductModel>{};
+  if (bunnyMirrorsDisabled) return out; // staging: no production copies
   void addAll(String? body, String listKey) {
     if (body == null) return;
     try {

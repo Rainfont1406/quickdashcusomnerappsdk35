@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show appFlavor;
 import 'package:http/http.dart' as http;
 
 import '../model/VendorCategoryModel.dart';
@@ -16,6 +17,15 @@ import 'config_refresh_gate.dart';
 // comment for why this is hardcoded rather than fetched from a config
 // endpoint.
 const _kBunnyCdnHost = 'cdn.quickdash.co.in';
+
+/// 2026-11-11: the CDN mirrors on cdn.quickdash.co.in are built from the
+/// PRODUCTION database (vendor list, statuses, coupons, categories,
+/// banners, products, local offers, legal). A staging build reading them
+/// showed production restaurants/coupons instead of staging's. In the
+/// staging flavor every mirror reader below reports "no mirror", so each
+/// caller uses its existing Firestore fallback against the staging project.
+/// Production builds are unchanged.
+bool get bunnyMirrorsDisabled => appFlavor == 'staging';
 
 /// Shared cached GET for every Bunny mirror (2026-09-15).
 ///
@@ -64,6 +74,8 @@ const _kBunnyCdnHost = 'cdn.quickdash.co.in';
 /// only billed - and for the product mirror that fallback is the whole-catalog
 /// query, up to 500 documents.
 Future<String?> cachedBunnyGet(String cacheKey, String url, Duration ttl) async {
+  if (bunnyMirrorsDisabled) return null; // staging: use Firestore
+
   // 2026-09-15: the two SUCCESS paths below (fresh cache hit, successful new
   // fetch) had zero debug output - only the failure/stale-fallback path
   // logged anything (see ConfigRefreshGate.readRawIgnoringTtl). That meant
@@ -144,6 +156,7 @@ Future<_BunnyGetResult> _conditionalBunnyGet(
 /// re-renders); null when unchanged (304), identical, nothing stored yet,
 /// just downloaded, or on any failure (the phone's copy stays in use).
 Future<String?> revalidateBunnyIfChanged(String cacheKey, String url) async {
+  if (bunnyMirrorsDisabled) return null; // staging: use Firestore
   try {
     final last = _bunnyDownloadedAt[cacheKey];
     if (last != null && DateTime.now().difference(last) < const Duration(seconds: 60)) {
@@ -308,6 +321,7 @@ Future<bool> vendorListLooksComplete(String sectionId,
 /// then checks Bunny in the background. Names/photos/hours only - open/closed
 /// is NOT in this file and keeps its own strict 5-minute check.
 Future<List<VendorModel>?> peekVendorListFromBunny(String sectionId) async {
+  if (bunnyMirrorsDisabled) return null; // staging: ignore old production copies
   try {
     final body = await ConfigRefreshGate.peekRaw('bunny_vendorList_$sectionId');
     return body == null ? null : _parseVendorList(body);
@@ -518,6 +532,7 @@ List<LocalOfferCategoryModel>? _parseLocalOfferCategories(String body) {
 /// this, an expired copy (or slow internet) kept the whole screen on a
 /// spinner for up to the 8-second fetch timeout.
 Future<List<LocalOfferCategoryModel>?> peekLocalOfferCategoriesFromBunny() async {
+  if (bunnyMirrorsDisabled) return null;
   try {
     final body = await ConfigRefreshGate.peekRaw(_kLocalOfferCategoriesKey);
     return body == null ? null : _parseLocalOfferCategories(body);
@@ -527,6 +542,7 @@ Future<List<LocalOfferCategoryModel>?> peekLocalOfferCategoriesFromBunny() async
 }
 
 Future<List<LocalOfferModel>?> peekLocalOffersFromBunny() async {
+  if (bunnyMirrorsDisabled) return null;
   try {
     final body = await ConfigRefreshGate.peekRaw(_kLocalOffersKey);
     return body == null ? null : _parseLocalOffers(body);
