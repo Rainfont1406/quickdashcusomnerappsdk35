@@ -15,6 +15,7 @@ import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/main.dart';
 import 'package:emartconsumer/services/behavior/behavior_event_types.dart';
+import 'package:emartconsumer/services/firestore_instrumentation.dart';
 import 'package:firebase_auth/firebase_auth.dart' as auth;
 import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/model/story_model.dart';
@@ -76,12 +77,11 @@ class _DeliveryStoryGridState extends State<DeliveryStoryGrid> {
     push(context, NewVendorProductsScreen(vendorModel: v));
   }
 
-  /// 2026-11-11 (owner): in Delivery a story "view" = a click. EVERY tap on
-  /// the card that opens the restaurant adds +1 to story.viewCount - unlike
-  /// Dineaway (StoryView.recordView), which counts one unique viewer per day.
-  /// Each click is also logged as its own story_views doc (auto id,
-  /// source: deliveryGridTap) so clicks can be counted per customer later.
-  /// The purchased view package (viewPackageSize, capped in firestore.rules)
+  /// 2026-11-11 (owner): in Delivery a story "view" = a customer tapping the
+  /// card to open the restaurant, counted ONCE per customer per story per
+  /// day - same rule and same story_views doc as the Dineaway viewer
+  /// (StoryView.recordView), with source: deliveryGridTap. Repeat taps the
+  /// same day don't add more. The purchased view package (viewPackageSize, capped in firestore.rules)
   /// still stops the story once used up. Lossy on failure by design - it
   /// must never stop the restaurant from opening.
   Future<void> _recordClick(StoryModel story) async {
@@ -92,22 +92,27 @@ class _DeliveryStoryGridState extends State<DeliveryStoryGrid> {
     final now = DateTime.now();
     final dateKey = '${now.year}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}';
     final db = FirebaseFirestore.instance;
-    final clickRef = db.collection('story_views').doc(); // one doc per click
+    // Same doc id as the Dineaway viewer, so a customer counts once per
+    // story per day whichever way they saw it.
+    final viewRef = db.collection('story_views').doc('${storyID}_${userID}_$dateKey');
     final storyRef = db.collection(STORY).doc(storyID);
     try {
-      // No read needed: 2 writes per click, committed together.
-      final batch = db.batch()
-        ..set(clickRef, {
+      var counted = false;
+      await db.runTransaction((tx) async {
+        final existing = await tx.getLogged(viewRef, 'DeliveryStoryGrid.recordClick:story_views (tx)');
+        if (existing.exists) return; // already counted today
+        tx.set(viewRef, {
           'storyID': storyID,
           'userID': userID,
           'vendorID': story.vendorID,
           'dateKey': dateKey,
           'viewedAt': Timestamp.now(),
           'source': 'deliveryGridTap',
-        })
-        ..update(storyRef, {'viewCount': FieldValue.increment(1)});
-      await batch.commit();
-      debugPrint('[DeliveryStoryGrid] click counted story=$storyID');
+        });
+        tx.update(storyRef, {'viewCount': FieldValue.increment(1)});
+        counted = true;
+      });
+      debugPrint('[DeliveryStoryGrid] story=$storyID ${counted ? 'view counted' : 'already counted today'}');
     } catch (e) {
       // e.g. view package used up (rules reject the +1) or a slow network.
       debugPrint('[DeliveryStoryGrid] click not counted story=$storyID: $e');
