@@ -35,6 +35,7 @@ import 'package:emartconsumer/ui/container/ContainerScreen.dart';
 import 'package:emartconsumer/ui/cuisinesScreen/CuisinesScreen.dart';
 import 'package:emartconsumer/ui/deliveryAddressScreen/DeliveryAddressScreen.dart';
 import 'package:emartconsumer/ui/home/story_view.dart';
+import 'package:emartconsumer/ui/home/delivery_story_grid.dart';
 import 'package:emartconsumer/ui/localOffers/LocalOffersListScreen.dart';
 import 'package:emartconsumer/ui/mapView/MapViewScreen.dart';
 import 'package:emartconsumer/ui/productDetailsScreen/ProductDetailsScreen.dart';
@@ -1446,6 +1447,22 @@ class _HomeScreenState extends State<HomeScreen> {
                             child: titleView("Today's Specials", () {}),
                           ),
                           const SizedBox(height: 10),
+                          // Delivery: Zomato-style photo grid with offers
+                          // (2026-11-11). Dineaway keeps the circles below.
+                          if (selctedOrderTypeValue == "Delivery".tr())
+                            DeliveryStoryGrid(
+                              storyList: storyList,
+                              vendors: vendors,
+                              offerBadges: _offerBadgeByVendorId,
+                              viewedIds: _viewedTodayIds,
+                              onViewRecorded: (id) {
+                                if (!mounted) return;
+                                setState(() { _viewedTodayIds = {..._viewedTodayIds, id}; });
+                                _saveViewedId(id);
+                                _filterStories();
+                              },
+                            )
+                          else
                           StoryView(
                             storyList: storyList,
                             orderType: selctedOrderTypeValue ?? "Delivery".tr(),
