@@ -10,8 +10,12 @@
 // Dineaway keeps the original StoryView circles - this widget is never
 // used there.
 
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:easy_localization/easy_localization.dart';
+import 'package:emartconsumer/constants.dart';
 import 'package:emartconsumer/main.dart';
+import 'package:emartconsumer/services/behavior/behavior_event_types.dart';
+import 'package:firebase_auth/firebase_auth.dart' as auth;
 import 'package:emartconsumer/model/VendorModel.dart';
 import 'package:emartconsumer/model/story_model.dart';
 import 'package:emartconsumer/services/behavior/behavior_tracker.dart';
@@ -65,9 +69,49 @@ class _DeliveryStoryGridState extends State<DeliveryStoryGrid> {
           ? const Color(0xFF3F9142)
           : const Color(0xFFDB7C38);
 
-  void _openRestaurant(VendorModel v) {
+  void _openRestaurant(StoryModel story, VendorModel v) {
+    // ignore: unawaited_futures
+    _recordClick(story); // never blocks opening the restaurant
     BehaviorTracker.setNextEntrySource('Home');
     push(context, NewVendorProductsScreen(vendorModel: v));
+  }
+
+  /// 2026-11-11 (owner): in Delivery a story "view" = a click. EVERY tap on
+  /// the card that opens the restaurant adds +1 to story.viewCount - unlike
+  /// Dineaway (StoryView.recordView), which counts one unique viewer per day.
+  /// Each click is also logged as its own story_views doc (auto id,
+  /// source: deliveryGridTap) so clicks can be counted per customer later.
+  /// The purchased view package (viewPackageSize, capped in firestore.rules)
+  /// still stops the story once used up. Lossy on failure by design - it
+  /// must never stop the restaurant from opening.
+  Future<void> _recordClick(StoryModel story) async {
+    final userID = MyAppState.currentUser?.userID ?? auth.FirebaseAuth.instance.currentUser?.uid;
+    final storyID = story.storyID;
+    if (userID == null || userID.isEmpty || storyID == null || storyID.isEmpty) return;
+    BehaviorTracker.track(kEvtStoryViewed, {'storyId': storyID, 'vendorId': story.vendorID, 'via': 'deliveryGridTap'});
+    final now = DateTime.now();
+    final dateKey = '${now.year}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}';
+    final db = FirebaseFirestore.instance;
+    final clickRef = db.collection('story_views').doc(); // one doc per click
+    final storyRef = db.collection(STORY).doc(storyID);
+    try {
+      // No read needed: 2 writes per click, committed together.
+      final batch = db.batch()
+        ..set(clickRef, {
+          'storyID': storyID,
+          'userID': userID,
+          'vendorID': story.vendorID,
+          'dateKey': dateKey,
+          'viewedAt': Timestamp.now(),
+          'source': 'deliveryGridTap',
+        })
+        ..update(storyRef, {'viewCount': FieldValue.increment(1)});
+      await batch.commit();
+      debugPrint('[DeliveryStoryGrid] click counted story=$storyID');
+    } catch (e) {
+      // e.g. view package used up (rules reject the +1) or a slow network.
+      debugPrint('[DeliveryStoryGrid] click not counted story=$storyID: $e');
+    }
   }
 
   @override
@@ -136,7 +180,7 @@ class _DeliveryStoryGridState extends State<DeliveryStoryGrid> {
 
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTap: () => _openRestaurant(v),
+      onTap: () => _openRestaurant(story, v),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [

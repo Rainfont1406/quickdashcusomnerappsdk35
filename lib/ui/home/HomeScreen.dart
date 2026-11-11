@@ -751,23 +751,37 @@ class _HomeScreenState extends State<HomeScreen> {
     // then. Catch up now that it's actually needed.
     if (selctedOrderTypeValue == "Delivery" && isDeliveryActiveNotifier.value) {
       _startProductsFetchIfNeeded();
-      if (vendorCategoryModel.isEmpty) {
-        fireStoreUtils.getCuisines().then((value) {
-          if (!mounted) return;
-          setState(() {
-            vendorCategoryModel = value;
-            allProductCategoriesList
-              ..clear()
-              ..addAll(value);
-            productCategoryById
-              ..clear()
-              ..addEntries(value
-                  .where((c) => (c.id ?? '').isNotEmpty)
-                  .map((c) => MapEntry(c.id!, c)));
-          });
-        });
-      }
+      _loadCategoriesIfNeeded();
     }
+  }
+
+  // 2026-11-11 (BUG-014): one catch-up path for the "Eat What Makes You
+  // Happy" row. getBanner() runs before getFoodType() has restored the saved
+  // order type, so on a cold start with "Delivery" saved it still sees the
+  // default "Dineaway" and skips getCuisines() - the row then stayed empty for
+  // the whole session. Called after the restore, on a manual switch to
+  // Delivery, and when the delivery gate turns on. No-op unless Delivery is
+  // shown, the list is still empty and no fetch is already running.
+  bool _categoriesLoading = false;
+  void _loadCategoriesIfNeeded() {
+    if (selctedOrderTypeValue != "Delivery") return;
+    if (!isDeliveryActiveNotifier.value) return;
+    if (vendorCategoryModel.isNotEmpty || _categoriesLoading) return;
+    _categoriesLoading = true;
+    fireStoreUtils.getCuisines().then((value) {
+      if (!mounted) return;
+      setState(() {
+        vendorCategoryModel = value;
+        allProductCategoriesList
+          ..clear()
+          ..addAll(value);
+        productCategoryById
+          ..clear()
+          ..addEntries(value
+              .where((c) => (c.id ?? '').isNotEmpty)
+              .map((c) => MapEntry(c.id!, c)));
+      });
+    }).whenComplete(() => _categoriesLoading = false);
   }
 
   List<BannerModel> bannerTopHome = [];
@@ -1421,6 +1435,20 @@ class _HomeScreenState extends State<HomeScreen> {
                           ComingSoonView(message: deliveryOffMessageNotifier.value),
                         ]
                       : [
+                    // 2026-11-11: Delivery shows categories first, above
+                    // Today's Specials (hidden while the list is empty).
+                    if (selctedOrderTypeValue == "Delivery" &&
+                        vendorCategoryModel.isNotEmpty) ...[
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        child: titleView("Eat What Makes You Happy", () {
+                          push(context, const CuisinesScreen(isPageCallFromHomeScreen: true));
+                        }),
+                      ),
+                      const SizedBox(height: 10),
+                      CategoryView(vendorCategoryList: vendorCategoryModel),
+                      const SizedBox(height: 12),
+                    ],
                     storyList.isEmpty || storyEnable == false
                         ? const SizedBox()
                         : storyList.isNotEmpty &&
@@ -1475,16 +1503,6 @@ class _HomeScreenState extends State<HomeScreen> {
                     SizedBox(
                       height: storyList.isEmpty ? 0 : 8,
                     ),
-                    if (selctedOrderTypeValue == "Delivery") ...[
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 16),
-                        child: titleView("Eat What Makes You Happy", () {
-                          push(context, const CuisinesScreen(isPageCallFromHomeScreen: true));
-                        }),
-                      ),
-                      const SizedBox(height: 10),
-                      CategoryView(vendorCategoryList: vendorCategoryModel),
-                    ],
                     const SizedBox(height: 12),
                     bannerTopHome.isEmpty
                         ? const SizedBox()
@@ -1734,24 +1752,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       // have vendorCategoryModel populated yet. Also mirrors
                       // getBanner()'s isDeliveryActiveNotifier check - no
                       // point fetching if this now just shows ComingSoonView.
-                      if (newValue == "Delivery" &&
-                          isDeliveryActiveNotifier.value &&
-                          vendorCategoryModel.isEmpty) {
-                        fireStoreUtils.getCuisines().then((value) {
-                          if (!mounted) return;
-                          setState(() {
-                            vendorCategoryModel = value;
-                            allProductCategoriesList
-                              ..clear()
-                              ..addAll(value);
-                            productCategoryById
-                              ..clear()
-                              ..addEntries(value
-                                  .where((c) => (c.id ?? '').isNotEmpty)
-                                  .map((c) => MapEntry(c.id!, c)));
-                          });
-                        });
-                      }
+                      _loadCategoriesIfNeeded();
                       if (mounted) setState(() {});
                     },
                   ),
@@ -2082,6 +2083,9 @@ class _HomeScreenState extends State<HomeScreen> {
           saveFoodTypeValue();
         }
       });
+      // getBanner() already ran with the in-memory default (Dineaway) and
+      // skipped categories - catch up now that "Delivery" is restored.
+      _loadCategoriesIfNeeded();
     }
   }
 
