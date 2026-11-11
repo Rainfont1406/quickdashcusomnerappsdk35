@@ -1533,6 +1533,9 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                               ],
                                             ),
                                           ),
+                                          // 2026-11-11: no "★ 0 (0)" for an
+                                          // unrated restaurant.
+                                          if (widget.vendorModel.reviewsCount > 0) ...[
                                           const SizedBox(width: 10),
                                           InkWell(
                                             borderRadius:
@@ -1602,9 +1605,10 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                               ),
                                             ),
                                           ),
+                                          ],
                                         ],
                                       ),
-                                    
+
                                       // Location: full card width, up to 2 lines (was 1 line squeezed beside the distance)
                                       const SizedBox(height: 8),
                                       Row(
@@ -5315,6 +5319,8 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                 ],
                               ),
                             ),
+                            // 2026-11-11: hidden for an unrated restaurant.
+                            if (widget.vendorModel.reviewsCount > 0) ...[
                             const SizedBox(width: 12),
                             // Rating badge
                             Container(
@@ -5360,6 +5366,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                 ],
                               ),
                             ),
+                            ],
                           ],
                         ),
                         const SizedBox(height: 16),
