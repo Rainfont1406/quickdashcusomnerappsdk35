@@ -188,7 +188,14 @@ class CartDatabase extends _$CartDatabase {
     }
   }
 
+  /// Bumped every time the whole cart is emptied (order placed, restaurant
+  /// or mode switch, re-order). The Delivery cart only reuses the address
+  /// the customer picked while this number is unchanged, so every new order
+  /// asks for the delivery address again (2026-11-11, owner request).
+  static int cartEpoch = 0;
+
   Future<void> deleteAllProducts() async {
+    cartEpoch++;
     try {
       await (delete(cartProducts)).go();
     } catch (e) {

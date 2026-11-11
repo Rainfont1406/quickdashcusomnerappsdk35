@@ -2153,7 +2153,11 @@ class _CartScreenState extends State<CartScreen> {
                                                         ? "Service Paused".tr()
                                                         : !_canCheckout
                                                             ? "Issues Found".tr()
-                                                            : "Place Order".tr(),
+                                                            // Delivery: no address picked
+                                                            // for this order yet (2026-11-11).
+                                                            : (_isDeliveryType && !_hasDeliveryPin)
+                                                                ? "Select address".tr()
+                                                                : "Place Order".tr(),
                                                     style: AppTypography.labelLarge.copyWith(
                                                       color: Colors.white,
                                                       fontWeight: FontWeight.w700,
@@ -2166,7 +2170,9 @@ class _CartScreenState extends State<CartScreen> {
                                                         ? Icons.pause_circle_outline_rounded
                                                         : !_canCheckout
                                                             ? Icons.warning_amber_rounded
-                                                            : Icons.arrow_forward_rounded,
+                                                            : (_isDeliveryType && !_hasDeliveryPin)
+                                                                ? Icons.location_on_rounded
+                                                                : Icons.arrow_forward_rounded,
                                                     color: Colors.white,
                                                     size: 18,
                                                   ),
@@ -3639,7 +3645,13 @@ class _CartScreenState extends State<CartScreen> {
                                   '(-${amountShow(amount: effectiveSpecialDiscountAmount.toString())})',
                                   labelColor,
                                   AppThemeData.primary500),
-                            if (selctedOrderTypeValue == 'Delivery' &&
+                            // No address picked yet for this order: the fee
+                            // depends on it, so say so instead of hiding it.
+                            if (selctedOrderTypeValue == 'Delivery' && !_hasDeliveryPin)
+                              _billRow('Delivery Charges'.tr(),
+                                  'After you select address'.tr(),
+                                  labelColor, labelColor)
+                            else if (selctedOrderTypeValue == 'Delivery' &&
                                 (double.tryParse(deliveryCharges) ?? 0) > 0)
                               _billRow(
                                   'Delivery Charges'.tr(),
