@@ -696,12 +696,21 @@ class PaymentScreenState extends State<PaymentScreen> {
   // on tap - see _buildDefaultPaymentPage). The old multi-gateway radio-tile
   // list only remains reachable as a fallback for a deployment that has
   // RazorPay OFF but some other gateway (Paytm, PayPal, etc.) on instead.
+  //
+  // 2026-11-12 (staging): Razorpay is hardcoded. The admin isEnabled toggle
+  // is no longer read here; the one-tap page always renders. The legacy
+  // chooser below is unreachable (kept for now, cleanup after release).
   @override
   Widget build(BuildContext context) {
-    if (razorPayData?.isEnabled == true) {
-      return _buildDefaultPaymentPage(context);
-    }
-    return _buildLegacyGatewayScaffold(context);
+    return _buildDefaultPaymentPage(context);
+  }
+
+  // Razorpay key for checkout: the key the payment function returned with
+  // the Razorpay order wins; the cached admin settings are only a fallback.
+  // Never throws on missing settings (the old `razorPayData!` did).
+  String _razorpayKey([String? serverKey]) {
+    if (serverKey != null && serverKey.isNotEmpty) return serverKey;
+    return razorPayData?.razorpayKey ?? '';
   }
 
   Widget _buildLegacyGatewayScaffold(BuildContext context) {
@@ -2395,7 +2404,7 @@ class PaymentScreenState extends State<PaymentScreen> {
     dismissLoadingAndClearProcessing();
     if (!mounted) return;
     if (result.success) {
-      openCheckoutUpi(amount: result.amount, orderId: result.razorpayOrderId!, appOrderId: appOrderId);
+      openCheckoutUpi(amount: result.amount, orderId: result.razorpayOrderId!, appOrderId: appOrderId, serverKey: result.razorpayKey);
     } else {
       draftRef.deleteLogged('_handleUpiSelected:order_drafts').catchError((_) {});
       _handleVerifiedPaymentFailure(result);
@@ -2679,7 +2688,7 @@ class PaymentScreenState extends State<PaymentScreen> {
     dismissLoadingAndClearProcessing();
     if (!mounted) return;
     if (result.success) {
-      openCheckoutCard(amount: result.amount, orderId: result.razorpayOrderId!, appOrderId: appOrderId);
+      openCheckoutCard(amount: result.amount, orderId: result.razorpayOrderId!, appOrderId: appOrderId, serverKey: result.razorpayKey);
     } else {
       draftRef.deleteLogged('_handleCardSelected:order_drafts').catchError((_) {});
       _handleVerifiedPaymentFailure(result);
@@ -2884,9 +2893,9 @@ class PaymentScreenState extends State<PaymentScreen> {
   }
 
   // Opens Razorpay pre-selecting UPI — skips method-selection step
-  void openCheckoutUpi({required double amount, required String orderId, required String appOrderId}) {
+  void openCheckoutUpi({required double amount, required String orderId, required String appOrderId, String? serverKey}) {
     final options = {
-      'key': razorPayData!.razorpayKey,
+      'key': _razorpayKey(serverKey),
       'amount': (amount * 100).toInt(),
       'name': 'Quickdash',
       'order_id': orderId,
@@ -2916,9 +2925,9 @@ class PaymentScreenState extends State<PaymentScreen> {
   }
 
   // Opens Razorpay pre-selecting card — skips method-selection step
-  void openCheckoutCard({required double amount, required String orderId, required String appOrderId}) {
+  void openCheckoutCard({required double amount, required String orderId, required String appOrderId, String? serverKey}) {
     final options = {
-      'key': razorPayData!.razorpayKey,
+      'key': _razorpayKey(serverKey),
       'amount': (amount * 100).toInt(),
       'name': 'Quickdash',
       'order_id': orderId,
@@ -2947,9 +2956,9 @@ class PaymentScreenState extends State<PaymentScreen> {
     }
   }
 
-  void openCheckout({required amount, required orderId, required String appOrderId}) {
+  void openCheckout({required amount, required orderId, required String appOrderId, String? serverKey}) {
     final options = {
-      'key': razorPayData!.razorpayKey,
+      'key': _razorpayKey(serverKey),
       'amount': (amount * 100).toInt(),
       'name': 'Quickdash',
       'order_id': orderId,

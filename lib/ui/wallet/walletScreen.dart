@@ -1361,7 +1361,8 @@ class WalletScreenState extends State<WalletScreen> {
                             }),
                           ),
                         ),
-                        if (razorPayData?.isEnabled ?? false) _pmCardW(
+                        // Razorpay hardcoded (2026-11-12, staging): always shown.
+                        _pmCardW(
                           dark: isDarkMode(context),
                           isSelected: razorPay,
                           logo: Image.asset('assets/images/razorpay_@3x.png', fit: BoxFit.contain),
@@ -1513,7 +1514,7 @@ class WalletScreenState extends State<WalletScreen> {
                                   if (mounted) Navigator.pop(this.context);
                                   ShowToastDialog.showToast("Payment failed. Please try again.");
                                 }
-                              } else if (selectedRadioTile == "RazorPay" && (razorPayData?.isEnabled ?? false)) {
+                              } else if (selectedRadioTile == "RazorPay") {
                                 Navigator.pop(context);
                                 showLoadingAlert();
                                 RazorPayController().createWalletTopupOrder(
@@ -1523,7 +1524,7 @@ class WalletScreenState extends State<WalletScreen> {
                                   // in the closure is deactivated by this point.
                                   if (mounted) Navigator.of(this.context, rootNavigator: true).pop();
                                   if (result.success) {
-                                    openCheckout(amount: result.amount.toInt(), orderId: result.razorpayOrderId!);
+                                    openCheckout(amount: result.amount.toInt(), orderId: result.razorpayOrderId!, serverKey: result.razorpayKey);
                                   } else {
                                     if (mounted) showAlert(this.context,
                                       response: result.errorMessage?.tr() ?? "Something went wrong, please contact admin.".tr(),
@@ -1608,9 +1609,9 @@ class WalletScreenState extends State<WalletScreen> {
   ///
 
   /// RazorPay Payment Gateway
-  void openCheckout({required int amount, required String orderId}) async {
+  void openCheckout({required int amount, required String orderId, String? serverKey}) async {
     var options = {
-      'key': razorPayData!.razorpayKey,
+      'key': (serverKey != null && serverKey.isNotEmpty) ? serverKey : (razorPayData?.razorpayKey ?? ''),
       'amount': amount * 100,
       'name': 'QuickDash',
       'order_id': orderId,

@@ -659,7 +659,7 @@ class _GiftCardPurchaseScreenState extends State<GiftCardPurchaseScreen> {
                       ),
                     ),
                     Visibility(
-                      visible: razorPayData?.isEnabled ?? false,
+                      visible: true, // Razorpay hardcoded (2026-11-12, staging)
                       child: Padding(
                         padding: const EdgeInsets.symmetric(vertical: 3.0, horizontal: 20),
                         child: Card(
@@ -1229,6 +1229,7 @@ class _GiftCardPurchaseScreenState extends State<GiftCardPurchaseScreen> {
                                 openCheckout(
                                   amount: result.amount,
                                   orderId: result.razorpayOrderId!,
+                                  serverKey: result.razorpayKey,
                                 );
                               } else {
                                 showAlert(_scaffoldKey.currentContext!, response: result.errorMessage?.tr() ?? "Something went wrong, please contact admin.".tr(), colors: AppThemeData.primary500);
@@ -1318,9 +1319,9 @@ class _GiftCardPurchaseScreenState extends State<GiftCardPurchaseScreen> {
   Map<String, dynamic>? paymentIntentData;
 
   /// RazorPay Payment Gateway
-  void openCheckout({required amount, required orderId}) async {
+  void openCheckout({required amount, required orderId, String? serverKey}) async {
     var options = {
-      'key': razorPayData!.razorpayKey,
+      'key': (serverKey != null && serverKey.isNotEmpty) ? serverKey : (razorPayData?.razorpayKey ?? ''),
       'amount': (amount * 100).toInt(),
       'name': 'Quickdash',
       'order_id': orderId,
