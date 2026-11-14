@@ -1115,7 +1115,9 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                       (BuildContext context, bool innerBoxIsScrolled) {
                     return <Widget>[
                       SliverAppBar(
-                        expandedHeight: Responsive.height(30, context),
+                        // 2026-11-14 (owner): true 16:9 so the cover shows uncropped, same
+                        // shape as the Home cards.
+                        expandedHeight: MediaQuery.of(context).size.width * 9 / 16, // + status bar added by the app bar itself
                         floating: true,
                         pinned: true,
                         automaticallyImplyLeading: false,
@@ -1238,7 +1240,10 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                           ],
                         ),
                         flexibleSpace: FlexibleSpaceBar(
-                          background: Stack(
+                          background: Padding(
+                          // photo starts below the phone status bar (time/battery) so they never overlap
+                          padding: EdgeInsets.only(top: MediaQuery.of(context).padding.top),
+                          child: Stack(
                             children: [
                               _cardPhotos.isEmpty
                                   ? Stack(
@@ -1249,7 +1254,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                           fit: BoxFit.cover,
                                           width: Responsive.width(100, context),
                                           height:
-                                              Responsive.height(40, context),
+                                              (Responsive.width(100, context) * 9 / 16),
                                           cacheManager: perfDiagnosticCacheManager,
                                           // Hero box is often taller (relative
                                           // to its width) than this 16:9
@@ -1261,7 +1266,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                           // than what's actually rendered.
                                           resizeWidth: math.max(
                                             Responsive.width(100, context),
-                                            Responsive.height(40, context) *
+                                            (Responsive.width(100, context) * 9 / 16) *
                                                 16 /
                                                 9,
                                           ),
@@ -1304,7 +1309,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                         final heroWidth =
                                             Responsive.width(100, context);
                                         final heroHeight =
-                                            Responsive.height(40, context);
+                                            (Responsive.width(100, context) * 9 / 16);
                                         // See the single-photo fallback
                                         // above for why this isn't just
                                         // heroWidth.
@@ -1398,7 +1403,7 @@ class _NewVendorProductsScreenState extends State<NewVendorProductsScreen>
                                 ),
                               ),
                             ],
-                          ),
+                          ),)
                         ),
                       ),
                     ];

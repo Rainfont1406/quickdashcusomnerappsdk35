@@ -1,3 +1,4 @@
+import 'package:emartconsumer/widget/no_photo_panel.dart';
 import 'dart:developer';
 
 import 'package:cached_network_image/cached_network_image.dart';
@@ -1315,7 +1316,9 @@ class _ItemRow extends StatelessWidget {
         children: [
           ClipRRect(
             borderRadius: BorderRadius.circular(8),
-            child: CachedNetworkImage( cacheManager: AppCacheConfig.images,
+            child: !hasDishPhoto(product.photo)
+                ? const NoPhotoPanel(width: 48, height: 48)
+                : CachedNetworkImage( cacheManager: AppCacheConfig.images,
               imageUrl: getImageVAlidUrl(product.photo),
               width: 48,
               height: 48,

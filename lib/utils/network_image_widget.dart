@@ -134,7 +134,7 @@ void precacheVendorHeroImage(BuildContext context, VendorModel vendorModel) {
   if (heroUrl.isEmpty || heroUrl == 'null') return;
 
   final heroWidth = Responsive.width(100, context);
-  final heroHeight = Responsive.height(40, context);
+  final heroHeight = Responsive.width(100, context) * 9 / 16; // must match the header
   final heroResizeWidth = math.max(heroWidth, heroHeight * 16 / 9);
   precacheCarouselImage(
     context,

@@ -1,3 +1,4 @@
+import 'package:emartconsumer/widget/no_photo_panel.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:emartconsumer/constants.dart';
@@ -247,7 +248,9 @@ class _ViewAllPopularFoodNearByScreenState
             children: [
               ClipRRect(
                 borderRadius: BorderRadius.circular(10),
-                child: CachedNetworkImage(
+                child: !hasDishPhoto(product.photo)
+                    ? const NoPhotoPanel(width: 100, height: 100, radius: 10)
+                    : CachedNetworkImage(
                   imageUrl: getImageVAlidUrl(product.photo),
                   height: 100,
                   width: 100,
