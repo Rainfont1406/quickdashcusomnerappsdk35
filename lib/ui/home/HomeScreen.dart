@@ -1,4 +1,5 @@
-﻿import 'dart:math' as math;
+﻿import 'package:emartconsumer/widget/no_photo_panel.dart';
+import 'dart:math' as math;
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -2772,6 +2773,7 @@ class _StoryViewState extends State<StoryView> {
                                   // resize request fell back to 800 px.
                                   resizeWidth: 64,
                                   fit: BoxFit.cover,
+                                  errorWidget: InitialAvatar(name: vendor.title.toString(), size: 64),
                                   cacheManager: perfDiagnosticCacheManager,
                                   onLoaded: () =>
                                       _logImageLoadEnd('storyCircle', url),
@@ -3452,12 +3454,12 @@ class _AllStoreState extends State<AllStore> {
                       Stack(
                         children: [
                           SizedBox(
-                            height: Responsive.height(24, context),
+                            height: _restaurantCardImageHeight(context),
                             width: double.infinity,
                             child: isDelivery
                                 ? _MenuCarousel(
                                     vendorModel: vendorModel,
-                                    height: Responsive.height(24, context),
+                                    height: _restaurantCardImageHeight(context),
                                     borderRadius: const BorderRadius.only(
                                       topLeft: Radius.circular(24),
                                       topRight: Radius.circular(24),
@@ -3466,7 +3468,7 @@ class _AllStoreState extends State<AllStore> {
                                   )
                                 : _RestaurantCardImage(
                                     vendorModel: vendorModel,
-                                    height: Responsive.height(24, context),
+                                    height: _restaurantCardImageHeight(context),
                                     borderRadius: const BorderRadius.only(
                                       topLeft: Radius.circular(24),
                                       topRight: Radius.circular(24),
@@ -3736,12 +3738,12 @@ class NewArrival extends StatelessWidget {
     // ~54px of text lines; the text part grows with the system font size, so
     // a fixed 26%-of-screen height overflowed by 15px at font scale 1.3
     // (Android 15 emulator, 2026-10-11). Never shorter than before.
-    final double rowHeight = math.max(
-      Responsive.height(26, context),
-      Responsive.height(14, context) +
-          40 +
-          MediaQuery.textScalerOf(context).scale(54),
-    );
+    // 2026-11-14 (owner): the uploaded cover is 16:9, so the image box is a
+    // true 16:9 (card width 155) - same crop as the restaurant list and the
+    // restaurant page header, instead of a taller box that cut the sides.
+    final double rowHeight = (155 * 9 / 16) +
+        40 +
+        MediaQuery.textScalerOf(context).scale(54);
     return SizedBox(
       height: rowHeight,
       child: ListView.builder(
@@ -3792,7 +3794,8 @@ class NewArrival extends StatelessWidget {
                     // instead of cutting off the rating/distance row. A
                     // computed text height wasn't reliable: Android 14 scales
                     // fonts non-linearly (2026-10-11, OPPO at font 1.15).
-                    Expanded(
+                    SizedBox(
+                      height: 155 * 9 / 16,
                       child: LayoutBuilder(
                         builder: (context, box) => Stack(
                       children: [
@@ -4117,7 +4120,9 @@ class TopSellingView extends StatelessWidget {
                           ClipRRect(
                             borderRadius: const BorderRadius.vertical(
                                 top: Radius.circular(16)),
-                            child: NetworkImageWidget(
+                            child: !hasDishPhoto(productModel.photo)
+                                ? NoPhotoPanel(height: _imgH)
+                                : NetworkImageWidget(
                               imageUrl: productModel.photo.toString(),
                               fit: BoxFit.cover,
                               width: double.infinity,
@@ -4824,7 +4829,9 @@ class _RecommendForYouViewState
                   ClipRRect(
                     borderRadius: const BorderRadius.vertical(
                         top: Radius.circular(14)),
-                    child: NetworkImageWidget(
+                    child: !hasDishPhoto(productModel.photo)
+                        ? NoPhotoPanel(height: _imgH)
+                        : NetworkImageWidget(
                       imageUrl: productModel.photo.toString(),
                       fit: BoxFit.cover,
                       width: double.infinity,
@@ -5494,3 +5501,8 @@ class _FabDivider extends StatelessWidget {
     );
   }
 }
+
+/// Height of a full-width restaurant card image (page padding 16 each side)
+/// so it is exactly 16:9, matching the uploaded cover (2026-11-14).
+double _restaurantCardImageHeight(BuildContext context) =>
+    (MediaQuery.of(context).size.width - 32) * 9 / 16;

@@ -1,3 +1,4 @@
+import 'package:emartconsumer/widget/no_photo_panel.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -523,7 +524,9 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                       setState(() {});
                     },
                     allowImplicitScrolling: true,
-                    itemBuilder: (context, index) => CachedNetworkImage(
+                    itemBuilder: (context, index) => !hasDishPhoto(productImage[index]?.toString())
+                        ? NoPhotoPanel(name: widget.productModel.name, fontSize: 22)
+                        : CachedNetworkImage(
                           imageUrl: sharedImageUrl(context, getImageVAlidUrl(productImage[index]), MediaQuery.of(context).size.width),
 cacheManager: AppCacheConfig.images,
 maxWidthDiskCache: imagePixelWidth(context, MediaQuery.of(context).size.width),
@@ -2877,8 +2880,9 @@ memCacheWidth: imagePixelWidth(context, 40),
                                                       CrossAxisAlignment.start,
                                                   children: [
                                                     Expanded(
-                                                        child:
-                                                            CachedNetworkImage(
+                                                        child: !hasDishPhoto(productModel.photo)
+                                                            ? const NoPhotoPanel(radius: 20)
+                                                            : CachedNetworkImage(
                                                       imageUrl: sharedImageUrl(context, getImageVAlidUrl(
                                                               productModel
                                                                   .photo), MediaQuery.of(context).size.width * 0.38),
@@ -3134,7 +3138,9 @@ memCacheWidth: imagePixelWidth(context, MediaQuery.of(context).size.width * 0.38
                                                     CrossAxisAlignment.start,
                                                 children: [
                                                   Expanded(
-                                                      child: CachedNetworkImage(
+                                                      child: !hasDishPhoto(productModel.photo)
+                                                          ? const NoPhotoPanel(radius: 20)
+                                                          : CachedNetworkImage(
                                                     imageUrl: sharedImageUrl(context, getImageVAlidUrl(
                                                         productModel.photo), MediaQuery.of(context).size.width * 0.38),
 cacheManager: AppCacheConfig.images,

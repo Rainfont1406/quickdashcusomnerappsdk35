@@ -300,6 +300,8 @@ class _DiscoveryProductCard extends StatelessWidget {
     // Sized up 15% (2026-07-20, was 128 wide/95 image/12px text) to match
     // that same card's later size increase - kept in sync since both
     // screens deliberately duplicate this card design.
+    final photoUrl = (product.photo).trim();
+    final hasPhoto = photoUrl.isNotEmpty && photoUrl != 'null' && photoUrl.startsWith('http');
     return GestureDetector(
       onTap: () => Navigator.of(context).maybePop(),
       child: SizedBox(
@@ -309,29 +311,55 @@ class _DiscoveryProductCard extends StatelessWidget {
           children: [
             ClipRRect(
               borderRadius: BorderRadius.circular(16),
-              child: NetworkImageWidget(
-                imageUrl: getImageVAlidUrl(product.photo),
-                height: 109,
-                width: double.infinity,
-                fit: BoxFit.cover,
-              ),
+              // 2026-11-14 (owner): no photo -> no QuickDash placeholder.
+              // Same treatment as the restaurant menu's recommendation row
+              // (d4459a6): dish name on a soft tint, not repeated below.
+              child: hasPhoto
+                  ? NetworkImageWidget(
+                      imageUrl: getImageVAlidUrl(product.photo),
+                      height: 109,
+                      width: double.infinity,
+                      fit: BoxFit.cover,
+                    )
+                  : Container(
+                      height: 109,
+                      width: double.infinity,
+                      padding: const EdgeInsets.fromLTRB(10, 30, 10, 12),
+                      color: isDark
+                          ? AppThemeData.primary500.withValues(alpha: 0.18)
+                          : AppThemeData.primary500.withValues(alpha: 0.07),
+                      alignment: Alignment.bottomLeft,
+                      child: Text(
+                        product.name,
+                        maxLines: 3,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 15,
+                          height: 1.2,
+                          fontWeight: FontWeight.w700,
+                          color: isDark ? Colors.white : AppThemeData.grey900,
+                        ),
+                      ),
+                    ),
             ),
             Padding(
               padding: const EdgeInsets.fromLTRB(9, 7, 9, 9),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    product.name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
-                      color: isDark ? Colors.white : AppThemeData.grey900,
+                  if (hasPhoto) ...[
+                    Text(
+                      product.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: isDark ? Colors.white : AppThemeData.grey900,
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 4),
+                    const SizedBox(height: 4),
+                  ],
                   disPrice == null
                       ? Text(
                           amountShow(amount: price),

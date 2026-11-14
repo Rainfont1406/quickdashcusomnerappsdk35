@@ -1,3 +1,4 @@
+import 'package:emartconsumer/widget/no_photo_panel.dart';
 import 'dart:async';
 import 'dart:ui' as ui;
 
@@ -847,6 +848,7 @@ class _VendorHeader extends StatelessWidget {
                     imageUrl: vendor.photo.toString(),
                     width: 44, height: 44,
                     fit: BoxFit.cover,
+                    errorWidget: InitialAvatar(name: vendor.title.toString(), size: 44),
                   ),
                 ),
               ),

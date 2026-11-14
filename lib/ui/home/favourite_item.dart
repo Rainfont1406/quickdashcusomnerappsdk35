@@ -1,3 +1,4 @@
+import 'package:emartconsumer/widget/no_photo_panel.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:easy_localization/src/public_ext.dart';
 import 'package:emartconsumer/main.dart';
@@ -156,7 +157,9 @@ class _FavouriteItemScreenState extends State<FavouriteItemScreen> with SingleTi
             children: [
               ClipRRect(
                 borderRadius: BorderRadius.circular(10),
-                child: CachedNetworkImage(
+                child: !hasDishPhoto(productModel.photo)
+                    ? const NoPhotoPanel(width: 100, height: 100, radius: 10)
+                    : CachedNetworkImage(
                   imageUrl: productModel.photo,
                   height: 100,
                   width: 100,
